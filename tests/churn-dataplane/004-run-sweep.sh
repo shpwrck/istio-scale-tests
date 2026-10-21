@@ -39,6 +39,8 @@ source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh" # FANOUT_* defaults + istiod preflight for the preamble
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fortio.sh"
@@ -134,6 +136,7 @@ Environment:
   repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
   001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
   them, and the flags that set them, before the first setup, --dry-run included.
+$(platform_help_lines all)
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
   step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
@@ -244,6 +247,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
 	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
@@ -281,6 +285,9 @@ else
 	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
@@ -368,6 +375,12 @@ if ! ((DRY_RUN)); then
 		esac
 	done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 fi
+# The platform record of every member, read once here; each 002/003 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the sweep TSV's preamble
+# writes it (tests/lib/platform.sh). --dry-run reads nothing and writes no file.
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$SWEEP_DIR"
+platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Construct preamble + header once at the top of the sweep TSV.
 if ! ((DRY_RUN)); then
@@ -415,7 +428,7 @@ if ! ((DRY_RUN)); then
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
-	config_preamble_lines >> "$TSV_FILE"
+	{ config_preamble_lines; platform_preamble_lines "$ALL_CTXS_CSV"; } >> "$TSV_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$TSV_FILE"
 fi
 
@@ -686,6 +699,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete. Planned ${MATRIX_SIZE} combinations." >&2
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$SWEEP_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "Sweep finished: $TSV_FILE"

@@ -1,35 +1,74 @@
 # Per-cluster mesh-wiring gate: the pod is Ready only while this mesh member is
-# fully wired (remote secrets present and ingested by istiod).
+# fully wired (remote secrets present, ingested and synced by istiod, the shared root,
+# an east-west gateway address).
 
 # Not istio-injected: the gate must not depend on the mesh it checks.
 namespace: mesh-wiring-verify
 
-# Mesh size, set by Terraform. With N > 0: at least N remote secrets, istiod
-# manages at least N clusters, and at least N-1 of them are remote.
-# With 0: istiod must manage at least as many clusters as there are remote secrets.
+# The mesh, set by Terraform (platform_gitops.tf) from the mesh members.
+# expectedClusters: every member's name (a list, or one comma-separated string): its Istio
+# cluster ID and the suffix of its remote secret istio-remote-secret-<name>. With names, the gate
+# needs each other member's remote secret and, on every istiod replica, that member synced, and
+# it is NotReady on a remote secret or remote cluster of any other name, naming each: a removed
+# member's secret stays on every member (charts/hub-mesh-push-secrets/README.md), and istiod
+# keeps its cluster and last sync state until the secret is deleted.
+# clusterName: this member's own name among them (the ApplicationSet sets it per member);
+# required with expectedClusters.
+# expectedMembers: their number, 0 or the same count with names. Without names (a manual
+# install) the gate counts: at least N remote secrets, istiod manages at least N clusters, at
+# least N-1 of them remote and synced; with 0, istiod must manage at least as many clusters as
+# there are remote secrets and sync every remote one. A count cannot tell a removed member's
+# secret from a member's.
+expectedClusters: []
+clusterName: ""
 expectedMembers: 0
 
 # Namespace with the Istio remote secrets and istiod.
 istioNamespace: istio-system
 
-# Stage 2: read istiod_managed_clusters from istiod's /metrics.
+# Stage 2: read istiod_managed_clusters, istiod_remote_cluster_sync_status and istio_build
+# from the /metrics of every Ready istiod replica (the Service's EndpointSlices), all at
+# once; each replica must pass. curlTimeoutSeconds bounds each request of the check (API
+# server and istiod); the whole check stops at probe.timeoutSeconds - 2.
 istiodCheck:
   enabled: true
-  host: istiod.istio-system.svc
+  # The istiod Service in istioNamespace (istiod-<revision> for a named revision). It
+  # replaced host, which reached one replica per request; setting host fails the render.
+  service: istiod
+  # istiod's metrics port on each pod (the Service's http-monitoring port has the same number).
   port: 15014
   curlTimeoutSeconds: 5
+  # Every other member (by name with expectedClusters, else N-1, or every managed one with
+  # expectedMembers 0) must be synced on every replica. closed counts as synced only when the
+  # replica's istio_build tag reads 1.30 or a later 1.x: before 1.30 it can be a stopped
+  # connection that nothing replaced. On OpenShift that needs OSSM's istiod to report its Istio
+  # version as the tag (1.30.x on OSSM 3.4), which is unverified: any other tag (a build name, or
+  # OSSM's own 3.x version) fails closed (closed reads NotReady, advising an istiod restart),
+  # never open.
+  # false only for an istiod without istiod_remote_cluster_sync_status (before 1.29).
+  requireRemoteSync: true
 
+# Stage 4: the east-west gateway Service (in istioNamespace) must have an address when it
+# is a LoadBalancer. Disable it only for a member without an east-west gateway.
+eastWestCheck:
+  enabled: true
+  service: istio-eastwestgateway
+
+# The check needs only a POSIX shell and curl. Same curl image as the gateways'
+# wait-for-istiod Jobs and charts/spoke-ossm waitForCacerts.
 image:
-  # The cluster's "cli" imagestream (oc, bash, curl). Needs the internal image
-  # registry (managementState: Managed). Without it, use
-  # registry.redhat.io/openshift4/ose-cli-rhel9 with the cluster's OpenShift minor (e.g. v4.21).
-  repository: image-registry.openshift-image-registry.svc:5000/openshift/cli
-  tag: "latest"
+  repository: docker.io/curlimages/curl
+  tag: "8.22.0"
   pullPolicy: IfNotPresent
+
+# The image's user (curl_user) is not numeric, so runAsNonRoot needs the UID.
+# values-openshift.yaml clears it: OpenShift assigns one from the namespace range.
+runAsUser: 100
 
 serviceAccountName: mesh-wiring-verify
 
-# failureThreshold > 1 rides out a single API or istiod blip.
+# failureThreshold > 1 rides out a single API or istiod blip. The check gives itself
+# timeoutSeconds - 2 (at least 1s) for all its requests.
 probe:
   initialDelaySeconds: 15
   periodSeconds: 30
@@ -37,8 +76,7 @@ probe:
   failureThreshold: 2
   successThreshold: 1
 
-# oc is a large binary; its pages count against the memory limit. Below ~256Mi
-# every probe re-reads it from disk and the check overruns the probe timeout.
+# Each probe keeps only the istiod metric lines it reads, per replica, in the work emptyDir.
 resources:
   requests:
     cpu: 10m

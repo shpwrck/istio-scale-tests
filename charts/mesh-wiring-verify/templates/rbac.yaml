@@ -1,6 +1,7 @@
 # The verifier counts remote secrets (metadata only), reads the public root
-# certificate from cacerts, and reads the istio-ca-root-cert ConfigMap.
-# Scoped to istio-system (Role, not ClusterRole).
+# certificate from cacerts, the istio-ca-root-cert ConfigMap, the east-west
+# gateway Service and the istiod Service's EndpointSlices (to reach every
+# replica). Scoped to istio-system (Role, not ClusterRole).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -16,6 +17,17 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["istio-ca-root-cert"]
     verbs: ["get"]
+  {{- if .Values.eastWestCheck.enabled }}
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: [{{ .Values.eastWestCheck.service | quote }}]
+    verbs: ["get"]
+  {{- end }}
+  {{- if .Values.istiodCheck.enabled }}
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

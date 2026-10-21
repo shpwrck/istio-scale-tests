@@ -1,4 +1,5 @@
-{{- if .Values.placementRbac.create }}
+{{- /* Only the clusterDecisionResource generator reads PlacementDecisions. */}}
+{{- if and .Values.placementRbac.create (eq (include "gitops-hub-ocm-placement-appset.generator" .) "clusterDecisionResource") }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

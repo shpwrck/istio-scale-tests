@@ -47,12 +47,14 @@ row() {
 	printf 'r1\t%s\t%s\t%s\t%s\t%s\t8\t30\t2.0\t2.5\t5.0\t11.0\t12.5\t%s\t%s\t%s\t%s\n' "$@"
 }
 
-# tsv <file> <preamble lines...>; rows come on stdin.
+# tsv <file> <preamble lines...>; rows come on stdin. NO_PLATFORM=1: a legacy file, without
+# the platform record every writer adds now.
 tsv() {
 	local f="$1" l
 	shift
 	{
 		for l in "$@"; do echo "# $l"; done
+		[[ -n "${NO_PLATFORM:-}" ]] || platform_fixture_lines
 		echo "$HDR"
 		cat
 	} > "$f"
@@ -78,7 +80,7 @@ tsv() {
 	$(row 2 ctx-a ctx-a 1000 686.2 QPS_SHORTFALL 1 0 local)
 	$(row 2 ctx-a ctx-b 1000 999.8 OK 1 0 remote)
 	EOF
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -r '.local_baseline.verdict' <<<"$output")" = dropped ]
 	[ "$(jq -r '.local_baseline.cells[0].reason' <<<"$output")" = saturated ]
@@ -106,7 +108,7 @@ tsv() {
 	run "$REPORT" --results-dir "$RES" --format md
 	assert_output --partial "## Local baseline"
 	assert_output --partial "- Local baseline: OK at every QPS level (4 cells, top qps_target=1000"
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.local_baseline.verdict' <<<"$output")" = ok ]
 	[ "$(jq -r '.local_baseline.cells | length' <<<"$output")" = 4 ]
 	[ "$(jq -r '.local_baseline.cells[3].server_replicas' <<<"$output")" = 2/2 ]
@@ -125,7 +127,7 @@ tsv() {
 	assert_success
 	assert_output --partial "Local baseline: MISSING mesh_size=2 reason=setup_failed (no local rows)"
 	assert_output --partial "Placeholder rows (no table cell): mesh_size=2 SETUP_FAILED=1"
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.local_baseline.verdict' <<<"$output")" = missing ]
 	[ "$(jq -r '.local_baseline.cells[0].reason' <<<"$output")" = setup_failed ]
 	[ "$(jq -r '.local_baseline.cells[0].qps_target' <<<"$output")" = null ]
@@ -171,7 +173,7 @@ tsv() {
 	assert_line "# PLACEHOLDER=3:PROBE_FAILED:1"
 	assert_line "# ROWS n_total=5 n_valid=2 n_dropped=3 n_skipped_unreachable=0 n_placeholder=3"
 	refute_output --partial ",na,"
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '.summary.placeholders' <<<"$output")" = '[{"mesh_size":2,"status":"PROBE_FAILED","n_rows":1},{"mesh_size":3,"status":"SETUP_FAILED","n_rows":1},{"mesh_size":3,"status":"PROBE_FAILED","n_rows":1}]' ]
 	# The cells plus the placeholders add up to the summary total.
 	[ "$(jq '([.results[].n_total] | add) + .summary.n_placeholder == .summary.n_total' <<<"$output")" = true ]
@@ -182,7 +184,7 @@ tsv() {
 	rm "${RES}/latency-zzfail-ms2.tsv"
 	run "$REPORT" --results-dir "$RES"
 	refute_output --partial "Placeholder rows"
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '.summary | [.n_placeholder, .placeholders]' <<<"$output")" = '[0,[]]' ]
 	run "$REPORT" --results-dir "$RES" --format csv
 	refute_output --partial "# PLACEHOLDER="
@@ -216,7 +218,7 @@ tsv() {
 	assert_output --partial "Local baseline: DROPPED mesh_size=3 qps_target=1000 n_valid=0/1 reason=saturated qps_actual=800 (80.0% of target) server_replicas=2/2 remote=1/1 remote_unreachable=1 statuses=QPS_SHORTFALL=1"
 	refute_output --partial "remote=1/2"
 	assert_output --partial "remote_unreachable=N rows were skipped by the reach check"
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.local_baseline.cells[0] | "\(.remote_n_valid)/\(.remote_n_total) \(.remote_unreachable)"' <<<"$output")" = "1/1 1" ]
 	run "$REPORT" --results-dir "$RES" --format md
 	assert_output --partial "remote=1/1 remote_unreachable=1"
@@ -233,7 +235,7 @@ tsv() {
 	EOF
 	run "$REPORT" --results-dir "$RES"
 	refute_output --partial "remote_unreachable"
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.local_baseline.cells[0].remote_unreachable' <<<"$output")" = 0 ]
 }
 
@@ -320,7 +322,7 @@ tsv() {
 	assert_output --partial "Local baseline: UNCHECKED mesh_size=2 qps_target=1000 n_valid=1/1 reason=saturated_unflagged qps_actual=686.2 (68.6% of target) server_replicas=unknown remote=1/1 statuses=OK=1 ok_below_ratio=1"
 	assert_output --partial "Note: reason=saturated_unflagged"
 	refute_output --partial "qps_target=10 "
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.local_baseline.verdict' <<<"$output")" = unchecked ]
 	[ "$(jq -r '.local_baseline.files_without_min_qps_ratio' <<<"$output")" = 1 ]
 	[ "$(jq -r '.local_baseline.cells[1].reason' <<<"$output")" = saturated_unflagged ]
@@ -384,9 +386,59 @@ tsv() {
 	run "$REPORT" --results-dir "$RES" --format csv
 	assert_line "mesh_size,qps_target,target_class,n_total,n_valid,avg_p50_ms,avg_p90_ms,avg_p99_ms,avg_p999_ms,avg_max_ms,avg_actual_qps,avg_pct_200,avg_http_200_ratio"
 	assert_line "1,10,local,1,1,2.00,2.50,5.00,11.00,12.50,10.0,1.0000,1.0000"
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq '.results[0] | .avg_pct_200 == 1 and .avg_http_200_ratio == 1' <<<"$output")" = true ]
 	[ "$(jq '.results[1].avg_http_200_ratio' <<<"$output")" = 0.995 ]
+}
+
+@test "004: the platform record reaches every format; a member the inputs disagree on is mixed, with a warning (PL19, PL26)" {
+	tsv "${RES}/latency-a.tsv" "RUN_ID=r1" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/ctx-b=kind/ctx-b=aws/')
+	NO_PLATFORM=1 tsv "${RES}/latency-b.tsv" "RUN_ID=r2" "${plat[@]}" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	# Two runs in one dir: pooled on purpose.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run
+	assert_success
+	assert_line "# PLATFORM=kubernetes"
+	assert_line "# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=mixed:kind;aws"
+	[[ "$stderr" == *"input TSVs disagree on NODE_PROVIDER_BY_CONTEXT for ctx-b (kind;aws)"* ]]
+	for fmt in md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
+		assert_line 'MESH_OPERATOR_BY_CONTEXT: "ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"'
+		assert_line 'NODE_PROVIDER_BY_CONTEXT: "ctx-a=kind,ctx-b=mixed:kind;aws"'
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format csv
+	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format json
+	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.TEST_PLATFORM) \(.NODE_PROVIDER_BY_CONTEXT)"' <<<"$output")" = "kubernetes auto ctx-a=kind,ctx-b=mixed:kind;aws" ]
+}
+
+@test "004: inputs from before the platform record read unknown with one warning; beside a current one, mixed" {
+	NO_PLATFORM=1 tsv "${RES}/latency-old.tsv" "RUN_ID=r0" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_success
+	assert_line "# PLATFORM=unknown"
+	assert_line "# PROXY_IMAGE_BY_CONTEXT=unknown"
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	tsv "${RES}/latency-new.tsv" "RUN_ID=r1" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	# Two runs in one dir: pooled on purpose.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format csv
+	assert_line "# PLATFORM=mixed:kubernetes,unknown"
+	assert_line "# PLATFORM_BY_CONTEXT=mixed:unknown,ctx-a=kubernetes,ctx-b=kubernetes"
+	[[ "$stderr" == *"1 of 2 input TSV(s) have no PLATFORM line"* ]]
+	# The legacy warning says why (in the body too, H10); a value never recorded is no
+	# disagreement and no failed read.
+	assert_line "# WARNING: 1 of 2 input TSV(s) have no PLATFORM line: they predate the platform record (the suites supported only OpenShift with OSSM then); their platform and builds read unknown"
+	[[ "$stderr" != *"disagree"* ]]
+	[[ "$stderr" != *"could not be read"* ]]
 }
 
 # --- 002: row status through the real probe, against a stub kubectl ---
@@ -405,8 +457,14 @@ tsv() {
 	grep -qxF '| ctx-b | remote | 10 | N/A | N/A | N/A | N/A | N/A | N/A | N/A | FAILED |' "$md"
 	grep -qxF '| Min HTTP 200 share | 99.00% (DATAPLANE_MIN_PCT_200=0.99) |' "$md"
 	grep -qF '| Max (ms) | HTTP 200 (%) | Status |' "$md"
+	# The stub answers no platform read: the record says unknown, never a guess (PL39).
+	grep -qx '# PLATFORM=unknown' "$f"
+	grep -qx '# PLATFORM_BY_CONTEXT=ctx-a=unknown,ctx-b=unknown' "$f"
+	grep -qx '# MESH_OPERATOR_BY_CONTEXT=ctx-a=unknown,ctx-b=unknown' "$f"
+	grep -q '^| Platform | unknown (TEST_PLATFORM auto); nodes unknown; operator unknown; ' "$md"
+	assert_output --partial "warning: ctx-a: could not read the platform (so the mesh operator build is not read either); recorded as unknown"
 	# The report leaves the FAILED row out of every average.
-	run "$REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '[.results[] | select(.target_class == "remote") | .n_valid, .avg_max_ms, .avg_actual_qps]' <<<"$output")" = '[0,null,null]' ]
 }
 
@@ -546,4 +604,112 @@ _probe() {
 		grep -q "echo \"# ${k}=" "$PROBE"
 		grep -q "echo \"# ${k}=" "$SWEEP"
 	done
+}
+
+# --- 004: the platform record's warnings in the report's body (H10, H11, H2) ---
+
+@test "004 (H10, H11, H2): inputs that disagree, a build that changed during the sweep and kind nodes warn in every format's body" {
+	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+	RES="${BATS_TEST_TMPDIR}/sweep-h10"
+	mkdir -p "$RES"
+	tsv "${RES}/latency-a.tsv" "RUN_ID=r1" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
+	EOF
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/pilot:1.30.5/pilot:1.30.6/g')
+	NO_PLATFORM=1 tsv "${RES}/latency-b.tsv" "RUN_ID=r2" "${plat[@]}" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	# The sweep's drift check (platform_drift_check) found ctx-b's gateways on another build.
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# PROXY_IMAGE_BY_CONTEXT=ctx-b=proxyv2:1.30.6' > "${RES}/platform-drift.txt"
+	local dis="input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for ctx-a (pilot:1.30.5;pilot:1.30.6), ctx-b (pilot:1.30.5;pilot:1.30.6): the report mixes runs on different istiod builds; compare like with like"
+	local drift="PROXY_IMAGE_BY_CONTEXT changed during the sweep (platform-drift.txt in sweep-h10): ctx-b from proxyv2:1.30.5 to proxyv2:1.30.6; the TSVs record the value at the sweep's start"
+	local kind="Nodes on kind (NODE_PROVIDER_BY_CONTEXT): the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so remote latency and the remote-minus-local delta are not a cloud load balancer's"
+	local fmt top first
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		assert_output --partial "> **Warning:** ${dis}"
+		assert_output --partial "> **Warning:** ${drift}"
+		assert_output --partial "> **Warning:** ${kind}"
+		assert_line 'PROXY_IMAGE_BY_CONTEXT: "ctx-a=proxyv2:1.30.5,ctx-b=mixed:proxyv2:1.30.5;proxyv2:1.30.6"'
+		# Near the top: under the title, before the first section or chart.
+		top="$(grep -n '^> \*\*Warning:\*\* input TSVs disagree' <<<"$output" | cut -d: -f1)"
+		first="$(grep -n '^## \|^```mermaid' <<<"$output" | head -1 | cut -d: -f1)"
+		((top < first)) || { echo "${fmt}: warning at ${top}, first section at ${first}"; false; }
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_line "WARNING: ${dis}"
+	assert_output --partial "WARNING: ${drift}"
+	assert_output --partial "WARNING: ${kind}"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# WARNING: ${dis}"
+	assert_output --partial "# WARNING: ${drift}"
+	assert_output --partial "# WARNING: ${kind}"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq '.warnings | length' <<<"$output")" = 3 ]
+	[ "$(jq -r '.warnings[0]' <<<"$output")" = "$dis" ]
+	[[ "$(jq -r '.warnings[1]' <<<"$output")" == "${drift}"* ]]
+	[[ "$(jq -r '.warnings[2]' <<<"$output")" == "${kind}"* ]]
+	# stderr: each merge warning once (named members), and the kind one.
+	[ "$(grep -c 'disagree on ISTIOD_IMAGE_BY_CONTEXT' <<<"$stderr")" -eq 1 ]
+	[[ "$stderr" == *"WARNING: ${kind}"* ]]
+}
+
+@test "004 (H10, H11): cloud nodes and inputs that agree, an operator state aside, warn in no format" {
+	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+	RES="${BATS_TEST_TMPDIR}/sweep-h10"
+	mkdir -p "$RES"
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/=kind/=aws/g')
+	NO_PLATFORM=1 tsv "${RES}/latency-a.tsv" "RUN_ID=r1" "${plat[@]}" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
+	EOF
+	# The operator only became Unavailable: the same build, not mixed.
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/=kind/=aws/g; s#/Available#/Unavailable#g')
+	NO_PLATFORM=1 tsv "${RES}/latency-b.tsv" "RUN_ID=r2" "${plat[@]}" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	EOF
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -c '.warnings' <<<"$output")" = '[]' ]
+	[[ "$(jq -r '.metadata.MESH_OPERATOR_BY_CONTEXT' <<<"$output")" != *mixed* ]]
+	[ -z "$stderr" ] || { echo "$stderr"; false; }
+	local fmt
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		refute_output --partial "**Warning:**"
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	refute_output --partial "WARNING:"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	refute_output --partial "# WARNING:"
+}
+
+@test "004 (H5): a member whose node provider was not read gets the cross-cluster path warning too" {
+	local -a plat=()
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/ctx-a=kind/ctx-a=aws/; s/ctx-b=kind/ctx-b=unknown/')
+	NO_PLATFORM=1 tsv "${RES}/latency-a.tsv" "RUN_ID=r1" "${plat[@]}" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
+	EOF
+	local w="Node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown): if their nodes are kind's, the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so remote latency and the remote-minus-local delta are not a cloud load balancer's"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[[ "$(jq -r '.warnings[0]' <<<"$output")" == "${w}"* ]]
+	[[ "$stderr" == *"WARNING: ${w}"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
+	assert_output --partial "> **Warning:** ${w}"
+	refute_output --partial "Nodes on kind"
+}
+
+@test "004 (S-B2): a record of 500 members goes through every format; json lists them all" {
+	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500 ctx-a ctx-b)" tsv "${RES}/latency-a.tsv" "RUN_ID=r1" <<-EOF
+	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
+	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
+	EOF
+	wide_record_report "$REPORT" "$RES" text csv json markdown charts
 }

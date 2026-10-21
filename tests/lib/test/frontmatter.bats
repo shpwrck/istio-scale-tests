@@ -3,8 +3,8 @@
 # each report's real entrypoint (PL33) the markdown and charts frontmatter of churn 004,
 # churn-dataplane 005, controlplane 004, dataplane 004 and propagation 005, and tuning
 # 004's markdown, with a value that holds a double quote and a backslash, parsed by
-# python3 + PyYAML. gateway-api 001's summary is checked in gateway-api.bats (it runs on
-# that file's stubs).
+# python3 + PyYAML, each key once. gateway-api 001's summary is checked in gateway-api.bats
+# (it runs on that file's stubs).
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -19,15 +19,25 @@ need_yaml() {
 }
 
 # fm <file>: the file's frontmatter (between its first two --- lines) as JSON, parsed by
-# PyYAML; fails when the file has none or it does not parse.
+# PyYAML; fails when the file has none, it does not parse or a key appears twice (PyYAML
+# would keep the last one, and a stricter reader refuses the file).
 fm() {
 	python3 -I -c '
 import json, sys, yaml
+class Loader(yaml.SafeLoader):
+    pass
+def mapping(loader, node):
+    keys = [loader.construct_object(k) for k, _ in node.value]
+    dup = sorted({str(k) for k in keys if keys.count(k) > 1})
+    if dup:
+        sys.exit("the frontmatter repeats key(s): " + ", ".join(dup))
+    return loader.construct_mapping(node, deep=True)
+Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
 lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
 if lines[0] != "---":
     sys.exit("no frontmatter")
 end = lines.index("---", 1)
-print(json.dumps(yaml.safe_load("\n".join(lines[1:end])), default=str))
+print(json.dumps(yaml.load("\n".join(lines[1:end]), Loader=Loader), default=str))
 ' "$1"
 }
 

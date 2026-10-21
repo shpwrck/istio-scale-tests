@@ -11,6 +11,7 @@ source "${ROOT}/tests/lib/capacity.sh"
 	run cap_parse_node_totals <<'JSON'
 {"items":[
   {"metadata":{"name":"cp-0","labels":{"node-role.kubernetes.io/control-plane":""}},
+   "spec":{"taints":[{"key":"node-role.kubernetes.io/control-plane","effect":"NoSchedule"}]},
    "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}},
   {"metadata":{"name":"w-0","labels":{}},
    "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}},
@@ -41,6 +42,7 @@ JSON
 	run cap_parse_node_totals <<'JSON'
 {"items":[
   {"metadata":{"name":"m-0","labels":{"node-role.kubernetes.io/master":""}},
+   "spec":{"taints":[{"key":"node-role.kubernetes.io/master","effect":"NoSchedule"}]},
    "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}},
   {"metadata":{"name":"i-0","labels":{"node-role.kubernetes.io/infra":""}},
    "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}},
@@ -70,6 +72,7 @@ JSON
 	run cap_parse_node_totals <<'JSON'
 {"items":[
   {"metadata":{"name":"cp-0","labels":{"node-role.kubernetes.io/control-plane":""}},
+   "spec":{"taints":[{"key":"node-role.kubernetes.io/control-plane","effect":"NoSchedule"}]},
    "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}}
 ]}
 JSON
@@ -77,8 +80,48 @@ JSON
 	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=" ]]
 }
 
-@test "cap_parse_node_totals: unparseable input -> unknown" {
+@test "cap_parse_node_totals: an untainted control-plane node counts (single-node kind, kubeadm, k3s)" {
+	# kind's one node: control-plane label, no taint (it runs every pod).
+	run cap_parse_node_totals <<'JSON'
+{"items":[
+  {"metadata":{"name":"kind-0","labels":{"node-role.kubernetes.io/control-plane":""}},
+   "spec":{"providerID":"kind://docker/x/kind-0"},
+   "status":{"allocatable":{"cpu":"4","memory":"16Gi","pods":"110"}}}
+]}
+JSON
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=4000 mem_mi=16384 pods=110 nodes=1 names=kind-0" ]]
+}
+
+@test "cap_parse_node_totals: taint effects decide a control-plane or master node; infra never counts" {
+	# NoSchedule and NoExecute keep ordinary pods off, PreferNoSchedule does not; an
+	# untainted infra node stays out, with or without a control-plane label.
+	run cap_parse_node_totals <<'JSON'
+{"items":[
+  {"metadata":{"name":"cp-ns","labels":{"node-role.kubernetes.io/control-plane":""}},
+   "spec":{"taints":[{"key":"dedicated","value":"x","effect":"NoSchedule"}]},
+   "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}},
+  {"metadata":{"name":"m-ne","labels":{"node-role.kubernetes.io/master":""}},
+   "spec":{"taints":[{"key":"node.kubernetes.io/not-ready","effect":"NoExecute"}]},
+   "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}},
+  {"metadata":{"name":"cp-pref","labels":{"node-role.kubernetes.io/control-plane":""}},
+   "spec":{"taints":[{"key":"node-role.kubernetes.io/control-plane","effect":"PreferNoSchedule"}]},
+   "status":{"allocatable":{"cpu":"2","memory":"4Gi","pods":"110"}}},
+  {"metadata":{"name":"m-0","labels":{"node-role.kubernetes.io/master":""}},
+   "status":{"allocatable":{"cpu":"1","memory":"2Gi","pods":"110"}}},
+  {"metadata":{"name":"cp-inf","labels":{"node-role.kubernetes.io/control-plane":"","node-role.kubernetes.io/infra":""}},
+   "status":{"allocatable":{"cpu":"8","memory":"16Gi","pods":"250"}}}
+]}
+JSON
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=3000 mem_mi=6144 pods=220 nodes=2 names=cp-pref,m-0" ]]
+}
+
+@test "cap_parse_node_totals: unparseable or empty input -> unknown" {
 	run cap_parse_node_totals <<<'not json'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=" ]]
+	run cap_parse_node_totals < /dev/null
 	[ "$status" -eq 0 ]
 	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=" ]]
 }
@@ -149,6 +192,9 @@ JSON
 
 @test "cap_parse_istiod_limits: empty/unparseable -> unknown" {
 	run cap_parse_istiod_limits <<<'not json'
+	[ "$status" -eq 0 ]
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown replicas=unknown" ]]
+	run cap_parse_istiod_limits < /dev/null
 	[ "$status" -eq 0 ]
 	[[ "$output" == "cpu_m=unknown mem_mi=unknown replicas=unknown" ]]
 }
@@ -266,10 +312,11 @@ JSON
 	grep -q -- '--field-selector=status.phase!=Succeeded,status.phase!=Failed' "${BATS_TEST_TMPDIR}/args"
 	grep -q -- '--chunk-size=' "${BATS_TEST_TMPDIR}/args"
 	# A failed read is unknown and exit 0: `arr=($(cap_requested ...))` must not end a
-	# `set -e -o pipefail` caller (nor may the other wrappers).
-	run bash -c 'set -euo pipefail; source "$1"; a=($(cap_requested c w-0 "" false)); b=($(cap_node_totals c false)); c=($(cap_istiod_limits c false)); echo "${a[*]} | survived"' _ "${ROOT}/tests/lib/capacity.sh"
+	# `set -e -o pipefail` caller (nor may the other wrappers), and each prints its parser's
+	# all-unknown line.
+	run bash -c 'set -euo pipefail; source "$1"; a=($(cap_requested c w-0 "" false)); b=($(cap_node_totals c false)); c=($(cap_istiod_limits c false)); echo "${a[*]} | ${b[*]} | ${c[*]} | survived"' _ "${ROOT}/tests/lib/capacity.sh"
 	[ "$status" -eq 0 ]
-	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown | survived" ]]
+	[[ "$output" == "cpu_m=unknown mem_mi=unknown pods=unknown | cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names= | cpu_m=unknown mem_mi=unknown replicas=unknown | survived" ]]
 }
 
 # ---------------------------------------------------------------------------

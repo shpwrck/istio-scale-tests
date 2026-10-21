@@ -1,5 +1,6 @@
 {{- if include "gitops-hub-apps.enabled" (dict "root" $ "name" "spoke-ossm-operator-appset") }}
-# ApplicationSet: OSSM 3 (Sail) operator on each mesh member.
+# ApplicationSet: the Sail operator on each mesh member (OSSM 3 via OLM on openshift, the
+# upstream Helm chart on kubernetes).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -22,7 +23,9 @@ spec:
       releaseName: gitops-spoke-ossm-operator-appset
       {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "spoke-ossm-operator-appset") }}{{ . | nindent 6 }}{{- end }}
       valueFiles:
-        - values-ossm-operator.yaml
+        {{- /* OSSM 3 (OLM) on openshift, the upstream Sail operator chart on kubernetes. */}}
+        - {{ ternary "values-ossm-operator.yaml" "values-sail-operator.yaml" (eq (include "gitops-hub-apps.platform" .) "openshift") }}
+        - platform-{{ include "gitops-hub-apps.platform" . }}.yaml
       parameters:
         - name: repo.url
           value: {{ include "gitops-hub-apps.repoURL" . }}
@@ -32,7 +35,7 @@ spec:
           value: acm-openshift-gitops-placement
   destination:
     server: https://kubernetes.default.svc
-    namespace: openshift-gitops
+    namespace: {{ .Values.gitopsNamespace | quote }}
   syncPolicy:
     {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
 {{- end }}

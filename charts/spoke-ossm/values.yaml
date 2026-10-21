@@ -3,8 +3,20 @@ clusterName: ""
 meshID: mesh1
 networkSuffix: network
 # Keep in sync with ISTIO_VERSION in config/versions.env. Must be in the installed
-# operator's Istio version enum (OSSM stable-3.4 serves v1.30.x).
+# operator's Istio version enum (Sail operator 1.31.1, pinned in
+# charts/gitops-hub-ocm-placement-appset/values-sail-operator.yaml, and OSSM stable-3.4
+# serve v1.30.5).
 istioVersion: v1.30.5
+
+# Sail profile of the Istio and IstioCNI CRs. values-openshift.yaml sets openshift.
+profile: default
+
+# The IstioCNI CR's spec.values, as is (Sail's CNIValues: cni.*, global.platform). The
+# default profile writes the CNI plugin to /opt/cni/bin and its config to /etc/cni/net.d;
+# a distribution that keeps them elsewhere needs its platform, e.g. on k3s:
+#   istioCni: {values: {global: {platform: k3s}}}
+istioCni:
+  values: {}
 
 # istiod sized for the 20-cluster / 10k-service campaign: fixed replicas (no HPA) and
 # Guaranteed QoS. Every replica caches the whole mesh, so extra replicas do not cut memory.
@@ -49,8 +61,8 @@ tuningBaseline:
       - matchLabels:
           kubernetes.io/metadata.name: istio-system
 
-  # A mesh-wide Sidecar in istio-system limits each proxy's egress.
-  # The gateways get their own full-egress Sidecars (templates/tuning-sidecar.yaml).
+  # A mesh-wide Sidecar in istio-system limits each sidecar proxy's egress. The gateways
+  # (router proxies) take no Sidecar and keep full egress (templates/tuning-sidecar.yaml).
   sidecar:
     enabled: true
     # Namespace parts are exact matches, not globs. Every mesh namespace needs its own
@@ -73,11 +85,16 @@ tuningBaseline:
   accessLogFiltering:
     enabled: true
 
-# PreSync Job that holds the Istio CR until cacerts is pushed from the hub.
+# PreSync Job that holds the Istio CR until cacerts is pushed from the hub. It reads
+# only the Secret's metadata, with curl and the Job's ServiceAccount token.
 waitForCacerts:
   enabled: true
   timeoutSeconds: 1200
-  image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.21
+  # Same curl image as the gateways' wait-for-istiod Jobs and mesh-wiring-verify.
+  image: docker.io/curlimages/curl:8.22.0
+  # The image's user (curl_user) is not numeric, so runAsNonRoot needs the UID.
+  # values-openshift.yaml clears it: OpenShift assigns one from the namespace range.
+  runAsUser: 100
 
 argoSyncWaves:
   enabled: true

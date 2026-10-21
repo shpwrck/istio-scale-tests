@@ -1,5 +1,6 @@
 # --------------------------------------------------------------------------
-# ACM spoke registration — ManagedCluster + auto-import-secret
+# ACM spoke registration — ManagedCluster + auto-import-secret (platform openshift;
+# on kubernetes the spokes are only Argo CD cluster Secrets, platform_gitops.tf)
 #
 # Uses the RHACM auto-import-secret approach instead of the manual
 # import.yaml extraction from the bash scripts. The ACM import controller
@@ -33,7 +34,7 @@ data "external" "spoke_token" {
 
 # --- Kubeconfig mode: extract minified kubeconfig per spoke ---
 data "external" "spoke_kubeconfig" {
-  for_each = local.use_kubeconfig ? local.spoke_cluster_keys : {}
+  for_each = local.use_kubeconfig && local.is_openshift ? local.spoke_cluster_keys : {}
 
   program = [
     "bash", "-c",
@@ -45,7 +46,7 @@ data "external" "spoke_kubeconfig" {
 }
 
 resource "kubernetes_manifest" "spoke_namespace" {
-  for_each = local.spoke_cluster_keys
+  for_each = local.is_openshift ? local.spoke_cluster_keys : {}
   provider = kubernetes.hub
 
   manifest = {
@@ -67,7 +68,7 @@ resource "kubernetes_manifest" "spoke_namespace" {
 }
 
 resource "helm_release" "acm_managed_cluster" {
-  for_each = local.spoke_cluster_keys
+  for_each = local.is_openshift ? local.spoke_cluster_keys : {}
   provider = helm.hub
 
   name             = "acm-managed-cluster-${each.key}"
@@ -121,7 +122,7 @@ resource "helm_release" "acm_managed_cluster" {
 
 # --- Auto-import secret: kubeconfig mode uses kubeConfig field, ROSA uses server+token ---
 resource "kubernetes_secret_v1" "auto_import" {
-  for_each = local.spoke_cluster_keys
+  for_each = local.is_openshift ? local.spoke_cluster_keys : {}
   provider = kubernetes.hub
 
   metadata {
@@ -155,7 +156,7 @@ resource "kubernetes_secret_v1" "auto_import" {
 }
 
 resource "time_sleep" "wait_spoke_registration" {
-  count = length(local.spoke_cluster_keys) > 0 ? 1 : 0
+  count = local.is_openshift && length(local.spoke_cluster_keys) > 0 ? 1 : 0
 
   depends_on      = [kubernetes_secret_v1.auto_import]
   create_duration = "300s"

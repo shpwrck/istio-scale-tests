@@ -8,23 +8,41 @@ gitops_app_repo_revision = "main"
 # gitops_app_repo_password        = ""   # HTTPS PAT
 # gitops_app_repo_ssh_private_key = ""   # SSH key (use an SSH clone URL)
 
+# --- Platform ---
+# kubernetes (the default): upstream Argo CD, cert-manager, External Secrets and Sail operator.
+# openshift: OpenShift GitOps, ACM and the Red Hat operators (OLM); untested, kept for OpenShift.
+platform = "kubernetes"
+
 # --- Existing clusters (kubeconfig mode) ---
-# The hub runs ACM + Argo CD and is never a mesh member. Spoke context names
-# become ManagedCluster names, so they must be DNS-1123 labels.
+# The hub runs Argo CD (and ACM on openshift) and is never a mesh member. Spoke context names
+# become the Argo CD cluster names (ManagedCluster names on openshift), so they must be
+# DNS-1123 labels (rename an EKS ARN: kubectl config rename-context <arn> mesh-a). Add or remove
+# spokes between test runs: those that sort after the change move to another Argo CD controller
+# shard (README.md, "Grow the mesh").
 cluster_provider       = "kubeconfig"
 kubeconfig_path        = "~/.kube/config"
-hub_cluster_context    = "<acm-hub-ctx>"
+hub_cluster_context    = "<hub-ctx>"
 spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 
-# --- ROSA (clusters from terraform/rosa-hcp, apply that first) ---
-# cluster_provider = "rosa"
+# The API URL a member is registered at, when the kubeconfig's URL works only from this
+# machine: the hub's pods and every other member's istiod must reach it. kind
+# (docs/runbooks/kind-lab): the containers' names on the kind network.
+# cluster_api_url_overrides = {
+#   "<mesh-a-ctx>" = "https://<mesh-a>-control-plane:6443"
+#   "<mesh-b-ctx>" = "https://<mesh-b>-control-plane:6443"
+# }
 
-# --- Operators already installed on the hub ---
+# --- ROSA (clusters from terraform/rosa-hcp, apply that first; implies platform openshift) ---
+# cluster_provider = "rosa"
+# platform         = "openshift"
+
+# --- Already installed on the hub ---
+# gitops_install_operator              = false           # Argo CD (kubernetes) or OpenShift GitOps
+# cert-manager already installed: keep the "hub-cert-manager-operator" key in the map below.
+# openshift only:
 # acm_install_operator                 = false
 # acm_local_cluster_name               = "local-cluster" # keep the existing MultiClusterHub value
 # acm_keep_managed_clusters_on_destroy = true            # spokes were ACM-managed before Terraform
-# gitops_install_operator              = false
-# cert-manager already installed: keep the "hub-cert-manager-operator" key in the map below.
 
 # --- Per-environment chart values (no fork needed) ---
 # One map: keys are child app names. Example: brownfield cert-manager, a small istiod for
@@ -56,6 +74,12 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # --- Small hub ---
 # The Argo CD defaults are sized for the 20-cluster campaign; shrink the requests on a small hub.
 # Keep the controller limit high: it caches every watched object (~3Gi on a busy 3-cluster hub).
+# kubernetes: argo-cd chart values.
+# argocd_helm_values = {
+#   controller = { resources = { requests = { cpu = "250m", memory = "1Gi" }, limits = { cpu = "2", memory = "6Gi" } } }
+#   repoServer = { replicas = 1, resources = { requests = { cpu = "100m", memory = "256Mi" }, limits = { cpu = "1", memory = "1Gi" } } }
+# }
+# openshift: the ArgoCD CR (charts/argocd-config).
 # argocd_config_values = {
 #   argocd = {
 #     controller = { resources = { requests = { cpu = "250m", memory = "1Gi" }, limits = { cpu = "2", memory = "6Gi" } } }
@@ -64,14 +88,22 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # }
 
 # --- Large fleets ---
-# Argo CD shards = ceil((spokes + 1) / argocd_clusters_per_shard).
+# Argo CD shards = ceil((spokes + 1) / argocd_clusters_per_shard), the controller replicas on
+# kubernetes (each spoke's cluster Secret pins its shard, round-robin by name). argocd_max_shards:
+# openshift only (dynamic scaling).
 # argocd_clusters_per_shard = 50
 # argocd_max_shards         = 20
-# After the cluster secrets exist the apply restarts the controller pods once (so every cluster
-# gets a shard) and fails if an Application still has no sync/health status after 15 min.
+# openshift: after the cluster secrets exist the apply restarts the controller pods once (so
+# every cluster gets a shard).
 # argocd_restart_controller_after_cluster_secrets = true
-# argocd_app_status_timeout_sec                   = 900   # 0 disables the check
+# Then the apply fails if, after 15 min, an Application or ApplicationSet the apply deploys is
+# missing (each member ApplicationSet must own one Application per mesh member), an Application
+# has no sync/health status or no fresh one, or Argo CD cannot reach a member or render an
+# Application.
+# argocd_app_status_timeout_sec                   = 900   # 0 disables the check, else >= 600
 
-# --- Channels (defaults track the tested versions) ---
-# acm_channel             = "release-2.17"
-# gitops_operator_channel = "gitops-1.22"
+# --- Versions (defaults track the tested versions) ---
+# argocd_chart_version    = "10.9.6"         # kubernetes: the argo-cd chart (keep in sync: variables.tf)
+# argocd_chart_repository = "https://argoproj.github.io/argo-helm"   # or a mirror
+# acm_channel             = "release-2.17"   # openshift
+# gitops_operator_channel = "gitops-1.22"    # openshift

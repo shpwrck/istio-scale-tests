@@ -1,4 +1,5 @@
 {{- if include "gitops-hub-apps.enabled" (dict "root" $ "name" "hub-cert-manager-operator") }}
+{{- if eq (include "gitops-hub-apps.platform" .) "openshift" }}
 # cert-manager operator (OLM) on the hub.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -24,4 +25,39 @@ spec:
     namespace: cert-manager-operator
   syncPolicy:
     {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
+{{- else }}
+{{- $app := index (.Values.apps | default dict) "hub-cert-manager-operator" | default dict }}
+{{- $src := mergeOverwrite (deepCopy .Values.certManager) ($app.source | default dict) }}
+# cert-manager (upstream Helm chart) on the hub, with its CRDs. apps.hub-cert-manager-operator:
+# source overrides certManager (e.g. a chart mirror); values are merged over crds.enabled=true.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hub-cert-manager-operator
+  namespace: {{ .Values.gitopsNamespace | quote }}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/name: gitops-hub-apps
+    app.kubernetes.io/component: cert-manager-operator
+spec:
+  project: default
+  source:
+    repoURL: {{ required "certManager.repoURL is required" $src.repoURL | quote }}
+    chart: {{ required "certManager.chart is required" $src.chart | quote }}
+    targetRevision: {{ required "certManager.version is required" $src.version | quote }}
+    helm:
+      releaseName: cert-manager
+      valuesObject:
+        {{- mustMergeOverwrite (dict "crds" (dict "enabled" true)) (deepCopy ($app.values | default dict)) | toYaml | nindent 8 }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
+    syncOptions:
+      - CreateNamespace=true
+      # Server-side apply, as for the other upstream operator charts and their CRDs.
+      - ServerSideApply=true
+{{- end }}
 {{- end }}

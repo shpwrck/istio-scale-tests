@@ -36,7 +36,9 @@
 # Exposes:
 #   config_suite_prefixes <suite>  -> the suite's key list: prefixes (ending in _) and whole
 #                                     key names, then CONFIG_SHARED_PREFIXES (ISTIOD_DIAG_,
-#                                     taken by every suite); die for a suite without a map
+#                                     TEST_PLATFORM, PLATFORM_READ_TIMEOUT and
+#                                     PLATFORM_READ_PARALLEL, taken by every suite); die for a
+#                                     suite without a map
 #   config_allowed_keys <suite>    -> the keys a config may set, one per line, sorted
 #   load_config <file> <suite>     -> validate the whole file, then export its keys and
 #                                     RUN_CONFIG, RUN_CONFIG_SHA256, RUN_CONFIG_PATH
@@ -103,8 +105,10 @@ config_suite_prefixes() {
 }
 
 # Keys every suite takes: ISTIOD_DIAG_* tune the istiod restart evidence capture
-# (tests/lib/istiod-diag.sh). An unknown-key error names them after the suite's own list.
-CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_"
+# (tests/lib/istiod-diag.sh); TEST_PLATFORM picks the members' platform, PLATFORM_READ_TIMEOUT
+# bounds each read of the platform record and PLATFORM_READ_PARALLEL says how many members are
+# read at once (tests/lib/platform.sh). An unknown-key error names them after the suite's own list.
+CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_ TEST_PLATFORM PLATFORM_READ_TIMEOUT PLATFORM_READ_PARALLEL"
 # Keys every suite reads that no --config sets (_config_env_only_reason says why).
 CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_ ISTIO_PROXY_READ_PARALLEL HARNESS_SHA_CHECK_SEC SWEEP_STOP_GRACE_SEC"
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
@@ -158,19 +162,6 @@ config_allowed_keys() {
 	} | LC_ALL=C sort -u
 }
 
-# _config_sha256 <file>: hex sha256, or unknown when no hashing tool works.
-# shellcheck disable=SC2329
-_config_sha256() {
-	local out=""
-	if command -v sha256sum >/dev/null 2>&1; then
-		out="$(sha256sum < "$1" 2>/dev/null)" || out=""
-	elif command -v shasum >/dev/null 2>&1; then
-		out="$(shasum -a 256 < "$1" 2>/dev/null)" || out=""
-	fi
-	out="${out%% *}"
-	if [[ "$out" =~ ^[0-9a-f]{64}$ ]]; then echo "$out"; else echo unknown; fi
-}
-
 # _config_display_path <file>: repo-relative path inside ROOT, else the basename. Characters
 # outside [A-Za-z0-9_.,:/@%+=-] become _ so the value is safe in every report format.
 # shellcheck disable=SC2329
@@ -198,11 +189,11 @@ load_config() {
 	local prefixes allowed_desc="" shared_desc="" p
 	prefixes="$(config_suite_prefixes "$suite")"
 	for p in $prefixes; do
-		if [[ " ${CONFIG_SHARED_PREFIXES} " == *" ${p} "* ]]; then
-			shared_desc="${shared_desc:+${shared_desc}, }${p}*"
+		case "$p" in *_) p="${p}*" ;; esac
+		if [[ " ${CONFIG_SHARED_PREFIXES} " == *" ${p%\*} "* ]]; then
+			shared_desc="${shared_desc:+${shared_desc}, }${p}"
 			continue
 		fi
-		case "$p" in *_) p="${p}*" ;; esac
 		allowed_desc="${allowed_desc:+${allowed_desc}, }${p}"
 	done
 	local -A cfg_allowed=()
@@ -284,7 +275,7 @@ load_config() {
 	# Valid: apply every key, then the provenance.
 	local display sha abs i v note
 	display="$(_config_display_path "$file")"
-	sha="$(_config_sha256 "$file")"
+	sha="$(file_sha256 "$file")"
 	abs="$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")"
 	for i in "${!cfg_keys[@]}"; do
 		k="${cfg_keys[i]}"

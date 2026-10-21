@@ -14,8 +14,8 @@ argoSyncWaves:
 rbac:
   enabled: true
   argocd:
-    namespace: openshift-gitops
-    serviceAccountName: openshift-gitops-argocd-application-controller
+    namespace: argocd
+    serviceAccountName: argocd-application-controller
   labels: {}
   annotations: {}
 

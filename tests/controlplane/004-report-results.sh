@@ -38,6 +38,8 @@ source "${ROOT}/tests/lib/capacity.sh"  # quantity parsers envelope.sh uses
 source "${ROOT}/tests/lib/envelope.sh"  # env_sla_verdict (customer SLA headline)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fit.sh"  # FIT_AWK (namespace-scaling fits)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_merge_by_context, platform_report_lines, platform_value_has
 
 RESULTS_DIR="$(config_repo_path "${CONTROLPLANE_RESULTS_DIR}")"
 FORMAT="text"
@@ -286,6 +288,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$FORMAT" in
 md) FORMAT=markdown ;;
 text|csv|json|markdown|charts) ;;
@@ -467,11 +470,10 @@ ATTEMPTS="$(collect_attempts)" \
 #                   else "the rows come from one run"
 #   ATTEMPTS_ISTIO  with it: the Istio state each run read at its start (the TSV preamble
 #                   keeps only the first run's; a harness change is no start)
-#   _att_kube       the resumes' KUBE_VERSIONS (collect_kube_versions_meta)
 #   HARNESS_UNKNOWN 1 when one of them recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY
 #                   (git could not name the harness, or an older harness): its rows cannot
 #                   be shown to be one harness, as 003 rules for a carried PROBLEM
-HARNESS_SHAS_M="" HARNESS_KEYS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" _att_kube="" HARNESS_UNKNOWN=0
+HARNESS_SHAS_M="" HARNESS_KEYS_M="" ATTEMPTS_NOTE="" ATTEMPTS_ISTIO="" HARNESS_UNKNOWN=0
 _att_multi=0 _att_res_rows=0 _att_hc_rows=0
 _att_file="" _att_fh0="" _att_fk0="" _att_fn=0 _att_lead=""
 _att_addh() {
@@ -527,10 +529,7 @@ while IFS=$'\037' read -r _af _arun _ah _ak _an _anr _apv _agen _aat _akept _ahk
 		continue
 	fi
 	ATTEMPTS_ISTIO+="${ATTEMPTS_ISTIO:+; }${_att_pre}${_arun} ISTIO_NOTREADY_AT_RESUME=${_anr} ISTIO_GENERATIONS=${_agen} ISTIO_PROXY_VERSIONS=${_apv}"
-	if ((_akept > 0)); then
-		_att_res_rows=1
-		[[ "$_ak" == unknown ]] || _att_kube+="${_att_kube:+, }${_ak}"
-	fi
+	((_akept == 0)) || _att_res_rows=1
 	ATTEMPTS_NOTE+="${ATTEMPTS_NOTE:+; }${_att_pre}${_arun} HARNESS_SHA=${_ah} KUBE_VERSIONS=${_ak}$(_att_mark "$_an" "$_akept")"
 done < <(tr '\t' '\037' <<<"$ATTEMPTS")
 _att_flush
@@ -720,36 +719,6 @@ SIDECAR_SCOPING_M="$(collect_scopings_meta)"
 # Over every input, mixed:a,b when they differ (PL26); empty when no input has it.
 CONFIG_DUMP_SAMPLES_M="$(config_input_value CONFIG_DUMP_SAMPLES "" "${TSV_FILES[@]}")"
 
-# Concatenate KUBE_VERSIONS lines into one readable string: each input's preamble (its
-# first run), then each --resume's (resumes.txt: collect_attempts).
-# 002 writes: # KUBE_VERSIONS=ctx1=v1.29.4, ctx2=v1.29.4  (flat CSV)
-collect_kube_versions_meta() {
-	local f line all=""
-	local -a kv_lines=()
-	for f in "${TSV_FILES[@]}"; do
-		line=$(grep -m1 '^# KUBE_VERSIONS=' "$f" 2>/dev/null || true)
-		[[ -z "$line" ]] || kv_lines+=("${line#\# KUBE_VERSIONS=}")
-	done
-	[[ -z "$_att_kube" ]] || kv_lines+=("$_att_kube")
-	for line in ${kv_lines[@]+"${kv_lines[@]}"}; do
-		local val="$line"
-		if [[ -z "$all" ]]; then
-			all="$val"
-		else
-			# Merge entries not already present.
-			IFS=',' read -ra entries <<<"$val"
-			for entry in "${entries[@]}"; do
-				entry="${entry#"${entry%%[![:space:]]*}"}"
-				entry="${entry%"${entry##*[![:space:]]}"}"
-				[[ -z "$entry" ]] && continue
-				[[ "$all" == *"$entry"* ]] || all="${all}, ${entry}"
-			done
-		fi
-	done
-	echo "$all"
-}
-KUBE_VERSIONS_M="$(collect_kube_versions_meta)"
-
 # Extract unique sweep axis values from the TSV data rows.
 collect_sweep_axes() {
 	cat "${DATA_FILES[@]}" | awk -F'\t' "${AWK_HEADER_IX}"'
@@ -933,6 +902,13 @@ VSDR_SUBSETS_M="$(preamble_scalar VSDR_SUBSETS "vsdr cells mix DestinationRule s
 # mixed:<file>,unknown instead of crediting its rows to that config.
 RUN_CONFIG_M="$(preamble_scalar RUN_CONFIG "the report mixes runs made with different --config files" unknown)"
 RUN_CONFIG_SHA256_M="$(preamble_scalar RUN_CONFIG_SHA256 "the report mixes runs made with different --config contents" unknown)"
+# The platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh) over
+# every input, in every format; a file without it reads unknown. Then each member's Kubernetes
+# version, merged member by member over the inputs' preambles (their first runs) like the
+# record's keys: mixed, with a warning, when the inputs differ on a member. The attempts (the
+# text and markdown lines, the frontmatter's and the json's list) add each --resume's.
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
+PLATFORM_VALUES+=$'\n'"KUBE_VERSIONS=$(platform_merge_by_context KUBE_VERSIONS "${TSV_FILES[@]}")"
 # Namespace-scaling preamble keys (sweep-level scalars; `mixed:` with a warning when
 # the inputs disagree, PL26). 40/51-column files have none of them. A report that
 # pairs a pods run with a config-only run legitimately mixes WORKLOAD_MODE, so that
@@ -1011,7 +987,7 @@ PROXY_CHECK_TALLY="ok=$(pc_get pc_ok) low=$(pc_get pc_low) high=$(pc_get pc_high
 # (allocatable, istiod limit, pod counts) still populate. Detect exactly that case —
 # every utilization-% max non-numeric — so an empty utilization headline reads as a
 # known environment limitation rather than a harness bug. Returns 0 when unavailable.
-METRICS_NOTE="utilization-% columns are N/A — the metrics API (kubectl top / metrics-server) returned no usable data during this sweep; verify metrics-server availability on the target clusters to populate istiod_*_pct_of_limit and node_*_pct. Capacity denominators below come from kubectl get and are unaffected."
+METRICS_NOTE="utilization-% columns are N/A — the metrics API (kubectl top / metrics-server) returned no usable data during this sweep; verify metrics-server availability on the target clusters to populate istiod_*_pct_of_limit and node_*_pct. Capacity denominators below come from kubectl get, not the metrics API (unknown only when no node counted as a worker; on kind they are the shared host's, see the warnings)."
 metrics_unavailable() {
 	local key v
 	for key in istiod_cpu_pct istiod_mem_pct node_cpu_pct node_mem_pct; do
@@ -1134,7 +1110,9 @@ STATUS_RE='^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUA
 #   - leftover test namespaces above LEFTOVER_NS_WARN on a growth row (BACKLOG 9.10):
 #     they stay in istiod's informers, so its absolute heap and RSS are inflated;
 #   - A valid row without a numeric xds_pushes_delta: its cell's pushes_avg and the
-#     conv_p99 fit gate rest on fewer rows than n_valid (pushes_n, got/n_valid).
+#     conv_p99 fit gate rest on fewer rows than n_valid (pushes_n, got/n_valid);
+#   - nodes on kind (the platform record's NODE_PROVIDER_BY_CONTEXT): every node reports
+#     the whole host, so the capacity and headroom figures overstate it.
 LEFTOVER_NS_WARN_M="$(preamble_get LEFTOVER_NS_WARN)"
 [[ "$LEFTOVER_NS_WARN_M" =~ ^[0-9]+$ ]] || LEFTOVER_NS_WARN_M="${CONTROLPLANE_LEFTOVER_NS_WARN:-100}"
 DATA_WARNINGS="$(awk -F'\t' -v thr="$LEFTOVER_NS_WARN_M" "${AWK_SERIES_RUN}
@@ -1154,6 +1132,16 @@ ${AWK_HEADER_IX}"'
 		if (np) printf "%d valid row(s) of %d cell(s) have no xDS push count (xds_pushes_delta is not a number: the scrape lacked pilot_xds_pushes), so those cells'"'"' pushes_avg averages fewer rows than n_valid (shown as from got/n_valid; pushes_n in csv, xds_pushes_n in json) and the conv_p99 fit gate rests on that subset.\n", np, npn
 		if (lo) printf "%d growth row(s) were measured with up to %d leftover controlplane-test namespaces from earlier series or runs on their member (warning threshold %d). They stay in istiod'"'"'s informers, so those rows'"'"' absolute istiod heap and RSS are inflated; deltas within a series stay valid. Delete the leftovers between sweeps for absolute numbers.\n", lo, lomax, thr
 	}' "${DATA_FILES[@]}")"
+KIND_NODES=0  # the verdict leaves the node figures out (compute_sla_verdict)
+if platform_value_has "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")" kind; then
+	KIND_NODES=1
+	DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory, which all kind clusters on that host share, so node allocatable, node_*_pct, the coverage fraction and the services-that-fit estimate overstate the real headroom; quote capacity and headroom from cloud nodes only."
+fi
+# A member whose node provider was not read may be on kind too: its node figures stay out as well.
+NODES_UNREAD="$(platform_unread_members "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")")"
+if ((NODES_UNREAD && ! KIND_NODES)); then
+	DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}Node provider not read on ${NODES_UNREAD} member(s) (NODE_PROVIDER_BY_CONTEXT unknown): if their nodes are kind's, every node reports the whole host's CPU and memory, so node allocatable, node_*_pct, the coverage fraction and the services-that-fit estimate may overstate the real headroom; the verdict leaves the node figures out."
+fi
 # The legacy cells' states (the rule 003 uses for its count and a --resume: CP_CELL_AWK),
 # from each input's latest attempts, with planned-cells.txt beside the TSV:
 #   - INCOMPLETE: cut short while 002 wrote its member rows (fewer members have a row than
@@ -1396,6 +1384,14 @@ data_warnings_lines() {
 	local w
 	while IFS= read -r w; do printf '%s%s\n' "$1" "$w"; done <<<"$DATA_WARNINGS"
 }
+# The record's merge warnings (inputs that disagree, a build that changed during the sweep, a
+# value not read) and the drift file's findings (a lever, limit or replica count that changed):
+# every format's body gets them with member counts, since the scale envelope prints
+# data_warnings. platform_report_values printed the merge warnings on stderr with the members'
+# names; the drift file's findings name them only there (platform-drift.txt) and in the sweep's
+# log, so no output of this report does.
+PLATFORM_WARNINGS="$(platform_report_warnings --no-members --with KUBE_VERSIONS "${TSV_FILES[@]}")"
+[[ -z "$PLATFORM_WARNINGS" ]] || DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}${PLATFORM_WARNINGS}"
 # STATUS_ROWS / STATUS_SUMMARY: their count and "SKIPPED_MEM_GUARD 4, GROW_FAILED 1"
 # (first-seen order) over every consumed TSV.
 read -r STATUS_ROWS STATUS_SUMMARY < <(cat "${DATA_FILES[@]}" | awk -F'\t' -v re="$STATUS_RE" '
@@ -1504,7 +1500,15 @@ compute_sla_verdict() {
 	# harness (HARNESS_MIX), or on one git could not name (HARNESS_UNKNOWN), or on more than
 	# one Istio version (ISTIO_MIX), and cells that ran on fewer istiod pods than wanted
 	# (SHORT_CELLS).
+	# Nodes on kind, or whose provider was not read, leave the node figures out of the bands
+	# (--nodes-excluded: its clause comes after these).
 	local raw cautions=""
+	local -a verdict_opts=()
+	if ((KIND_NODES)); then
+		verdict_opts=(--nodes-excluded "the nodes are kind's (NODE_PROVIDER_BY_CONTEXT), so node_cpu_pct and node_mem_pct measure the host every kind cluster shares, not this cluster's headroom")
+	elif ((NODES_UNREAD)); then
+		verdict_opts=(--nodes-excluded "node provider not read on ${NODES_UNREAD} member(s) (NODE_PROVIDER_BY_CONTEXT unknown), so node_cpu_pct and node_mem_pct may measure a host several clusters share, as on kind")
+	fi
 	if ((HARNESS_MIX)); then
 		cautions="the rows in the figures ran on more than one harness (HARNESS_SHA ${HARNESS_SHAS_M}; see the provenance warning), so their cells may not be measured the same way"
 	elif ((HARNESS_UNKNOWN)); then
@@ -1512,7 +1516,7 @@ compute_sla_verdict() {
 	fi
 	((ISTIO_MIX == 0)) || cautions+="${cautions:+$'\n'}the inputs were measured on different Istio versions (ISTIO_VERSION ${ISTIO_VERSIONS_M}; see the provenance warning), so their cells may not be comparable"
 	((SHORT_CELLS == 0)) || cautions+="${cautions:+$'\n'}${SHORT_CELLS} cell(s) ran on fewer istiod pods than their member's istiod Deployment wants (a replica evicted or Pending), so their per-replica figures are not comparable with the other cells"
-	raw="$(env_sla_verdict \
+	raw="$(env_sla_verdict ${verdict_opts[@]+"${verdict_opts[@]}"} \
 		"$icpu_eff" "$imem_eff" \
 		"$(as_get node_cpu_pct)"   "$(as_get node_mem_pct)" \
 		"$restarts" "$n_total" "$n_valid" "" "" "$NOT_RUN_CELLS" "${#_cs_inc[@]}" "$OUTCOME_PROBLEMS" \
@@ -2420,6 +2424,7 @@ report_text() {
 	echo "=== Control-Plane Resource Scaling ==="
 	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  HARNESS_CONTENT_KEY=${HARNESS_KEY_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}  ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}  ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}  ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}  ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}  ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}  ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}  ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}  ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 	echo "# runs: run_ids=${RUN_IDS_M}  istio_versions=${ISTIO_VERSIONS_M}  harness_shas=${HARNESS_SHAS_M}  harness_content_keys=${HARNESS_KEYS_M}  REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA}"
+	echo "# platform: ${PLATFORM_VALUES//$'\n'/  }"
 	[[ -z "$ATTEMPTS_NOTE" ]] || echo "# attempts: ${ATTEMPTS_NOTE}"
 	[[ -z "$ATTEMPTS_ISTIO" ]] || echo "# attempts, Istio at each start: ${ATTEMPTS_ISTIO}"
 	[[ -z "$POOLED_NOTE" ]] || echo "# POOLED RUNS: ${POOLED_NOTE}"
@@ -2553,6 +2558,7 @@ report_csv() {
 	echo "# earlier_attempts: rows_left_out=${EARLIER_ROWS} cells=${EARLIER_CELLS}"
 	[[ -z "$EARLIER_NOTE" ]] || echo "# NOTE: ${EARLIER_NOTE}"
 	echo "# run_config: run_config=${RUN_CONFIG_M} run_config_sha256=${RUN_CONFIG_SHA256_M}"
+	echo "# platform: ${PLATFORM_VALUES//$'\n'/ }"
 	echo "# sweep: mesh_sizes=${SWEEP_MESH} service_counts=${SWEEP_SVC} replica_counts=${SWEEP_REP} namespace_counts=${SWEEP_NS} sidecar_scopings=${SWEEP_SCOPE} traffic_configs=${SWEEP_TRAFFIC}"
 	echo "# traffic_management: vsdr_every=${VSDR_EVERY_M} vsdr_subsets=${VSDR_SUBSETS_M}"
 	if has_growth_cells "$aggregated"; then
@@ -2673,6 +2679,7 @@ report_markdown() {
 	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA}")"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "earlier_attempt_rows_left_out: ${EARLIER_ROWS}"
 	echo "earlier_attempt_cells: ${EARLIER_CELLS}"
 	echo "attempts: ${ATTEMPTS_JSON}"
@@ -2681,7 +2688,6 @@ report_markdown() {
 	echo "vsdr_every: $(yaml_str "${VSDR_EVERY_M}")"
 	echo "vsdr_subsets: $(yaml_str "${VSDR_SUBSETS_M}")"
 	echo "config_dump_samples: $(yaml_str -n "${CONFIG_DUMP_SAMPLES_M:-N/A}")"
-	echo "kube_versions: $(yaml_str "${KUBE_VERSIONS_M:-N/A}")"
 	echo "scale_sizing_mode: $(yaml_str "$(preamble_get SCALE_SIZING_MODE)")"
 	echo "metrics_api: $(yaml_str "$(preamble_get METRICS_API)")"
 	echo "istiod_req_cpu_m: $(yaml_str -n "$(preamble_get ISTIOD_REQ_CPU_M)")"
@@ -3032,7 +3038,13 @@ report_json() {
 		|| die "could not write the vsdr ingest shortfalls in ${CS_KEYS_DIR}"
 	local ns_scaling_json
 	ns_scaling_json="$(scaling_section json "$aggregated")"
-	# Every string goes through the environment (the recorded outcome, the lists, the
+	# The platform record's keys go into metadata, the namespace-scaling section at the end. awk
+	# reads both from a file (getline), never from -v (whose escape processing would touch them)
+	# or its environment: Linux refuses to run a command with one environment or argument string
+	# over 128 KiB, the record of about 360 members.
+	local plat_json
+	plat_json="$(platform_report_lines json "$PLATFORM_VALUES")"
+	# Every other string goes through the environment (the recorded outcome, the lists, the
 	# attempts and the warnings as JSON; each _J_<name> field as a value js() quotes): awk -v
 	# would unescape a backslash, and a " or \ printed as is would break the JSON. Only the
 	# counts (integers) stay -v; the per-cell lists come from files (CS_KEYS_DIR).
@@ -3062,13 +3074,22 @@ report_json() {
 	_J_gr_mode="$GROWTH_MODE_M" _J_gr_stop="$MEM_STOP_PCT_M" _J_gr_settle="$PROBE_SETTLE_M" _J_gr_spn="$SWEEP_SPN" \
 	_J_gr_wm="$SWEEP_WMODE" _J_gr_wk="$SWEEP_WKIND" _J_cov="$COVERAGE_LINE" \
 	_J_metrics_note="$(metrics_unavailable && metrics_note_text)" \
-	NS_SCALING_JSON="$ns_scaling_json" awk -F'\t' -v earlier_rows="$EARLIER_ROWS" -v earlier_cells="$EARLIER_CELLS" \
+	awk -F'\t' -v plat_file=<(printf '%s\n' "$plat_json") -v ns_file=<(printf '%s\n' "$ns_scaling_json") \
+		-v earlier_rows="$EARLIER_ROWS" -v earlier_cells="$EARLIER_CELLS" \
 		-v fc="$FILES_CONSUMED" -v fs="$FILES_SKIPPED" \
 		-v pc_ok="$(pc_get pc_ok)" -v pc_low="$(pc_get pc_low)" -v pc_high="$(pc_get pc_high)" \
 		-v pc_na="$(pc_get pc_na)" -v pc_excl="$(pc_get pc_excluded)" "${JSON_STR_AWK}${INC_AWK}"'
 	function cell(v) {
 		if (v !~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)$/) return "null"  # overflow / N/A
 		return v + 0
+	}
+	# slurp(f): the whole file, its lines joined by newlines; a file that cannot be read stops the
+	# report before it prints anything (exit 2).
+	function slurp(f,   line, out, n, r) {
+		while ((r = (getline line < f)) > 0) out = out (n++ ? "\n" : "") line
+		if (r < 0) { printf "error: cannot read %s\n", f > "/dev/stderr"; failed = 1 }
+		close(f)
+		return out
 	}
 	# nr_json(s): a "<member>=<pod>,..." list as a JSON array; null for a growth cell, whose
 	# windows only the data warning names.
@@ -3079,6 +3100,8 @@ report_json() {
 		return "[" o "]"
 	}
 	BEGIN {
+		plat = slurp(plat_file); ns = slurp(ns_file); if (failed) exit 2
+		plat = substr(plat, 2, length(plat) - 2); if (plat != "") plat = plat ","
 		inc_load(); split("", vshort); inc_file("vsdr-short", vshort, "; ")
 		# Every string field as a JSON string (js), from the environment (_J_<name>).
 		nj = split("ri iv iv_src iv_pin iv_by iv_nr iv_wait iv_revs iv_gens iv_pv hs hk rhs rc_path rc_sha sw_mesh sw_svc sw_rep sw_ns sw_scope sw_traffic tm_every tm_subsets cap_ncpu cap_nmem cap_icpu cap_imem cap_tf cap_mode cap_metrics inf_rcpu inf_rmem inf_lcpu inf_lmem inf_rep inf_rep_by inf_net sla_v sla_h tb_levers tb_egress ach_prx ach_cprx ach_svc pc_tol pc_min pc_flagged ach_icpu ach_imem ach_icpu_peak leftover_start ach_irss ach_ncpu ach_nmem ach_psched ach_palloc gr_mode gr_stop gr_settle gr_spn gr_wm gr_wk cov metrics_note", jk, " ")
@@ -3091,7 +3114,7 @@ report_json() {
 		for (i = 1; i <= nw; i++) if (dws[i] != "") data_warn = data_warn (data_warn == "" ? "" : ",") js(dws[i])
 		npso = split(ENVIRON["_PSO"], psos, "\n"); pso_json = ""
 		for (i = 1; i <= npso; i++) if (psos[i] != "") pso_json = pso_json (pso_json == "" ? "" : ",") js(psos[i])
-		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_notready_at_start\":%s,\"istio_ready_waited_sec\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"istio_proxy_versions\":%s,\"harness_sha\":%s,\"harness_content_key\":%s,\"report_harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"harness_content_keys\":%s,\"attempts\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,\"files_consumed\":%d,\"skipped_legacy\":%d,\"earlier_attempt_rows_left_out\":%d,\"earlier_attempt_cells\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"pooled_sweep_outcomes\": [%s],\n  \"sweep_outcome\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_nr"], J["iv_wait"], J["iv_revs"], J["iv_gens"], J["iv_pv"], J["hs"], J["hk"], J["rhs"], ri_list, iv_list, hs_list, hk_list, att_json, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], fc, fs, earlier_rows, earlier_cells, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, pso_json, outcome }
+		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_notready_at_start\":%s,\"istio_ready_waited_sec\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"istio_proxy_versions\":%s,\"harness_sha\":%s,\"harness_content_key\":%s,\"report_harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"harness_content_keys\":%s,\"attempts\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,%s\"files_consumed\":%d,\"skipped_legacy\":%d,\"earlier_attempt_rows_left_out\":%d,\"earlier_attempt_cells\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"pooled_sweep_outcomes\": [%s],\n  \"sweep_outcome\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_nr"], J["iv_wait"], J["iv_revs"], J["iv_gens"], J["iv_pv"], J["hs"], J["hk"], J["rhs"], ri_list, iv_list, hs_list, hk_list, att_json, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], plat, fc, fs, earlier_rows, earlier_cells, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, pso_json, outcome }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -3121,9 +3144,8 @@ report_json() {
 		printf "\"istiod_not_ready\":%s,\"istiod_not_ready_at_end\":%s}", nr_json(nrb_of()), nr_json(nre_of())
 	}
 	END {
-		# The namespace-scaling section (growth cells only), from ENVIRON so awk -v
-		# escape processing cannot touch it.
-		ns = ENVIRON["NS_SCALING_JSON"]
+		if (failed) exit 2
+		# The namespace-scaling section (growth cells only), read in BEGIN.
 		tail = (ns != "") ? ",\n  \"namespace_scaling\": " ns "\n}\n" : "\n}\n"
 		if (printed) printf "\n  ]%s", tail; else printf "]%s", tail
 	}' <<<"$aggregated"
@@ -3152,6 +3174,7 @@ report_charts() {
 	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA}")"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "files_consumed: ${FILES_CONSUMED}"
 	echo "earlier_attempt_rows_left_out: ${EARLIER_ROWS}"
 	echo "earlier_attempt_cells: ${EARLIER_CELLS}"

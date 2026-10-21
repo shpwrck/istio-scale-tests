@@ -10,6 +10,7 @@ load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
 source "${ROOT}/tests/lib/fortio.sh"
 source "${ROOT}/tests/lib/config.sh"  # config_preamble_lines (reach_write_header)
+source "${ROOT}/tests/lib/platform.sh"  # platform_preamble_lines (reach_write_header)
 source "${ROOT}/tests/lib/reach.sh"
 
 DP_PROBE="${ROOT}/tests/dataplane/002-run-latency-probe.sh"
@@ -134,6 +135,11 @@ rrow() {
 	run reach_sanitize ""
 	# Not assert_output "-": bats-assert reads "-" as "expected output on stdin".
 	[ "$output" = "-" ]
+}
+
+@test "reach_sanitize (R5): kubectl's Client.Timeout survives, the host before it is masked" {
+	run reach_sanitize 'Unable to connect to the server: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers) from api.mesh-a.example.invalid'
+	assert_output "Unable to connect to the server: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers) from <host>"
 }
 
 @test "reach_sanitize: IPv6 literals masked (bracketed, compressed, full, zone, mapped)" {
@@ -275,7 +281,7 @@ rrow() {
 	[ "$output" -gt $(((1 + 2) * 10)) ]
 }
 
-@test "reach_write_header: records RUN_CONFIG and RUN_CONFIG_SHA256 (PL36); refuses without config.sh" {
+@test "reach_write_header: records RUN_CONFIG, RUN_CONFIG_SHA256 and the platform record (PL36); refuses without config.sh or platform.sh" {
 	RUN_CONFIG=c.env RUN_CONFIG_SHA256=abc reach_write_header "${RES}/reach-c.tsv" RUN_ID=c
 	grep -qx '# RUN_CONFIG=c.env' "${RES}/reach-c.tsv"
 	grep -qx '# RUN_CONFIG_SHA256=abc' "${RES}/reach-c.tsv"
@@ -288,6 +294,35 @@ rrow() {
 	assert_failure
 	[[ "$stderr" == *"config_preamble_lines missing"* ]]
 	[ ! -e "${RES}/reach-z.tsv" ]
+	# The platform record of the members the last platform_probe read (tests/lib/platform.sh).
+	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\tsail-operator:1.31.1/Available\tpilot:1.30.5\tproxyv2:1.30.5\tkind'
+		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-p.tsv" RUN_ID=p)
+	grep -qx '# PLATFORM=kubernetes' "${RES}/reach-p.tsv"
+	grep -qx '# PLATFORM_BY_CONTEXT=c1=kubernetes' "${RES}/reach-p.tsv"
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind' "${RES}/reach-p.tsv"
+	# Without platform.sh it is not written either.
+	run --separate-stderr bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/fortio.sh"
+		source "$1/tests/lib/config.sh"; source "$1/tests/lib/reach.sh"; reach_write_header "$2" RUN_ID=y' _ "$ROOT" "${RES}/reach-y.tsv"
+	assert_failure
+	[[ "$stderr" == *"platform_preamble_lines missing (source tests/lib/platform.sh)"* ]]
+	[ ! -e "${RES}/reach-y.tsv" ]
+}
+
+@test "reach_write_header --contexts (H13): the record of every member listed, not only the last platform_probe's" {
+	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\top\tpilot\tproxy\tkind\nc2\tkubernetes\top\tpilot\tproxy\taws\n'
+		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-s.tsv" --contexts c1,c2 RUN_ID=s SUITE=churn-dataplane)
+	grep -qx '# PLATFORM_BY_CONTEXT=c1=kubernetes,c2=kubernetes' "${RES}/reach-s.tsv"
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind,c2=aws' "${RES}/reach-s.tsv"
+	grep -qx '# RUN_ID=s' "${RES}/reach-s.tsv"
+	grep -qx '# SUITE=churn-dataplane' "${RES}/reach-s.tsv"
+	! grep -q -- '--contexts' "${RES}/reach-s.tsv" || false
+	# Without --contexts: the last platform_probe's members, as before.
+	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\top\tpilot\tproxy\tkind\nc2\tkubernetes\top\tpilot\tproxy\taws\n'
+		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-1.tsv" RUN_ID=s)
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind' "${RES}/reach-1.tsv"
+	# churn-dataplane 002 writes the sweep's per-sweep file with every member the record holds
+	# (a sweep's 002 inherits all of them), so later mesh sizes' members are in its header.
+	grep -q 'reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)"' "${ROOT}/tests/churn-dataplane/002-run-baseline-probe.sh"
 }
 
 @test "reach_result_for / reach_not_reachable: listed remotes without a row count as UNKNOWN" {
@@ -382,6 +417,24 @@ _coverage_fixture() {
 	done
 	run reach_coverage_render json "${RES}/empty"
 	[ "$(jq -r '.remote_coverage.data' <<<"$output")" = false ]
+	# A mesh of one member: its reach file holds the source's own row only, no remote to check.
+	printf 'run_id\tcombo_id\tmesh_size\tsource_ctx\ttarget_ctx\ttarget_class\tattempts\trequests\tok\tpct_200\ttop_code\treach_status\tdetail\n' > "${RES}/reach-one.tsv"
+	printf 'r1\tc1\t1\ts\ts\tlocal\t1\t4\t4\t100.0\t200\tREACHABLE\t-\n' >> "${RES}/reach-one.tsv"
+	reach_coverage_rows "${RES}/reach-one.tsv" > "${RES}/one"
+	[ "$(cat "${RES}/one")" = "$REACH_NO_REMOTE_LINE" ]
+	run reach_coverage_render text "${RES}/one"
+	assert_output "REMOTE COVERAGE: no remote to check (every run had a mesh of one member: its reach-*.tsv checks the source only)"
+	run reach_coverage_render md "${RES}/one"
+	assert_output --partial "No remote to check: every run had a mesh of one member"
+	run reach_coverage_render csv "${RES}/one"
+	assert_output "# REMOTE_COVERAGE=no remote to check (a mesh of one member)"
+	run reach_coverage_render json "${RES}/one"
+	[ "$(jq -c '.remote_coverage' <<<"$output")" = '{"data":true,"not_reachable":0,"groups":[]}' ]
+	run reach_coverage_render charts "${RES}/one"
+	assert_output ""
+	# A header without a row is no data at all.
+	head -n 1 "${RES}/reach-one.tsv" > "${RES}/reach-none.tsv"
+	[ -z "$(reach_coverage_rows "${RES}/reach-none.tsv")" ]
 }
 
 @test "reach_coverage_render md: a '|' in the detail is escaped" {
@@ -401,6 +454,7 @@ lrow() {
 _dp_fixture() {
 	{
 		echo "# RUN_ID=r1"
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 3 s 10 OK local
 		lrow 3 r1 10 OK remote
@@ -422,7 +476,7 @@ _dp_fixture() {
 	[ "$(printf '%s\n' "$output" | grep -n '## Remote coverage' | cut -d: -f1)" -lt "$(printf '%s\n' "$output" | grep -n '^| mesh_size | qps_target' | cut -d: -f1)" ]
 	run "$DP_REPORT" --results-dir "$RES"
 	assert_output --partial "REMOTE COVERAGE mesh_size=3 source=s: 1/2 remotes reachable"
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.summary.remotes_not_reachable' <<<"$output")" = 1 ]
 	[ "$(jq -r '.summary.remotes_without_valid_rows' <<<"$output")" = 1 ]
 	[ "$(jq -r '.remote_validity[] | select(.target_ctx == "r2") | .statuses.UNREACHABLE' <<<"$output")" = 2 ]
@@ -444,6 +498,7 @@ _dp_fixture() {
 	ok="${BATS_TEST_TMPDIR}/ok"
 	mkdir -p "$ok"
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 		lrow 2 r1 10 OK remote
@@ -466,6 +521,8 @@ _dp_fixture() {
 	assert_output --partial "Remotes with no valid latency rows: mesh_size=2 from s: r2 (0/2; ERROR_RATE_HIGH=2)"
 	[[ "$stderr" == *"rule=no_valid_rows"* ]]
 	[[ "$stderr" != *"rule=reach_coverage"* ]]
+	# A file from before the platform record: one warning; its platform reads unknown.
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
 }
 
 # --- dataplane 002 / 003 (entrypoints, stub kubectl) ---
@@ -494,7 +551,7 @@ _dp_probe() {
 	grep -qx '# REACH_DETAIL_TIMEOUT_SEC=35' "$f"
 	grep -qx '# REACH_DETAIL_TIMEOUT_SEC=35' "$RES"/reach-*.tsv
 	grep -qx '# REACH_RETRY_SEC=0' "$f"
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.metadata | "\(.REACH_QPS) \(.REACH_HTTP_TIMEOUT_SEC) \(.REACH_RETRY_SEC)"' <<<"$output")" = "10 3 0" ]
 	# No load was sent to ctx-b: only the reach check and its curl.
 	run grep -q 'fortio load -qps 10 -c 8 .*dataplane-server-ctx-b' "$STUB_LOG"
@@ -525,7 +582,7 @@ _dp_probe() {
 	refute_output --partial "dropped (poisoned)"
 	refute_output --regexp '\| na +\|'
 	[[ "$(printf '%s\n' "$output" | grep '[|] remote [|]' | wc -l)" -eq 2 ]]
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[3,0,0,3]' ]
 	[ "$(jq '[.results[] | select(.target_class == "na")] | length' <<<"$output")" = 0 ]
 	run "$DP_REPORT" --results-dir "$RES" --format csv
@@ -538,6 +595,7 @@ _dp_probe() {
 
 @test "004: poisoned rows and unreachable skips are counted apart in every format" {
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 		lrow 2 r1 10 ERROR_RATE_HIGH remote
@@ -550,7 +608,7 @@ _dp_probe() {
 	assert_output --partial "4 total / 1 valid rows — 1 dropped (poisoned), 2 skipped (remote unreachable)."
 	run "$DP_REPORT" --results-dir "$RES" --format csv
 	assert_output --partial "# ROWS n_total=4 n_valid=1 n_dropped=1 n_skipped_unreachable=2"
-	run "$DP_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[4,1,1,2]' ]
 	# Per-cell n_total/n_valid are unchanged: the UNREACHABLE rows stay in their cells.
 	[ "$(jq -c '[.results[] | select(.target_class == "remote") | [.qps_target, .n_total, .n_valid]]' <<<"$output")" = '[[10,2,0],[100,1,0]]' ]
@@ -558,6 +616,7 @@ _dp_probe() {
 	ok="${BATS_TEST_TMPDIR}/ok"
 	mkdir -p "$ok"
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 	} > "${ok}/latency-x.tsv"
@@ -606,6 +665,7 @@ crow() {
 		echo "# REACH_HTTP_TIMEOUT_SEC=1"
 		echo "# REACH_DETAIL_TIMEOUT_SEC=11"
 		echo "# REACH_RETRY_SEC=5"
+		platform_fixture_lines a,b
 		printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n'
 		crow ms2-cr1 baseline 0 5 ERROR_RATE_HIGH
 		crow ms2-cr1 churn 1 9 OK
@@ -613,7 +673,7 @@ crow() {
 		crow ms2-cr5 churn 5 9 OK
 	} > "${RES}/churn-dataplane-r1.tsv"
 	reach_tsv "${RES}/reach-r1.tsv" "$(rrow r1 ms2-cr1 2 a a local 10 REACHABLE)" "$(rrow r1 ms2-cr1 2 a b remote 0 UNREACHABLE 503 'no healthy upstream')"
-	run "$CD_REPORT" --results-dir "$RES" --format json
+	run --separate-stderr "$CD_REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -r '.rows[] | select(.churn_rate == 1) | "\(.valid_runs)/\(.total_runs)"' <<<"$output")" = 0/1 ]
 	[ "$(jq -r '.rows[] | select(.churn_rate == 5) | .valid_runs' <<<"$output")" = 1 ]
@@ -684,6 +744,7 @@ crow() {
 	d="${BATS_TEST_TMPDIR}/tune/baseline"
 	mkdir -p "$d"
 	{
+		platform_fixture_lines s,r1,r2
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 		lrow 2 r1 10 OK remote

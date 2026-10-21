@@ -17,15 +17,62 @@ data "external" "cluster_api_url" {
 
   program = [
     "bash", "-c",
-    "URL=$(kubectl --kubeconfig \"$1\" config view --minify --context \"$2\" -o jsonpath='{.clusters[0].cluster.server}') && [ -n \"$URL\" ] || { echo \"no API server URL for kubeconfig context '$2'\" >&2; exit 1; }; jq -n --arg url \"$URL\" '{url:$url}'",
+    "URL=$(kubectl --kubeconfig \"$1\" config view --minify --context \"$2\" -o jsonpath='{.clusters[0].cluster.server}') && [ -n \"$URL\" ] || { echo \"no API server URL for context '$2' in the kubeconfig file $1 (kubeconfig_path; KUBECONFIG is not read)\" >&2; exit 1; }; jq -n --arg url \"$URL\" '{url:$url}'",
     "--",
     pathexpand(var.kubeconfig_path),
     each.key,
   ]
 }
 
+# --- Kubeconfig mode: is the hub OpenShift? (it serves security.openshift.io/v1) ---
+# kubeconfig mode defaults to platform kubernetes. Planned that way, an OpenShift deployment
+# whose tfvars never set platform would lose the ArgoCD CR and the ACM releases, and the
+# app-of-apps would move to argocd: its finalizer deletes the mesh. The postcondition fails the
+# plan, before any change, when the hub disagrees with platform (Terraform 1.14 reports it as a
+# warning in a destroy plan). A hub that cannot be read reads as unknown and only warns (check
+# "hub_platform" below): that plan cannot change the hub anyway, and terraform destroy or a
+# plan that leaves the hub alone still runs.
+data "external" "hub_platform" {
+  count = local.use_kubeconfig ? 1 : 0
+
+  program = ["bash", "-c", local.hub_platform_script, "--", pathexpand(var.kubeconfig_path), var.hub_cluster_context]
+
+  lifecycle {
+    postcondition {
+      condition     = self.result.openshift == "unknown" || (self.result.openshift == "true") == local.is_openshift
+      error_message = self.result.openshift == "true" ? "The hub (context ${var.hub_cluster_context}) runs OpenShift: it serves security.openshift.io/v1. But platform is \"${local.platform}\"${var.platform == null ? " (the kubeconfig-mode default)" : ""}. Set platform = \"openshift\" in your tfvars and plan again. Planned as kubernetes, an OpenShift deployment loses its ArgoCD CR and ACM releases, and the app-of-apps moves to argocd, which deletes the mesh." : "The hub (context ${var.hub_cluster_context}) does not serve security.openshift.io/v1, so it is not OpenShift, but platform = \"openshift\". Remove the platform setting (kubernetes is the default) or fix hub_cluster_context."
+    }
+  }
+}
+
+check "hub_platform" {
+  assert {
+    condition     = try(data.external.hub_platform[0].result.openshift, "") != "unknown"
+    error_message = "Could not read the hub's API groups (kubectl api-versions, context ${var.hub_cluster_context}): ${try(data.external.hub_platform[0].result.error, "")}. So this plan did not check platform = \"${local.platform}\" against the hub. An OpenShift hub needs platform = \"openshift\"."
+  }
+}
+
 locals {
   use_kubeconfig = var.cluster_provider == "kubeconfig"
+
+  # kubernetes: upstream Argo CD, cluster Secrets, upstream operator charts. openshift:
+  # OpenShift GitOps, ACM and OLM operators (the only choice on ROSA).
+  platform         = coalesce(var.platform, var.cluster_provider == "rosa" ? "openshift" : "kubernetes")
+  is_openshift     = local.platform == "openshift"
+  gitops_namespace = coalesce(var.gitops_namespace, local.is_openshift ? "openshift-gitops" : "argocd")
+
+  # data.external.hub_platform: {"openshift": "true" | "false" | "unknown", "error": "..."}.
+  # The same test as tests/lib/platform.sh; a failed read is unknown, never a guess.
+  hub_platform_script = <<-EOT
+    err=$(mktemp) || exit 1
+    trap 'rm -f "$err"' EXIT
+    if groups=$(kubectl --kubeconfig "$1" --context "$2" --request-timeout=20s api-versions 2>"$err"); then
+      if printf '%s\n' "$groups" | grep -qx 'security.openshift.io/v1'; then os=true; else os=false; fi
+      jq -n --arg os "$os" '{openshift: $os, error: ""}'
+    else
+      jq -n --arg e "$(tail -n 3 "$err" | tr '\n' ' ')" '{openshift: "unknown", error: $e}'
+    fi
+  EOT
 
   # Content hash of each local chart, passed as a release value: the helm
   # provider only upgrades on value or chart-version changes, so without this
@@ -53,7 +100,7 @@ locals {
   by_cluster = (
     local.use_kubeconfig
     ? { for ctx in local.cluster_keys : ctx => {
-      cluster_api_url = data.external.cluster_api_url[ctx].result.url
+      cluster_api_url = lookup(var.cluster_api_url_overrides, ctx, data.external.cluster_api_url[ctx].result.url)
       }
     }
     : data.terraform_remote_state.rosa[0].outputs.by_cluster
@@ -90,4 +137,15 @@ locals {
   argocd_cluster_count        = length(local.spoke_cluster_keys) + 1
   argocd_computed_min_shards  = max(1, ceil(local.argocd_cluster_count / var.argocd_clusters_per_shard))
   argocd_effective_max_shards = max(var.argocd_max_shards, local.argocd_computed_min_shards)
+
+  # kubernetes, with Argo CD installed here: each spoke's cluster Secret pins its controller
+  # shard (terraform/platform/README.md): its index in name order + 1, mod the controller
+  # replicas (argocd_helm_values' controller.replicas when set). The hub's in-cluster has no
+  # Secret and stays on shard 0, where round-robin puts it (its cluster ID is empty, so it
+  # sorts first).
+  argocd_controller_replicas = max(1, try(tonumber(var.argocd_helm_values.controller.replicas), local.argocd_computed_min_shards))
+  argocd_pin_shards          = !local.is_openshift && var.gitops_install_operator
+  argocd_cluster_shard = {
+    for i, k in keys(local.spoke_cluster_keys) : k => tostring((i + 1) % local.argocd_controller_replicas)
+  }
 }

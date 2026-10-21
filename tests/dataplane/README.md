@@ -160,7 +160,9 @@ QPS 10 and 100, 10 s per level):
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `DATAPLANE_*`, `REACH_*`,
-  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence, below) and `METRICS_SCRAPE_TIMEOUT`.
+  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence, below), `TEST_PLATFORM` (the members'
+  platform), `PLATFORM_READ_TIMEOUT` (each read of the platform record),
+  `PLATFORM_READ_PARALLEL` (members read at once) and `METRICS_SCRAPE_TIMEOUT`.
   `DATAPLANE_TEST_NAMESPACE` and `DATAPLANE_MAX_MATRIX` stay environment only.
 - **Run keys:** `DATAPLANE_MESH_SIZES` (`003 --mesh-sizes`; empty: 1 to the number of
   contexts), `DATAPLANE_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts
@@ -251,7 +253,10 @@ callout, CSV `# REMOTE_COVERAGE ...`, `# REMOTE_COVERAGE_TARGET ...` and
 `> ⚠` line. `004 --fail-on-unreachable` exits 3 after the output when a remote's
 coverage is not `REACHABLE` (`rule=reach_coverage`) or a remote has no valid latency row
 (`rule=no_valid_rows`); stderr names the rule and the remote, so a reachable remote
-whose rows are all `QPS_SHORTFALL` is not mistaken for an unreachable one.
+whose rows are all `QPS_SHORTFALL` is not mistaken for an unreachable one. Without a reach
+file (the check was off, or the TSV predates it) the section reads "no reachability data"
+(JSON `remote_coverage.data` false); when every run had a mesh of one member, whose reach
+file checks the source itself only, it reads "no remote to check" (`data` true, no groups).
 
 ## istiod restart detection
 
@@ -358,8 +363,10 @@ bearer tokens and JWTs. It lives under the gitignored `results/` and must never 
 committed; the folder's own `.gitignore` ignores everything in it, even under a tracked
 `--output-dir`.
 
-For the memory curve before an OOM, `summary.md` lists a PromQL query per pod to run in
-the OpenShift console (Observe > Metrics) at the pod's `finished_at`:
+For the memory curve before an OOM, `summary.md` lists a PromQL query per pod to run at the
+pod's `finished_at` in a Prometheus that scrapes the kubelet's cAdvisor metrics (on OpenShift
+the console, Observe > Metrics; on Kubernetes a monitoring stack such as kube-prometheus-stack.
+`charts/istiod-monitor` scrapes only istiod, so it cannot answer it):
 `max_over_time(container_memory_working_set_bytes{namespace="istio-system",pod="<pod>",container="discovery"}[15m])`.
 The report (`004`) ends text and markdown with an "istiod restart diagnostics" section: a
 tally by cause, then one line per restart with its `run_id` and its evidence folder
@@ -375,13 +382,35 @@ the row with a folder; the other rows count as repeats. json has the section as
 
 `latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `HARNESS_CONTENT_KEY`,
 `ISTIO_VERSION` with `ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`, `KUBE_VERSIONS`,
-`FORTIO_IMAGE`, ...) and these columns. `SERVER_REPLICAS` records the fortio server pods as
-`<ctx>=<ready>/<spec>` per context, read live before the load (`<ctx>=unknown` when the read fails);
-`MIN_QPS_RATIO` and `MIN_PCT_200` record the thresholds behind `status`, and `REACH_REQUESTS`,
-`REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`, `REACH_DETAIL_TIMEOUT_SEC`, `REACH_ATTEMPTS`,
-`REACH_RETRY_SEC` and `ON_UNREACHABLE` the reach check that decides which remotes are `UNREACHABLE`.
-Next to it, `reach-<RUN_ID>.tsv` holds the reach check ([Remote reachability](#remote-reachability))
-and `latency-<RUN_ID>.md` a per-run summary with its Remote coverage section.
+`FORTIO_IMAGE`, ...) and these columns. The preamble's platform record
+([`tests/lib/platform.sh`](../lib/platform.sh): `PLATFORM`, `TEST_PLATFORM`, and per member
+`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+`PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways' build; the test pods' sidecars get
+the injector's, normally istiod's release), `NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`
+(a digest of istiod's discovery container env without `CLUSTER_ID`: its settings),
+`TUNING_OBJECTS_BY_CONTEXT` (a tuning profile's objects, `none` outside a tuning run)) names the
+platform and the mesh builds the run measured, read before the first window (a sweep reads it
+once and hands it to its combos in `platform-record.txt` in the sweep dir, and reads it again
+after its last combo: a build, istiod setting, tuning lever, tuning profile object or Kubernetes
+version that changed in between is written to `platform-drift.txt` there, as is what that read
+could not compare). An image carries the digest its pods run (`@unknown` when none has started: not
+read, never another build); `none` means no such pod. `004` prints it in every format, with a
+warning in the report itself (the top-level `warnings` array in json, empty without one) when its
+inputs differ, a value could not be read in some of them, the sweep's record changed or a tuning
+profile's objects were in place (an operator that differs only in its state is not a difference). On
+kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be read, every
+format also warns that the cross-cluster path runs (or may run) through cloud-provider-kind's
+userspace Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so
+remote latency and the remote-minus-local delta are not a cloud load balancer's; k3d (`k3s://`) and
+minikube clusters that share one host are not detected. A file without the record predates it (the
+suite supported only OpenShift with OSSM then); its values read `unknown`. `SERVER_REPLICAS` records
+the fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
+(`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the thresholds
+behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,
+`REACH_DETAIL_TIMEOUT_SEC`, `REACH_ATTEMPTS`, `REACH_RETRY_SEC` and `ON_UNREACHABLE` the reach check
+that decides which remotes are `UNREACHABLE`. Next to it, `reach-<RUN_ID>.tsv` holds the reach check
+([Remote reachability](#remote-reachability)) and `latency-<RUN_ID>.md` a per-run summary with its
+Remote coverage section.
 
 ```
 run_id  mesh_size  source_ctx  target_ctx  qps_target  qps_actual  connections

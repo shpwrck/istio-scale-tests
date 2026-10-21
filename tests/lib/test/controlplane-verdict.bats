@@ -201,6 +201,7 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	assert_output --partial "> **Attempts:** ${att}"
 	report charts
 	assert_line 'harness_content_key: "111111111111"'
+	source "${ROOT}/tests/lib/platform.sh"
 	run render_scale_envelope "$RES" "$REPORT" mesh-a,mesh-b false
 	assert_success
 	assert_output --partial "(harness \`fixture\`, HARNESS_CONTENT_KEY \`111111111111\`; report harness "

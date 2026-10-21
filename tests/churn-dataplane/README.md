@@ -70,7 +70,7 @@ evicted and Failed: then no load runs).
 ## Quick start
 
 Needs `kubectl` or `oc`, `helm`, `jq`, `curl`, the deployed mesh (see the root README)
-and kube contexts for the mesh members (not the ACM hub). Context names become Service
+and kube contexts for the mesh members (not the hub). Context names become Service
 names (`fortio-server-<ctx>`), so each must be a lowercase DNS label of at most 49
 characters; rename others with `kubectl config rename-context`.
 
@@ -242,6 +242,31 @@ validity stricter. To compare against those sweeps without the stricter rule, se
 `COEXEC_MIN_PCT_200=0`. Their TSVs have no `MIN_PCT_200` line and no reach file, so the
 report shows `unknown` and "no reachability data".
 
+Every TSV preamble also carries the platform record
+([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
+platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
+istiod's settings, the nodes' provider and any tuning profile objects (`PLATFORM_BY_CONTEXT`,
+`MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`,
+`NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env
+without `CLUSTER_ID`; `TUNING_OBJECTS_BY_CONTEXT`: `none` outside a tuning run), read before the
+baseline window (a sweep reads it once for all its combos and hands it to them in
+`platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
+setting, tuning lever, tuning profile object, Kubernetes version or the source member's count of
+Running istiod pods (`ISTIOD_REPLICAS`, recorded at a probe's start) that changed in between is
+written to `platform-drift.txt` there, as is what that read could not compare). An image carries
+the digest its pods run (`@unknown` when none has started: not read, never another build); `none`
+means no such pod. The sweep's reach file records every member the sweep covers. `005` prints the
+record in every format, with a warning in the report itself (the top-level `warnings` array in json,
+empty without one) when its inputs differ, a value could not be read in some of them, the sweep's
+record changed or a tuning profile's objects were in place (an operator that differs only in its
+state is not a difference). On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node
+provider could not be read, every format also warns that the cross-cluster path runs (or may run)
+through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer) on the host the
+kind clusters share, so at mesh sizes above 1 latency under churn is not a cloud load balancer's;
+k3d (`k3s://`) and minikube clusters that share one host are not detected. Sweeps recorded before
+the record have none of these lines (the suite supported only OpenShift with OSSM then), and the
+report reads their values as `unknown`.
+
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
@@ -258,9 +283,11 @@ churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 ```
 
 - **Keys:** `SETUP_CONTEXTS`, the `config/options.env` keys `COEXEC_*`, `REACH_*`,
-  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`, and the churn
-  suite's `CHURN_DEPLOYMENT_COUNT`, `CHURN_BASE_REPLICAS` and `CHURN_SCALE_TO_REPLICAS`.
-  `COEXEC_TEST_NAMESPACE` stays environment only.
+  `FANOUT_*`, `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform),
+  `PLATFORM_READ_TIMEOUT` (each read of the platform record), `PLATFORM_READ_PARALLEL` (members
+  read at once) and `METRICS_SCRAPE_TIMEOUT`, and the churn suite's `CHURN_DEPLOYMENT_COUNT`,
+  `CHURN_BASE_REPLICAS` and `CHURN_SCALE_TO_REPLICAS`. `COEXEC_TEST_NAMESPACE` stays
+  environment only.
 - **Run keys:** `COEXEC_MESH_SIZES` (`004 --mesh-sizes`; empty: 1 to the number of
   contexts), `COEXEC_RESULTS_DIR` (`--output-dir`, `--results-dir`; a relative path starts at
   the repo root, unlike the flags), `COEXEC_WAIT_TIMEOUT_SEC` (`001 --wait-timeout`),

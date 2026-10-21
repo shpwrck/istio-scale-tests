@@ -30,6 +30,10 @@ config_preload churn "$@"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV="${CHURN_MESH_SIZES:-}"
@@ -103,6 +107,7 @@ Environment:
   CHURN_TIMEOUT_SEC, CHURN_RESULTS_DIR (--output-dir; relative to the repo root), and
   CHURN_BASE_REPLICAS, CHURN_SETTLE_SEC, CHURN_POLL_INTERVAL_MS, CHURN_WAIT_TIMEOUT_SEC
   (read by 001/002; the sweep checks them before the first setup, --dry-run included).
+$(platform_help_lines all)
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
   step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
@@ -167,6 +172,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
+
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
 	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
@@ -174,6 +181,9 @@ else
 	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
@@ -248,6 +258,12 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
+# The platform record of every member, read once here; each 002 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the placeholders write it
+# (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$SWEEP_DIR"
+platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Write a one-row placeholder TSV for a combo whose setup or probe failed before
 # any row was written, so the report still counts it (n_total, not n_valid).
@@ -261,11 +277,13 @@ emit_churn_placeholder() {
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
 		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 		istio_version_kv | sed 's/^/# /'
-		# Same preamble keys as 002 (004 may read this file first).
+		# Same preamble keys as 002 (004 may read this file first); read now, after the failure.
+		echo "# KUBE_VERSIONS=$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")" "${KUBECTL[@]}")"
 		echo "# CHURN_SCALE_SCOPE=source"
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 21-col header (matches 002-run-churn-probe.sh).
 		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -398,6 +416,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete."
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$SWEEP_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "  Sweep finished"

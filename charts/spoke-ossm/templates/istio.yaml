@@ -9,7 +9,7 @@ metadata:
   {{- end }}
 spec:
   version: {{ .Values.istioVersion | quote }}
-  profile: openshift
+  profile: {{ required "profile is required (a Sail profile: default, openshift, ...)" .Values.profile }}
   namespace: istio-system
   values:
     global:

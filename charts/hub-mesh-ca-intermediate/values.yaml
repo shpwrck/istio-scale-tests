@@ -1,4 +1,4 @@
-# ManagedCluster name (PlacementDecision status.decisions[].clusterName) — must match [a-z0-9]([-a-z0-9]*[a-z0-9])? style names safe for Kubernetes metadata.
+# The mesh member's cluster name, set by the ApplicationSet (kubernetes: the Argo CD cluster Secret's name; openshift: PlacementDecision status.decisions[].clusterName) — must match [a-z0-9]([-a-z0-9]*[a-z0-9])? style names safe for Kubernetes metadata.
 clusterName: ""
 
 # Namespace for the Certificate and issued Secret (cert-manager operand namespace on the hub).
@@ -19,11 +19,11 @@ argoSyncWaves:
   rbac: -20
   wave: 3
 
-# Allow OpenShift GitOps application-controller to reconcile Certificate / Secret in namespace (needed when synced via ApplicationSet without hub-mesh-ca RBAC hooks).
+# Allow the Argo CD application controller to reconcile Certificate / Secret in namespace (needed when synced via ApplicationSet without hub-mesh-ca RBAC hooks).
 rbac:
   enabled: true
   argocd:
-    namespace: openshift-gitops
-    serviceAccountName: openshift-gitops-argocd-application-controller
+    namespace: argocd
+    serviceAccountName: argocd-application-controller
   labels: {}
   annotations: {}

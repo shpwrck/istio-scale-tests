@@ -44,12 +44,14 @@ prow23() {
 	# Mesh size 3: 4 iterations on 2 remotes configured, 2 written.
 	{
 		printf '# RUN_ID=r1\n# SWEEP_RUN_ID=s1\n# REMOTES=ci-b ci-c\n# MESH_SIZE=3\n# ITERATIONS=4\n'
+		platform_fixture_lines ci-a,ci-b,ci-c
 		echo "$PROP_TSV_HEADER"
 		for i in 1 2; do prow23 "$i" ci-b OK 0 0 OK 5 OK 5; prow23 "$i" ci-c OK 0 0 OK 5 OK 5; done
 	} > "${RES}/endpoint-r1.tsv"
 	# Mesh size 5: its setup failed (006's placeholder): 4 iterations x 4 remotes, none ran.
 	{
 		printf '# SWEEP_RUN_ID=s1\n# RUN_ID=s1-failms5\n# MESH_SIZE=5\n# ITERATIONS=4\n'
+		platform_fixture_lines ci-a,ci-b,ci-c
 		echo "$PROP_TSV_HEADER"
 		prop_placeholder_row s1-failms5 5 ci-a SETUP_FAILED
 	} > "${RES}/endpoint-zzfail-ms5-s1.tsv"
@@ -98,7 +100,7 @@ prow23() {
 @test "propagation 005 and tuning 004: inputs of different widths (19 and 23 columns) list them (tsv_columns) and warn in every format; one width warns nothing" {
 	source "${ROOT}/tests/lib/propagation.sh"
 	local i
-	{ echo "# RUN_ID=r1"; echo "$PROP_TSV_HEADER"; for i in 1 2 3; do prow23 "$i" ci-b OK 0 0 OK 5 OK 5; done; } > "${RES}/endpoint-r1.tsv"
+	{ echo "# RUN_ID=r1"; platform_fixture_lines ci-a,ci-b; echo "$PROP_TSV_HEADER"; for i in 1 2 3; do prow23 "$i" ci-b OK 0 0 OK 5 OK 5; done; } > "${RES}/endpoint-r1.tsv"
 	{ echo "# RUN_ID=r2"; cut -f1-19 <<<"$PROP_TSV_HEADER"; for i in 1 2 3; do RID=r2 prow23 "$i" ci-b OK 0 0 OK 5 OK 5 | cut -f1-19; done; } > "${RES}/endpoint-r2.tsv"
 	local w='the input TSVs have different column counts (19 in 1 file(s), 23 in 1 file(s)), so their rows are filtered by different rules'
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --allow-multi-run --format json
@@ -131,11 +133,12 @@ prow23() {
 	run --separate-stderr "$TUNING_CMP" --results-dir "$P"
 	assert_line "TSV columns: baseline 19; 01-x 23"
 	assert_line --partial "WARNING: the passes' TSVs have different column counts"
-	# One width: listed once, no warning.
+	# One width: listed once, no width warning (this bare sweep dir gets others: no drift
+	# files, no profile state or objects).
 	cp "${RES}/endpoint-r1.tsv" "${P}/baseline/endpoint-r2.tsv"
 	run --separate-stderr "$TUNING_CMP" --results-dir "$P" --format md
 	assert_line "- TSV columns: 23"
-	refute_output --partial "Warning"
+	refute_output --partial "different column counts"
 	rm -f "${RES}/endpoint-r2.tsv"
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format json
 	[ -z "$stderr" ]

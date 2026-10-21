@@ -7,30 +7,199 @@ metadata:
     {{- include "mesh-wiring-verify.labels" . | nindent 4 }}
 data:
   readiness.sh: |
-    #!/usr/bin/env bash
-    # Exit 0 (Ready) only if this cluster is fully wired into the mesh.
-    # Stage 1 counts remote secrets; stage 2 reads istiod_managed_clusters from
-    # istiod's unauthenticated /metrics (its /debug endpoints are not usable here).
-    set -uo pipefail
+    #!/bin/sh
+    # Exit 0 (Ready) only if this cluster is fully wired into the mesh. The stages, in order:
+    #   1. the remote secrets, from a Table listing (metadata only, never secret data);
+    #   3. istiod signs with the shared mesh root from cacerts (no istiod needed, so before 2);
+    #   4. the east-west gateway Service has an address (the other members reach this one there);
+    #   2. every Ready istiod replica has ingested the members (istiod_managed_clusters) and
+    #      synced every remote one (istiod_remote_cluster_sync_status), from its unauthenticated
+    #      /metrics (its /debug endpoints are not usable here).
+    # With the members' names (EXPECTED_CLUSTERS) stages 1 and 2 check each other member by name
+    # and name every remote secret or remote cluster of no member; without them they count
+    # (EXPECTED_MEMBERS), which cannot tell a removed member's leftover secret from a member's.
+    # POSIX sh and curl: the Kubernetes API is read with the pod's ServiceAccount token. Every
+    # request gets at most what is left of CHECK_TIMEOUT (the deployment sets it below the
+    # probe's timeoutSeconds), so a slow API gives a NotReady reason, not a bare probe timeout.
+    # Files go only to WORK_DIR (the deployment's emptyDir; TMPDIR or /tmp when it is unset).
+    set -u
 
     NS="${ISTIO_NAMESPACE:-istio-system}"
     EXPECTED="${EXPECTED_MEMBERS:-0}"
+    NAMES="${EXPECTED_CLUSTERS:-}"
+    SELF="${CLUSTER_NAME:-}"
+    SA=/var/run/secrets/kubernetes.io/serviceaccount
+    CHECK_TIMEOUT="${CHECK_TIMEOUT:-8}"
+    DEADLINE=$(( $(date +%s) + CHECK_TIMEOUT ))
 
-    # Stage 1: remote secrets (-o name reads metadata only, never secret data).
-    n=$(oc get secret -n "$NS" -l istio/multiCluster=true -o name 2>/dev/null | wc -l || true)
-    if [ "$EXPECTED" -gt 0 ] && [ "$n" -lt "$EXPECTED" ]; then
+    # budget WHAT: sets MT, the seconds the next request may take (CURL_TIMEOUT, or less when
+    # less is left before DEADLINE); NotReady when nothing is left. Call it directly, never in
+    # $(...): its exit must end the script.
+    budget() {
+      left=$(( DEADLINE - $(date +%s) ))
+      if [ "$left" -lt 1 ]; then
+        echo "NotReady: the ${CHECK_TIMEOUT}s check budget ran out before ${1} (slow API server or istiod)" >&2
+        exit 1
+      fi
+      MT="${CURL_TIMEOUT:-5}"
+      if [ "$left" -lt "$MT" ]; then MT="$left"; fi
+    }
+
+    # api_get PATH ACCEPT: sets BODY and CODE (000 when the request itself failed).
+    api_get() {
+      budget "GET $1"
+      resp=$(curl -sS --max-time "$MT" -A mesh-wiring-verify --cacert "$SA/ca.crt" \
+        -H "Authorization: Bearer $(cat "$SA/token")" -H "Accept: $2" \
+        -w '\n%{http_code}' "https://kubernetes.default.svc$1")
+      rc=$?
+      CODE=$(printf '%s\n' "$resp" | tail -n 1)
+      BODY=$(printf '%s\n' "$resp" | sed '$d')
+      resp=
+      if [ "$rc" = 28 ]; then CODE="000, no answer within ${MT}s"; fi
+    }
+    # The value of a "root-cert.pem" string key: the greedy .* takes the last one on the first
+    # line that has one. The API's JSON is one line, and managedFields' "f:root-cert.pem":{} is
+    # not a string, so that is the data key.
+    root_cert_field() { sed -n 's/.*"root-cert\.pem": *"\([^"]*\)".*/\1/p' | head -n 1; }
+    # PEM (or a JSON string of it) to its base64 body: no markers, no line breaks.
+    pem_body() { tr -d '\r\n' | sed -e 's/\\n//g' -e 's/-----[A-Z ]*-----//g'; }
+    # The space-separated list $1 as "a, b, c".
+    commas() { printf '%s' "$1" | sed 's/ /, /g'; }
+    # The same with five names at most, then how many more.
+    commas_capped() { printf '%s' "$1" | awk '{ s = $1; for (i = 2; i <= NF && i <= 5; i++) s = s ", " $i; if (NF > 5) s = s " and " (NF - 5) " more"; printf "%s", s }'; }
+    # quoted_capped: the lines on stdin, each quoted (a stray space shows), five at most, then how many more.
+    quoted_capped() { awk '{ n++; if (n <= 5) s = s (n > 1 ? ", " : "") "\"" $0 "\"" } END { if (n > 5) s = s " and " (n - 5) " more"; printf "%s", s }'; }
+
+    # The mesh members by name: each one's Istio cluster ID, which is also the suffix of its
+    # remote secret istio-remote-secret-<name>. members holds them all, others all but this
+    # member (SELF, whose own secret istiod skips). A problem found here or in stage 1 sets bad:
+    # the later stages still run, so one probe names everything, and the check ends NotReady.
+    members="" others="" missing="" stale_ids="" bad=0
+    if [ -n "$NAMES" ]; then
+      odd=""
+      case "$NAMES" in
+        *[!a-z0-9.,-]*)
+          odd=$(printf '%s\n' "$NAMES" | tr ',' '\n' | grep -v '^[a-z0-9.-]*$' | quoted_capped)
+          odd="expectedClusters holds ${odd:-a line break}" ;;
+      esac
+      case "$SELF" in
+        *[!a-z0-9.-]*) odd="${odd:+${odd}; }clusterName is \"${SELF}\"" ;;
+      esac
+      if [ -n "$odd" ]; then
+        echo "NotReady: ${odd}: expectedClusters and clusterName take only cluster names (lowercase letters, digits, '-' and '.'), the list comma-separated" >&2
+        exit 1
+      fi
+      case ",${NAMES}," in
+        *,,*) echo "NotReady: expectedClusters holds an empty name: a comma at either end of the list, or two in a row" >&2; exit 1 ;;
+      esac
+      members=$(printf '%s' "$NAMES" | tr ',' ' ')
+      dup=$(printf '%s' "$NAMES" | tr ',' '\n' | sort | uniq -d | tr '\n' ' ')
+      n_names=$(printf '%s' "$NAMES" | tr ',' '\n' | grep -c .)
+      if [ -n "$dup" ]; then
+        echo "NotReady: expectedClusters repeats $(commas_capped "${dup% }") (${n_names} names in all): list each member once" >&2
+        exit 1
+      fi
+      if [ "$EXPECTED" -gt 0 ] && [ "$EXPECTED" -ne "$n_names" ]; then
+        echo "NotReady: expectedMembers is ${EXPECTED} but expectedClusters names ${n_names} member(s) ($(commas_capped "$members")): set both from the same members, or expectedMembers to 0" >&2
+        exit 1
+      fi
+      EXPECTED=$n_names
+      if [ -z "$SELF" ]; then
+        echo "NotReady: expectedClusters is set but clusterName is empty, so the gate cannot tell which member it runs on (the ApplicationSet sets it per member)" >&2
+        exit 1
+      fi
+      case ",${NAMES}," in
+        *",${SELF},"*) ;;
+        *) echo "NotReady: this member (${SELF}) is not in expectedClusters ($(commas_capped "$members")); a member the apply just added waits for the gate ApplicationSet's new list" >&2
+           exit 1 ;;
+      esac
+      others=$(printf '%s' "$NAMES" | tr ',' '\n' | grep -vxF "$SELF" | tr '\n' ' ')
+      others="${others% }"
+    fi
+
+    # Stage 1: the remote secrets, from a Table listing (metadata only, never secret data).
+    api_get "/api/v1/namespaces/${NS}/secrets?labelSelector=istio%2FmultiCluster%3Dtrue&includeObject=None" \
+      'application/json;as=Table;g=meta.k8s.io;v=v1'
+    if [ "$CODE" != 200 ]; then
+      echo "NotReady: cannot list the remote secrets in ${NS} (HTTP ${CODE})" >&2
+      exit 1
+    fi
+    n=$(printf '%s' "$BODY" | grep -o '"cells":' | wc -l)
+    n=$((n + 0))
+    if [ -n "$NAMES" ]; then
+      # By name: istio-remote-secret-<m> for every other member m, and no remote secret of any
+      # other name. A member that left keeps its secret on every other member (External Secrets
+      # does not delete what it pushed), and istiod keeps that cluster and its last sync state
+      # until the secret is deleted, so a count would take it for a member's. A row's first cell
+      # is the Secret's name (the Table's Name column).
+      s1=$(printf '%s' "$BODY" | grep -o '"cells": *\[ *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' |
+        awk -v others="$others" -v members="$members" '
+          $0 != "" { have[$0] = 1; order[++k] = $0 }
+          END {
+            n = split(others, a, " ")
+            for (i = 1; i <= n; i++) if (!(("istio-remote-secret-" a[i]) in have)) miss = miss (miss == "" ? "" : " ") a[i]
+            n = split(members, a, " ")
+            for (i = 1; i <= n; i++) mine["istio-remote-secret-" a[i]] = 1
+            for (i = 1; i <= k; i++) {
+              s = order[i]
+              if (s in mine) continue
+              stale = stale (stale == "" ? "" : " ") s
+              if (s ~ /^istio-remote-secret-./) ids = ids (ids == "" ? "" : " ") substr(s, 21)
+            }
+            printf "missing %s\nstale %s\nids %s\n", miss, stale, ids
+          }')
+      missing=$(printf '%s\n' "$s1" | sed -n 's/^missing //p')
+      stale=$(printf '%s\n' "$s1" | sed -n 's/^stale //p')
+      stale_ids=$(printf '%s\n' "$s1" | sed -n 's/^ids //p')
+      if [ -n "$missing" ]; then
+        # The hub's PushSecret of each (charts/hub-mesh-push-secrets: its name is cut at 63).
+        pushes=$(for m in $missing; do printf 'push-remote-secret-%s\n' "$m" | cut -c1-63 | sed 's/-$//'; done | tr '\n' ' ')
+        echo "NotReady: no remote secret here for mesh member(s) $(commas "$missing") (${NS} has no $(commas "$(printf '%s' "$missing" | sed 's/[^ ][^ ]*/istio-remote-secret-&/g')")): External Secrets on the hub has not pushed it here; on the hub, kubectl -n external-secrets-operator describe pushsecret ${pushes% } shows the stores each one reached and its last error" >&2
+        bad=1
+      fi
+      if [ -n "$stale" ]; then
+        echo "NotReady: remote secret(s) of no mesh member (not in expectedClusters): $(commas "$stale"). istiod keeps the cluster in each, and its last sync state, until the secret is deleted, and External Secrets leaves a removed member's behind; if that cluster left the mesh, delete them on this member: kubectl -n ${NS} delete secret ${stale}" >&2
+        bad=1
+      fi
+    elif [ "$EXPECTED" -gt 0 ] && [ "$n" -lt "$EXPECTED" ]; then
       echo "NotReady: remote secrets ${n} < expected ${EXPECTED}" >&2
       exit 1
     fi
 
     # Stage 3 (before 2, it needs no istiod): istiod must sign with the shared mesh
     # root from cacerts. istiod reads cacerts only at startup; started without it,
-    # it falls back to a self-signed root and cross-cluster mTLS fails.
+    # it falls back to a self-signed root and cross-cluster mTLS fails. root= is the
+    # first 16 hex digits of the root certificate's SHA-256: the same on every member
+    # when they share one root.
+    ca=unchecked root=unchecked
     if [ "${CA_CHECK_ENABLED:-true}" = "true" ]; then
-      want=$(oc get secret cacerts -n "$NS" -o jsonpath='{.data.root-cert\.pem}' 2>/dev/null | base64 -d 2>/dev/null | grep -v -- '-----' | tr -d '\n')
-      have=$(oc get configmap istio-ca-root-cert -n "$NS" -o jsonpath='{.data.root-cert\.pem}' 2>/dev/null | grep -v -- '-----' | tr -d '\n')
+      api_get "/api/v1/namespaces/${NS}/secrets/cacerts" application/json
+      case "$CODE" in
+        200) ;;
+        404) echo "NotReady: no cacerts secret in ${NS}" >&2; exit 1 ;;
+        *) echo "NotReady: cannot read cacerts in ${NS} (HTTP ${CODE})" >&2; exit 1 ;;
+      esac
+      rootpem=$(printf '%s\n' "$BODY" | root_cert_field | base64 -d 2>/dev/null)
+      # The response also holds the CA key; drop it.
+      BODY=
+      want=$(printf '%s\n' "$rootpem" | pem_body)
+      first=$(printf '%s\n' "$rootpem" | awk '/-----BEGIN CERTIFICATE-----/ { f = 1 } f { print } /-----END CERTIFICATE-----/ { if (f) exit }' | pem_body)
+      # Only well-formed base64 is hashed: BusyBox base64 -d skips what it cannot decode and
+      # still exits 0, which would print the hash of nothing.
+      root=unknown
+      if [ -n "$first" ] && printf '%s' "$first" | grep -Eq '^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$' &&
+        printf '%s' "$first" | base64 -d >/dev/null 2>&1; then
+        root=$(printf '%s' "$first" | base64 -d | sha256sum | cut -c1-16)
+      fi
+      api_get "/api/v1/namespaces/${NS}/configmaps/istio-ca-root-cert" application/json
+      case "$CODE" in
+        200) ;;
+        404) echo "NotReady: no istio-ca-root-cert ConfigMap in ${NS} (istiod has not started)" >&2; exit 1 ;;
+        *) echo "NotReady: cannot read istio-ca-root-cert in ${NS} (HTTP ${CODE})" >&2; exit 1 ;;
+      esac
+      have=$(printf '%s\n' "$BODY" | root_cert_field | pem_body)
       if [ -z "$want" ]; then
-        echo "NotReady: no cacerts secret in ${NS}" >&2
+        echo "NotReady: cacerts in ${NS} has no root-cert.pem" >&2
         exit 1
       fi
       case "$have" in
@@ -38,43 +207,274 @@ data:
         *) echo "NotReady: istiod is not using the shared mesh root from cacerts (it started before cacerts existed; restart istiod)" >&2
            exit 1 ;;
       esac
+      ca=shared
     fi
 
-    # Stage 2: clusters istiod has ingested (local + remote).
+    # Stage 4: the east-west gateway Service has an address. Without one (a LoadBalancer
+    # <pending>), the other members have nowhere to send this member's cross-network traffic.
+    eastwest=unchecked
+    if [ "${EASTWEST_CHECK_ENABLED:-true}" = "true" ]; then
+      svc="${EASTWEST_SERVICE:-istio-eastwestgateway}"
+      api_get "/api/v1/namespaces/${NS}/services/${svc}" application/json
+      case "$CODE" in
+        200) ;;
+        404) echo "NotReady: no east-west gateway Service ${NS}/${svc}" >&2; exit 1 ;;
+        *) echo "NotReady: cannot read the Service ${NS}/${svc} (HTTP ${CODE})" >&2; exit 1 ;;
+      esac
+      type=$(printf '%s' "$BODY" | grep -oE '"type": *"[A-Za-z]*"' | head -n 1 | sed 's/.*"\([A-Za-z]*\)"$/\1/')
+      if [ "$type" = LoadBalancer ]; then
+        eastwest=$(printf '%s' "$BODY" | grep -oE '"ingress": *\[\{"(ip|hostname)": *"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+        if [ -z "$eastwest" ]; then
+          echo "NotReady: the east-west gateway Service ${NS}/${svc} has no external address yet (LoadBalancer <pending>)" >&2
+          exit 1
+        fi
+      else
+        eastwest="${type:-unknown}"
+      fi
+    fi
+    BODY=
+
+    # Stage 2: every Ready istiod replica has ingested the members and synced every remote one.
+    # Each replica dials every member's API server itself, from its own node, so one replica can
+    # fail where another syncs, and the istiod Service answers from one replica per request. So
+    # the check reads the /metrics of each Ready endpoint of that Service (its EndpointSlices),
+    # all at once within what is left of the budget, and every replica must pass.
     if [ "${ISTIOD_CHECK_ENABLED:-true}" = "true" ]; then
-      url="http://${ISTIOD_HOST:-istiod.istio-system.svc}:${ISTIOD_PORT:-15014}/metrics"
-      body=$(curl -sf --max-time "${CURL_TIMEOUT:-5}" "$url") || {
-        echo "NotReady: istiod metrics unreachable at ${url}" >&2
+      isvc="${ISTIOD_SERVICE:-istiod}"
+      port="${ISTIOD_PORT:-15014}"
+      api_get "/apis/discovery.k8s.io/v1/namespaces/${NS}/endpointslices?labelSelector=kubernetes.io%2Fservice-name%3D${isvc}" application/json
+      if [ "$CODE" != 200 ]; then
+        echo "NotReady: cannot list the EndpointSlices of the istiod Service ${NS}/${isvc} (HTTP ${CODE})" >&2
+        exit 1
+      fi
+      # The replicas' files go to a directory of their own in WORK_DIR. A probe the kubelet
+      # killed leaves its directory behind; the next probe removes those older than 10 minutes.
+      wd="${WORK_DIR:-}"
+      if [ -n "$wd" ]; then
+        find "$wd" -maxdepth 1 -type d -name 'mesh-wiring-verify.*' -mmin +10 -exec rm -rf {} + 2>/dev/null
+      else
+        wd="${TMPDIR:-/tmp}"
+      fi
+      work=$(mktemp -d "${wd}/mesh-wiring-verify.XXXXXX") || {
+        echo "NotReady: cannot create a work directory in ${wd} (the deployment mounts an emptyDir at WORK_DIR)" >&2
         exit 1
       }
-      get_metric() {
-        # Value of the first matching sample, decimals stripped.
-        local line; line=$(printf '%s\n' "$body" | grep -E "^istiod_managed_clusters\{[^}]*cluster_type=\"$1\"" | head -1)
-        line="${line##* }"; printf '%s' "${line%%.*}"
+      trap 'rm -rf "$work"' EXIT
+      # "<address> <pod>" for each Ready endpoint. Each endpoint object starts with its addresses
+      # (the API's field order, and the alphabetical one); its conditions and targetRef are flat
+      # objects. An endpoint whose ready condition is false (terminating included) is skipped;
+      # one without a ready condition counts as ready (the API's rule). Its first address stands
+      # for it (they all reach the same pod), and a pod in two slices (dual-stack) is read once.
+      printf '%s' "$BODY" | tr -d '\r\n' | awk '{
+          n = split($0, ep, "[{] *\"addresses\": *[[]")
+          for (i = 2; i <= n; i++) {
+            e = ep[i]
+            sub(/"(ports|metadata)":.*/, "", e)
+            if (!match(e, /^ *"[^"]*"/)) continue
+            a = substr(e, RSTART, RLENGTH)
+            gsub(/[ "]/, "", a)
+            if (match(e, /"conditions": *[{][^}]*[}]/) && substr(e, RSTART, RLENGTH) ~ /"ready": *false/) continue
+            p = "-"
+            if (match(e, /"targetRef": *[{][^}]*[}]/)) {
+              t = substr(e, RSTART, RLENGTH)
+              if (match(t, /"name": *"[^"]*"/)) {
+                p = substr(t, RSTART, RLENGTH)
+                sub(/^"name": *"/, "", p)
+                sub(/"$/, "", p)
+              }
+            }
+            key = (p == "-") ? a : p
+            if (!(key in seen)) { seen[key] = 1; print a, p }
+          }
+        }' >"$work/endpoints"
+      BODY=
+      count=$(wc -l <"$work/endpoints")
+      count=$((count + 0))
+      if [ "$count" -eq 0 ]; then
+        echo "NotReady: the istiod Service ${NS}/${isvc} has no Ready endpoint, so no istiod replica can be checked (kubectl -n ${NS} get endpointslices -l kubernetes.io/service-name=${isvc})" >&2
+        exit 1
+      fi
+      # Every replica at once, each with what is left of the budget; only the lines the checks
+      # read are kept.
+      budget "reading /metrics from ${count} istiod replica(s)"
+      k=0
+      while read -r addr pod <&3; do
+        k=$((k + 1))
+        case "$addr" in *:*) h="[${addr}]" ;; *) h="$addr" ;; esac
+        { curl -sSfg --max-time "$MT" "http://${h}:${port}/metrics" </dev/null 2>"$work/$k.err"; echo "$?" >"$work/$k.rc"; } |
+          grep -E '^(istio_build|istiod_managed_clusters|istiod_remote_cluster_sync_status)[{]' >"$work/$k.metrics" &
+      done 3<"$work/endpoints"
+      wait
+
+      # replica_check: the checks on replica k ($addr, $pod, URL host $h), from its files. Prints
+      # why and returns 1 when it fails; else sets r_local, r_remote, r_managed and r_synced.
+      replica_check() {
+        if [ "$pod" = - ]; then who="istiod endpoint ${addr}"; else who="istiod pod ${pod} (${addr})"; fi
+        m="$work/$k.metrics"
+        rc=$(cat "$work/$k.rc" 2>/dev/null)
+        if [ "$rc" != 0 ]; then
+          case "$rc" in
+            28) why="no answer within ${MT}s" ;;
+            "") why="the request did not finish" ;;
+            *) why=$(head -n 1 "$work/$k.err" 2>/dev/null); why="${why:-curl exit $rc}" ;;
+          esac
+          echo "NotReady: ${who}: metrics unreachable at http://${h}:${port}/metrics (${why})" >&2
+          return 1
+        fi
+        r_local=$(grep 'cluster_type="local"' "$m" | grep '^istiod_managed_clusters[{]' | head -n 1 | awk '{ print int($NF + 0) }')
+        r_remote=$(grep 'cluster_type="remote"' "$m" | grep '^istiod_managed_clusters[{]' | head -n 1 | awk '{ print int($NF + 0) }')
+        r_local=${r_local:-0} r_remote=${r_remote:-0}
+        r_managed=$(( r_local + r_remote ))
+        if [ "$r_managed" -eq 0 ]; then
+          echo "NotReady: ${who} reports 0 managed clusters (metric missing?)" >&2
+          return 1
+        fi
+        # By count (no names, or names without the sync metric, which is what names each
+        # cluster). Without an expected size: every remote secret must be ingested.
+        by_name=no
+        if [ -n "$NAMES" ] && [ "${REQUIRE_REMOTE_SYNC:-true}" = "true" ]; then by_name=yes; fi
+        if [ "$by_name" = no ] && [ "$EXPECTED" -eq 0 ] && [ "$r_managed" -lt "$n" ]; then
+          echo "NotReady: ${who} manages ${r_managed} clusters < ${n} remote secrets present" >&2
+          return 1
+        fi
+        if [ "$by_name" = no ] && [ "$EXPECTED" -gt 0 ] && [ "$r_managed" -lt "$EXPECTED" ]; then
+          echo "NotReady: ${who} manages ${r_managed} clusters (local=${r_local} remote=${r_remote}) < expected ${EXPECTED}" >&2
+          return 1
+        fi
+        # Check the remote count directly: the total above can hide a missing remote.
+        if [ "$by_name" = no ] && [ "$EXPECTED" -gt 1 ] && [ "$r_remote" -lt "$(( EXPECTED - 1 ))" ]; then
+          echo "NotReady: ${who} sees ${r_remote} remote clusters < expected $(( EXPECTED - 1 )) (N-1)" >&2
+          return 1
+        fi
+        # Managed is not synced: istiod counts a remote cluster as soon as its secret parses. One
+        # whose API server it cannot reach or use (the URL, CA or token in the remote secret)
+        # stays syncing, then timeout, and istiod goes Ready anyway after
+        # PILOT_REMOTE_CLUSTER_TIMEOUT. So at least N-1 (with expectedMembers 0: every managed
+        # remote) must be synced. When a remote secret changes, Istio 1.30 and later sync a new
+        # connection, then stop the old one, and that stop overwrites the metric with closed:
+        # closed counts as synced there (a new connection that cannot sync stays timeout and the
+        # old one keeps running). Istio 1.29 stops the old connection first and keeps it when the
+        # new one fails to start, so closed can be a dead connection: it counts only when the
+        # replica's istio_build tag reads 1.30 or a later 1.x. Any other tag (a build name, or a
+        # product's own version such as OSSM's 3.x) fails closed. A deleted cluster reads 0 for
+        # every status.
+        # The metric is set on each (re)connect only, so a token revoked later still reads synced
+        # (istiod's log shows the errors).
+        r_synced=unchecked
+        if [ "${REQUIRE_REMOTE_SYNC:-true}" != "true" ]; then return 0; fi
+        if [ "$EXPECTED" -gt 0 ]; then need=$(( EXPECTED - 1 )); else need=$r_remote; fi
+        # (A replica that manages no remote cluster has no series to export; by name, each
+        # other member is then not managed.)
+        if [ "$need" -gt 0 ] && [ "$r_remote" -gt 0 ] && ! grep -q '^istiod_remote_cluster_sync_status[{]' "$m"; then
+          echo "NotReady: ${who} exports no istiod_remote_cluster_sync_status (Istio before 1.29?), so the ${need} remote cluster(s) cannot be checked as synced; set istiodCheck.requireRemoteSync=false to skip this" >&2
+          return 1
+        fi
+        tag=$(grep 'component="pilot"' "$m" | grep '^istio_build[{]' | head -n 1 | sed -n 's/.*[{,]tag="\([^"]*\)".*/\1/p')
+        closed_ok=$(printf '%s\n' "$tag" | awk -F. '{ v = $2; sub(/[^0-9].*/, "", v); ok = "no"
+          if ($1 == "1" && v != "" && v + 0 >= 30) ok = "yes"
+          print ok; exit }')
+        # "<cluster> <status>" for each status sample whose value is 1.
+        states=$(grep '^istiod_remote_cluster_sync_status[{]' "$m" |
+          awk '$NF + 0 == 1 { c = $0; sub(/.*[{,]cluster="/, "", c); sub(/".*/, "", c); s = $0; sub(/.*[{,]status="/, "", s); sub(/".*/, "", s); print c, s }')
+        if [ "$pod" = - ]; then fix="restarting that istiod"; else fix="restarting the pod (kubectl -n ${NS} delete pod ${pod})"; fi
+        case "$tag" in "" | 1.[0-9]*) tag_note="" ;; *) tag_note=", which does not read as 1.<minor>" ;; esac
+        closed_why="closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is ${tag:-missing}${tag_note} (before 1.30, closed can be a stopped connection that nothing replaced); ${fix} reconnects every remote cluster."
+        api_why="This member's istiod must reach each member's API server at the URL in its remote secret"
+        if [ -n "$NAMES" ]; then
+          # By name: every other member synced, and no remote cluster of any other name. Stage 1
+          # already named a member without a secret and the cluster of a stale secret.
+          res=$(printf '%s\n' "$states" | awk -v ok="$closed_ok" -v others="$others" -v members="$members" \
+            -v self="$SELF" -v missing="$missing" -v staleids="$stale_ids" '
+            $1 != "" {
+              if (!($1 in st)) { order[++k] = $1; st[$1] = $2 } else st[$1] = st[$1] "/" $2
+              if ($2 == "synced" || ($2 == "closed" && ok == "yes")) good[$1] = 1
+            }
+            END {
+              n = split(missing, a, " "); for (i = 1; i <= n; i++) nosecret[a[i]] = 1
+              n = split(staleids, a, " "); for (i = 1; i <= n; i++) named[a[i]] = 1
+              n = split(members, a, " "); for (i = 1; i <= n; i++) member[a[i]] = 1
+              n = split(others, a, " ")
+              for (i = 1; i <= n; i++) {
+                m = a[i]
+                if (m in good) synced++
+                else if (!(m in nosecret)) u = u (u == "" ? "" : ", ") m " (" ((m in st) ? st[m] : "not managed") ")"
+              }
+              for (i = 1; i <= k; i++) {
+                c = order[i]
+                if (c == self) s = c " (" st[c] ")"
+                else if (!(c in member) && !(c in named)) x = x (x == "" ? "" : ", ") c " (" st[c] ")"
+              }
+              printf "synced %d\nunsynced %s\noutside %s\nself %s\n", synced, u, x, s
+            }')
+          r_synced=$(printf '%s\n' "$res" | sed -n 's/^synced //p')
+          unsynced=$(printf '%s\n' "$res" | sed -n 's/^unsynced //p')
+          outside=$(printf '%s\n' "$res" | sed -n 's/^outside //p')
+          selfrem=$(printf '%s\n' "$res" | sed -n 's/^self //p')
+          r_ok=0
+          if [ -n "$unsynced" ]; then
+            msg="NotReady: ${who} has not synced mesh member(s) ${unsynced}."
+            case "$unsynced" in *"(closed"* | *"/closed"*) msg="${msg} ${closed_why}" ;; esac
+            case "$unsynced" in
+              *"(not managed)"*)
+                if [ "$pod" = - ]; then logs="that istiod's log"; else logs="kubectl -n ${NS} logs ${pod} | grep <member>"; fi
+                msg="${msg} not managed: the member's remote secret is here, but istiod holds no cluster of that name from it (a kubeconfig it cannot use, another data key, or a cluster ID another secret already holds; ${logs})." ;;
+            esac
+            case "$unsynced" in *"(syncing"* | *"(timeout"* | *"/syncing"* | *"/timeout"*) msg="${msg} ${api_why}" ;; esac
+            echo "$msg" >&2
+            r_ok=1
+          fi
+          if [ -n "$outside" ]; then
+            echo "NotReady: ${who} manages remote cluster(s) of no mesh member (not in expectedClusters): ${outside}. istiod keeps a cluster until the remote secret that holds it is deleted: kubectl -n ${NS} get secrets -l istio/multiCluster=true -o json | jq -r '.items[] | .metadata.name + \": \" + (.data // {} | keys | join(\",\"))' lists each remote secret's clusters; if that cluster left the mesh, delete its secret (or only that key, in a member's secret)" >&2
+            r_ok=1
+          fi
+          if [ -n "$selfrem" ]; then
+            echo "NotReady: ${who} manages this member's own name as a remote cluster: ${selfrem}. So its cluster ID is not ${SELF}: clusterName must be the Istio cluster ID of this member (the Istio CR's spec.values.global.multiCluster.clusterName), whose own remote secret istiod then skips" >&2
+            r_ok=1
+          fi
+          return "$r_ok"
+        fi
+        r_synced=$(printf '%s\n' "$states" | awk -v ok="$closed_ok" '$2 == "synced" || ($2 == "closed" && ok == "yes") { k++ } END { print k + 0 }')
+        if [ "$r_synced" -lt "$need" ]; then
+          pending=$(printf '%s\n' "$states" | awk -v ok="$closed_ok" '$1 != "" && $2 != "synced" && !($2 == "closed" && ok == "yes") { printf "%s%s (%s)", (k++ ? ", " : ""), $1, $2 }')
+          msg="NotReady: ${who} has synced ${r_synced} remote cluster(s) < ${need}; not synced: ${pending:-none reported}."
+          case "$pending" in
+            *"(closed)"*) msg="${msg} ${closed_why}" ;;
+          esac
+          # Anything left besides closed: the API-server advice.
+          rest=$(printf '%s' "$pending" | sed 's/[^ ,]* (closed)//g; s/[ ,]//g')
+          if [ -n "$rest" ] || [ -z "$pending" ]; then
+            msg="${msg} ${api_why}"
+          fi
+          echo "$msg" >&2
+          return 1
+        fi
+        return 0
       }
-      local_n=$(get_metric local); remote_n=$(get_metric remote)
-      managed=$(( ${local_n:-0} + ${remote_n:-0} ))
-      if [ "$managed" -eq 0 ]; then
-        echo "NotReady: istiod reports 0 managed clusters (metric missing?)" >&2
-        exit 1
-      fi
-      # Without an expected size: every remote secret must be ingested.
-      if [ "$EXPECTED" -eq 0 ] && [ "$managed" -lt "$n" ]; then
-        echo "NotReady: istiod manages ${managed} clusters < ${n} remote secrets present" >&2
-        exit 1
-      fi
-      if [ "$EXPECTED" -gt 0 ] && [ "$managed" -lt "$EXPECTED" ]; then
-        echo "NotReady: istiod manages ${managed} clusters (local=${local_n:-0} remote=${remote_n:-0}) < expected ${EXPECTED}" >&2
-        exit 1
-      fi
-      # Check the remote count directly: the total above can hide a missing remote.
-      if [ "$EXPECTED" -gt 1 ] && [ "${remote_n:-0}" -lt "$(( EXPECTED - 1 ))" ]; then
-        echo "NotReady: istiod sees ${remote_n:-0} remote clusters < expected $(( EXPECTED - 1 )) (N-1)" >&2
-        exit 1
-      fi
-      echo "Ready: secrets=${n} istiod_managed=${managed} (local=${local_n:-0} remote=${remote_n:-0}) expected=${EXPECTED} ca=shared"
+
+      # Every failing replica is named. The Ready figures are the lowest any replica reports.
+      failed=0 lo_local="" lo_remote="" lo_managed="" lo_synced=""
+      k=0
+      while read -r addr pod <&3; do
+        k=$((k + 1))
+        case "$addr" in *:*) h="[${addr}]" ;; *) h="$addr" ;; esac
+        if ! replica_check; then
+          failed=1
+          continue
+        fi
+        if [ -z "$lo_managed" ] || [ "$r_managed" -lt "$lo_managed" ]; then lo_managed=$r_managed; fi
+        if [ -z "$lo_local" ] || [ "$r_local" -lt "$lo_local" ]; then lo_local=$r_local; fi
+        if [ -z "$lo_remote" ] || [ "$r_remote" -lt "$lo_remote" ]; then lo_remote=$r_remote; fi
+        if [ "$r_synced" = unchecked ]; then
+          lo_synced=unchecked
+        elif [ -z "$lo_synced" ] || [ "$r_synced" -lt "$lo_synced" ]; then
+          lo_synced=$r_synced
+        fi
+      done 3<"$work/endpoints"
+      if [ "$failed" != 0 ] || [ "$bad" != 0 ]; then exit 1; fi
+      echo "Ready: secrets=${n} istiod_managed=${lo_managed} (local=${lo_local} remote=${lo_remote}) expected=${EXPECTED} members=${NAMES:-unchecked} ca=${ca} synced=${lo_synced} replicas=${count} root=${root} eastwest=${eastwest}"
       exit 0
     fi
 
-    echo "Ready: secrets=${n} expected=${EXPECTED} (istiod check disabled)"
+    if [ "$bad" != 0 ]; then exit 1; fi
+    echo "Ready: secrets=${n} expected=${EXPECTED} members=${NAMES:-unchecked} ca=${ca} root=${root} eastwest=${eastwest} (istiod check disabled)"
     exit 0

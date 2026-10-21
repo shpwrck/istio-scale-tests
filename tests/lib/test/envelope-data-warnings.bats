@@ -15,6 +15,7 @@ FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
 setup() {
 	source "${ROOT}/tests/lib/capacity.sh"
 	source "${ROOT}/tests/lib/envelope.sh"
+	source "${ROOT}/tests/lib/platform.sh"
 }
 
 @test "the scale envelope has one Data warning line per data warning of 004's json, after its header lines, and none without one; a redacted copy maps the members they name" {

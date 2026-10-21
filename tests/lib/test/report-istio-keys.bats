@@ -64,9 +64,9 @@ _gen_tsv() {
 @test "propagation 005 prints both keys in every format; differing inputs read mixed; an older TSV reads unknown" {
 	prow() { printf '%s\t2\t1\tsrc\trmt\t0\t100\t500\t3000\tOK\t100\t100\t40/40\t40\t0\t0\t0\t5000\t10\n' "$1"; }
 	mkdir -p "${RES}/one" "${RES}/two" "${RES}/old"
-	{ echo "# RUN_ID=r1"; keys "$REV_A" "$PV_A"; echo "$PROP_HDR"; prow r1; } > "${RES}/one/endpoint-r1.tsv"
+	{ echo "# RUN_ID=r1"; keys "$REV_A" "$PV_A"; platform_fixture_lines src,rmt; echo "$PROP_HDR"; prow r1; } > "${RES}/one/endpoint-r1.tsv"
 	cp "${RES}/one/endpoint-r1.tsv" "${RES}/two/"
-	{ echo "# RUN_ID=r2"; keys "$REV_B" "$PV_B"; echo "$PROP_HDR"; prow r2; } > "${RES}/two/endpoint-r2.tsv"
+	{ echo "# RUN_ID=r2"; keys "$REV_B" "$PV_B"; platform_fixture_lines src,rmt; echo "$PROP_HDR"; prow r2; } > "${RES}/two/endpoint-r2.tsv"
 	{ echo "# RUN_ID=r3"; echo "$PROP_HDR"; prow r3; } > "${RES}/old/endpoint-r3.tsv"
 	local R="${ROOT}/tests/propagation/005-report-results.sh"
 	run "$R" --results-dir "${RES}/one"
@@ -119,8 +119,8 @@ _gen_tsv() {
 @test "churn-dataplane 005 prints both keys in every format, md cells escaped; mixed and unknown as well" {
 	drow() { printf '%s\tsha\tc1\t2\t%s\t%s\t60\t50\t48\t4\t3\t9\t6\t7\tN/A\t0\tOK\t10\t10\t100\t30\t5\t99\tN/A\tN/A\n' "$1" "$2" "$3"; }
 	mkdir -p "${RES}/two" "${RES}/old"
-	{ echo "# RUN_ID=r1"; keys "$REV_A" "$PV_A"; echo "$CD_HDR"; drow r1 0 baseline; drow r1 1 churn; } > "${RES}/two/churn-dataplane-r1.tsv"
-	{ echo "# RUN_ID=r2"; keys "$REV_B" "$PV_B"; echo "$CD_HDR"; drow r2 0 baseline; drow r2 1 churn; } > "${RES}/two/churn-dataplane-r2.tsv"
+	{ echo "# RUN_ID=r1"; keys "$REV_A" "$PV_A"; platform_fixture_lines; echo "$CD_HDR"; drow r1 0 baseline; drow r1 1 churn; } > "${RES}/two/churn-dataplane-r1.tsv"
+	{ echo "# RUN_ID=r2"; keys "$REV_B" "$PV_B"; platform_fixture_lines; echo "$CD_HDR"; drow r2 0 baseline; drow r2 1 churn; } > "${RES}/two/churn-dataplane-r2.tsv"
 	{ echo "# RUN_ID=r3"; echo "$CD_HDR"; drow r3 0 baseline; drow r3 1 churn; } > "${RES}/old/churn-dataplane-r3.tsv"
 	local R="${ROOT}/tests/churn-dataplane/005-report-results.sh" fmt
 	for fmt in text csv; do
@@ -142,7 +142,8 @@ _gen_tsv() {
 	assert_line "| ISTIO_PROXY_VERSIONS | \`mixed:${PV_A} \\| ${PV_B}\` |"
 	run --separate-stderr "$R" --results-dir "${RES}/two" --allow-multi-run --format json
 	[ "$(jq -r '.metadata.istio_active_revisions' <<<"$output")" = "mixed:${REV_A} | ${REV_B}" ]
-	run "$R" --results-dir "${RES}/old" --format json
+	# (It predates the platform record too: a warning on stderr.)
+	run --separate-stderr "$R" --results-dir "${RES}/old" --format json
 	[ "$(jq -r '.metadata.istio_proxy_versions' <<<"$output")" = unknown ]
 }
 

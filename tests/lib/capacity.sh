@@ -2,7 +2,10 @@
 # Read-only cluster-capacity probes for scale-coverage legibility (O9).
 # Sourced, never executed.
 #
-# Consumers: controlplane (Phase 1 legibility + Phase-2 auto-sizing)
+# Consumers: controlplane (Phase 1 legibility + Phase-2 auto-sizing; its report's quantity parsers),
+# envelope.sh (CAP_JQ_QTY), platform.sh (platform_resume_check: cap_istiod_limits and
+# cap_node_totals; platform_drift_check: cap_istiod_limits, which tuning 003 sources for it) and
+# tuning 004 (CAP_JQ_QTY: a profile's istiod limits in m and Mi)
 #
 # This library is STRICTLY READ-ONLY: every kubectl call is a `get`/`top`/
 # `version`, never apply/scale/delete/patch. All reads carry
@@ -127,21 +130,27 @@ function mem_to_mi(q,    v, s) {
 # ---------------------------------------------------------------------------
 # cap_parse_node_totals: `kubectl get nodes -o json` on stdin.
 # Sums allocatable cpu/memory/pods across WORKER nodes only. A worker is a node
-# labelled node-role.kubernetes.io/worker that is not infra (so single-node and
-# compact clusters, whose nodes carry control-plane + master + worker, count), or a
-# node with no control-plane / master / infra label at all. Emits:
+# labelled node-role.kubernetes.io/worker that is not infra (so OpenShift single-node and
+# compact clusters, whose nodes carry control-plane + master + worker, count), a
+# control-plane / master node that is not infra and has no NoSchedule or NoExecute taint
+# (it runs ordinary pods: single-node kind, kubeadm and k3s clusters), or a node with no
+# control-plane / master / infra label at all. Emits:
 #   cpu_m=<int> mem_mi=<int> pods=<int> nodes=<int> names=<csv>
-# Zero workers or unparseable -> cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=
+# Zero workers (every node infra or a tainted control-plane / master), unparseable or empty
+# input (a failed read) ->
+#   cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names=
 # shellcheck disable=SC2329
 cap_parse_node_totals() {
-	jq -r "${CAP_JQ_QTY}"'
+	local out
+	out="$(jq -r "${CAP_JQ_QTY}"'
 		def is_worker:
 			(.metadata.labels // {}) as $l
 			| ($l | has("node-role.kubernetes.io/control-plane")) as $cp
 			| ($l | has("node-role.kubernetes.io/master")) as $mas
 			| ($l | has("node-role.kubernetes.io/infra")) as $inf
 			| ($l | has("node-role.kubernetes.io/worker")) as $wrk
-			| ($wrk and ($inf | not)) or (($cp or $mas or $inf) | not);
+			| ([.spec.taints[]? | select(.effect == "NoSchedule" or .effect == "NoExecute")] | length == 0) as $sched
+			| ($wrk and ($inf | not)) or (($cp or $mas) and ($inf | not) and $sched) or (($cp or $mas or $inf) | not);
 		[ .items[]? | select(is_worker) ] as $w
 		| ($w | length) as $n
 		| if $n == 0 then
@@ -153,7 +162,9 @@ cap_parse_node_totals() {
 			| ($w | map(.metadata.name) | join(",")) as $names
 			| "cpu_m=\($cpu) mem_mi=\($mem) pods=\($pods) nodes=\($n) names=\($names)"
 		  end
-	' 2>/dev/null || printf '%s\n' "cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names="
+	' 2>/dev/null)" || out=""
+	[[ -n "$out" ]] || out="cpu_m=unknown mem_mi=unknown pods=unknown nodes=0 names="
+	printf '%s\n' "$out"
 }
 
 # cap_parse_top_nodes <worker_names_csv>: `kubectl top nodes --no-headers` on
@@ -273,10 +284,12 @@ cap_parse_requested() {
 # stdin. Reads the istiod/discovery container .resources.limits (falls back to
 # .requests if no limits) cpu->m, mem->Mi; replicas from .spec.replicas. Emits:
 #   cpu_m=<int|unknown> mem_mi=<int|unknown> replicas=<int|unknown>
+# (each unknown for unparseable or empty input: a failed read).
 # Reads the LIVE deployment (the istiod resource pin is CR-patched live).
 # shellcheck disable=SC2329
 cap_parse_istiod_limits() {
-	jq -r "${CAP_JQ_QTY}"'
+	local out
+	out="$(jq -r "${CAP_JQ_QTY}"'
 		( [ .spec.template.spec.containers[]?
 		    | select(.name == "discovery" or .name == "istiod") ] | first ) as $c
 		| if $c == null then
@@ -293,7 +306,9 @@ cap_parse_istiod_limits() {
 			  "mem_mi=\(if $mem == null then "unknown" else ($mem | floor) end) " +
 			  "replicas=\(if $rep == null then "unknown" else $rep end)"
 		  end
-	' 2>/dev/null || printf '%s\n' "cpu_m=unknown mem_mi=unknown replicas=unknown"
+	' 2>/dev/null)" || out=""
+	[[ -n "$out" ]] || out="cpu_m=unknown mem_mi=unknown replicas=unknown"
+	printf '%s\n' "$out"
 }
 
 # cap_parse_istiod_used: `kubectl top pod -n istio-system -l app=istiod

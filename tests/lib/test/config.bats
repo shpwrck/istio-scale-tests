@@ -1065,7 +1065,7 @@ STUB
 	! grep -q "has not finished" "$d"/*.md
 }
 
-@test "003 --resume refuses another active revision at the same version, notes a TSV that cannot tell, and notes other Kubernetes versions" {
+@test "003 --resume refuses another active revision at the same version or another Kubernetes version, and notes a TSV that cannot tell" {
 	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" before t1
 	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
 	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
@@ -1087,18 +1087,27 @@ STUB
 	assert_output --partial "--resume: the members' active Istio revision is not the one this sweep started on (ci-a: default-v1-30-5 when the sweep started, default now; activeRevisionName of their Istio CR), at the same Istio version: another control plane, so the new rows would not be comparable with the earlier ones. Start a new sweep."
 	[ "$(cat "$tsv")" = "$before" ]
 	[ ! -e "$d/resumes.txt" ]
-	# A TSV from before the key: resumed, with a warning and a note.
+	# A TSV from before the key passes that check, but the member now runs v1.31.2 where
+	# the sweep started on v1.30.4: the platform record check refuses it, nothing written.
 	sed -i.bak '/^# ISTIO_ACTIVE_REVISIONS=/d' "$tsv" && rm -f "${tsv}.bak"
+	before="$(cat "$tsv")"
+	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 1
+	assert_output --partial "ci-a: KUBE_VERSIONS recorded v1.30.4, now v1.31.2"
+	[ "$(cat "$tsv")" = "$before" ]
+	[ ! -e "$d/resumes.txt" ]
+	# The first run could not read the version: resumed, with a warning and a note for the
+	# revisions, and the version this resume read in resumes.txt (the first known one, so
+	# no Kubernetes version note: the next test covers those).
+	sed -i.bak 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=unreachable/' "$tsv" && rm -f "${tsv}.bak"
 	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	assert_output --partial "warning: --resume: this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it)"
 	t1="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
 	grep -qx "NOTE=this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it), so no --resume of it (the latest at ${t1}) could check that each member still runs the revision the sweep started on" "$d/sweep-outcome.txt"
-	# This resume read v1.31.2 where the sweep started on v1.30.4; it warns at its
-	# start too.
 	[ "$(awk -F'\t' 'NR == 2 { print $4 }' "$d/resumes.txt")" = "ci-a=v1.31.2" ]
-	grep -qx "NOTE=the --resume at ${t1} read other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t1} on ran on them, up to a later change noted here" "$d/sweep-outcome.txt"
-	assert_output --partial "warning: --resume: this resume reads other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then): the rows it adds (from ${t1} on) run on them."
+	! grep -q "Kubernetes server versions" "$d/sweep-outcome.txt" || false
+	refute_output --partial "reads other Kubernetes server versions"
 }
 
 @test "003 --resume repeats a first run that started not ready, once, from the TSV preamble, also when that run died" {

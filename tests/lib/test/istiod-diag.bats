@@ -752,7 +752,8 @@ _dp_run() {
 	assert_success
 	assert_output --partial "## istiod restart diagnostics"
 	assert_output --partial "oom_killed=1"
-	run "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$RES" --format json
+	# stdout only: the stub reads no platform record, so the report warns on stderr (H5).
+	run --separate-stderr "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$RES" --format json
 	[ "$(jq -c '.istiod_diag.by_cause' <<<"$output")" = '{"oom_killed":1}' ]
 	# No comment line in CSV output: the section is in text, md and json only.
 	run "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$RES" --format csv
@@ -782,7 +783,7 @@ _dp_run() {
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
 	[ "$(_col tag istiod-abc-x1)" = c7-baseline ]
 	[ "$(_col cause istiod-abc-x1)" = oom_killed ]
-	run "${ROOT}/tests/churn-dataplane/005-report-results.sh" --results-dir "$RES" --format json
+	run --separate-stderr "${ROOT}/tests/churn-dataplane/005-report-results.sh" --results-dir "$RES" --format json
 	[ "$(jq -c '.istiod_diag.by_cause' <<<"$output")" = '{"oom_killed":1}' ]
 	run "${ROOT}/tests/churn-dataplane/005-report-results.sh" --results-dir "$RES" --format md
 	assert_output --partial "| ctx-a | c7-baseline | istiod-abc-x1 | restarted_in_place | oom_killed |"

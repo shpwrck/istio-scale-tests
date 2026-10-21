@@ -67,6 +67,12 @@ is an end-of-window snapshot, east-west gateway memory was not measured (BACKLOG
 Services at about 1.4 GiB against a 1Gi limit), and its data-plane root cause is contradicted by
 the 2026-10-14 window. In the 2026-06-04 records `cpu_avg` is a per-window peak and "MB" is MiB.
 
+Every record above ran on OpenShift (ROSA or single-node OpenShift) with OSSM 3.x builds,
+before the suites recorded the platform: their TSVs have no `PLATFORM` line, and a report reads
+those values as `unknown`. A run on upstream Istio (the Sail operator) or on kind measures other
+builds and infrastructure; record its platform and mesh builds (`TEMPLATE.md`, "Platform / mesh
+build") and compare it with these only as such.
+
 The data-plane numbers above ran one fortio server pod per cluster, and a run that missed
 its target QPS with only HTTP 200s still counted as valid. Later dataplane runs default to
 2 server pods (`SERVER_REPLICAS` in the TSV preamble) and tag such rows `QPS_SHORTFALL`;

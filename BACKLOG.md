@@ -335,6 +335,17 @@ came back empty. Results (gitignored) are in the operator host's window archive.
   stranded member. **Fixed:** the check now also waits until every spoke has an Application
   (`EXPECTED_DESTINATIONS`, set by Terraform to the spoke keys) and names any that has none
   (bats; live against the window's hub: pass for the 3 members, a named failure for a fourth).
+  **Found (kind, 2026-10-18):** that still passed early: the gate ApplicationSet, which the apply
+  creates with the cluster Secrets, gives every member an Application from the start, so the
+  check passed after 11 s with 3 of 33 Applications (the other 30 came 7 minutes later; about 200
+  would at 20 members). **Fixed:** the check also waits until every Application or ApplicationSet
+  that an Application lists in its resources exists, and until each of the repo's ApplicationSets
+  that selects clusters owns an Application per mesh member (counted by ownerReferences: the
+  hub-side presets' Applications target the hub), naming each missing one and each ApplicationSet
+  with `<k> of <N>` and its `ErrorOccurred` message at the deadline. An Application sync
+  `Unknown` with any ComparisonError (a manifest error too) fails it at the deadline, and every
+  such error is printed when first seen (bats in `tests/lib/test/argocd-app-status.bats`; live on
+  the kind lab it passed in about 12 s on its 34 existing Applications, three applies).
   **Left:** —
 
 ### 9.2 Kubeconfig exec plugin logs in on every `oc` call (finding 2)
@@ -684,7 +695,8 @@ gateway resets are now listed at the top of
 - Dataplane local-baseline verdict still reads "OK at every QPS level" when a mesh size has OK
   local cells plus a failed repetition's placeholder (the placeholder is named next to it).
 - churn-dataplane records `ISTIOD_REPLICAS` for the source context only (what its probe measures);
-  the controlplane suite now probes every context.
+  controlplane, propagation and churn record every member's. tuning 004 therefore reads a
+  churn-dataplane pass whose profile autoscales istiod as unknown for the other members.
 - `reach_sanitize` masks an unbracketed IPv6 address without `::` only from 4 groups on (a
   3-group form is indistinguishable from HH:MM:SS).
 - `PROPAGATION_METRICS_TIMEOUT` is not checked up front by the propagation sweep.
@@ -693,6 +705,40 @@ gateway resets are now listed at the top of
   (`pilot/pkg/model/push_context.go:1178-1195`), so the two exemption Sidecars are inert and PL38's
   premise needs re-checking against the deployed version (found by the Gateway API check's review).
 - controlplane `--resume` treats two `unknown` config hashes (no sha256 tool) as equal.
+
+## Follow-ups found while making Kubernetes the default
+
+- The Istio remote secrets carry the Argo CD token, which is cluster-admin on the member. Give
+  them a least-privilege reader token instead (a ServiceAccount bound to Istio's `istio-reader`
+  ClusterRole on each member), on both platforms: OpenShift's ManagedServiceAccount token is
+  cluster-admin too.
+- Token rotation on `kubernetes` recreates the ServiceAccount (terraform/platform/README.md,
+  "Rotating a member's token"): a legacy token Secret's token depends only on the ServiceAccount
+  (name and UID) and the Secret's name, so with an RSA signing key (kind's) recreating the Secret
+  brings back the same token. A new Secret name per rotation would rotate in place.
+- The wiring gate cannot see a member token revoked after istiod synced: istiod's
+  `istiod_remote_cluster_sync_status` changes only when it reconnects. Checking the remote secrets'
+  tokens (a TokenReview from the hub) would catch it.
+- Istio 1.30.5 reports a live remote cluster as `closed` after its remote secret changes: the swap
+  stops the old connection after the new one synced, and the old one's stop writes the shared
+  metric (`pkg/kube/multicluster`). The gate counts `closed` as synced; report it upstream. After
+  such a swap one istiod on the kind lab also kept a ConfigMap watch of the old connection running
+  with the revoked token (`watch error in cluster <ctx>: failed to list *v1.ConfigMap:
+  Unauthorized` every minute for over 30 minutes) while `istioctl remote-clusters` read `synced`:
+  report that too, with the remote mesh-config watcher new in 1.30 the first suspect.
+- After a move or a rotation, External Secrets takes up to about 10 minutes to give the other
+  members the new token. Forcing a refresh (the ExternalSecret's and the PushSecret's
+  `force-sync` annotation) could cut that; untested.
+- The wiring gate counts istiod's `closed` sync state as synced only when the `istio_build` tag
+  reads 1.30 or a later 1.x. Whether OSSM 3.4's istiod reports `1.30.x` there is unverified: read
+  `istio_build{component="pilot"}` from an OpenShift member's istiod (`:15014/metrics`). With any
+  other tag the gate fails closed (NotReady after each remote secret change, until istiod
+  restarts); then give the gate the Istio minor another way, such as the Istio CR's `spec.version`.
+- The gate's checks by name (a removed member's leftover remote secret, a member whose remote
+  secret never arrived) are tested in bats only: watch them on the next member removal or swap (the
+  kind lab cannot remove one read-only). Deleting a removed member's remote secrets from the other
+  members when it leaves (External Secrets does not, `charts/hub-mesh-push-secrets/README.md`)
+  would spare the manual delete the gate asks for.
 
 ## Validation environment
 

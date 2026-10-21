@@ -26,3 +26,8 @@ backer:
 
 service:
   port: 8080
+
+# Numeric UID for the test containers: the busybox and fortio images run as root, so
+# Kubernetes cannot start them under runAsNonRoot without one. values-openshift.yaml clears
+# it: OpenShift assigns a UID from the namespace range (tests/lib/platform.sh adds it there).
+runAsUser: 65534

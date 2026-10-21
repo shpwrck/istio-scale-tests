@@ -192,6 +192,7 @@ prow23() {
 	source "${ROOT}/tests/lib/propagation.sh"
 	{
 		echo "# RUN_ID=r1"
+		platform_fixture_lines src,b,c
 		echo "$PROP_TSV_HEADER"
 		# 1: the source istiod restarted: P1 dropped, both remotes' P2/P3 count.
 		prow23 1 b RESTART 0 1 RESTART 5 OK 5
@@ -251,7 +252,8 @@ prow23() {
 			# 3: clean.
 			prow23 3 b OK 0 0 OK 5 OK 5 | cut -f1-"$w"
 		} > "${RES}/endpoint-r1.tsv"
-		run "${PR}/005-report-results.sh" --results-dir "$RES" --format json
+		# (They predate the platform record too: a warning on stderr.)
+		run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format json
 		assert_success
 		# P2/P3: row 1 (overflow only) and row 3 count, row 2 (RESTART) does not.
 		if ((w == 19)); then

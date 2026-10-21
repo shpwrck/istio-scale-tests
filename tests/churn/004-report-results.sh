@@ -3,9 +3,10 @@
 #
 # Every format carries RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs),
 # and HARNESS_SHA / ISTIO_VERSION (with ISTIO_VERSION_SOURCE, _PIN and _BY_CONTEXT) as
-# 002 recorded them, over all input TSVs: mixed:a,b with a warning when they differ
-# (PL26). More than one run under the results dir stops the report unless
-# --allow-multi-run, and then every format says so.
+# 002 recorded them, plus KUBE_VERSIONS and the platform record (PLATFORM,
+# MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh), over all input TSVs: mixed:a,b with a
+# warning when they differ (PL26). More than one run under the results dir stops the report
+# unless --allow-multi-run, and then every format says so.
 # Histogram p99 columns show the worst bucket a valid row hit, and "overflow (N rows)"
 # when a row's p99 was in the +Inf bucket; they are never averaged.
 #
@@ -27,6 +28,8 @@ config_preload churn "$@"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_lines, platform_merge_by_context
 
 RESULTS_DIR="$(config_repo_path "${CHURN_RESULTS_DIR}")"
 FORMAT="text"
@@ -158,6 +161,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$FORMAT" in
 text | csv | md | markdown | charts) ;;
 *) die "unknown format: $FORMAT (use text, csv, md, or charts)" ;;
@@ -311,6 +315,13 @@ ISTIO_PROXY_VERSIONS_M="$(run_meta ISTIO_PROXY_VERSIONS)"
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_M="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 RUN_CONFIG_SHA256_M="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
+# Where the inputs ran: the platform record and each member's Kubernetes version (002 records
+# both; a file without them reads unknown).
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
+PLATFORM_VALUES+=$'\n'"KUBE_VERSIONS=$(platform_merge_by_context KUBE_VERSIONS "${TSV_FILES[@]}")"
+# Every format's body repeats their warnings (inputs that disagree, a build that changed during
+# the sweep, a value not read; PL19).
+REPORT_WARNINGS="$(platform_report_warnings --with KUBE_VERSIONS "${TSV_FILES[@]}")"
 
 # TSV schema (21 columns):
 #  $1  run_id
@@ -353,7 +364,9 @@ report_text() {
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
+	platform_report_lines text "$PLATFORM_VALUES"
 	echo ""
+	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	echo "Files: ${TSV_FILES[*]}"
 	echo ""
 	churn_rows | awk -F'\t' '
@@ -471,6 +484,8 @@ report_csv() {
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
 	echo "# RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_M}"
+	platform_report_lines comment "$PLATFORM_VALUES"
+	platform_warning_lines comment "$REPORT_WARNINGS"
 	config_multi_run_csv
 	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
 	sweep_outcome_recorded "$RESULTS_DIR" csv
@@ -657,10 +672,12 @@ report_markdown() {
 	echo "sidecar_egress_hosts: $(yaml_str "$(preamble_get SIDECAR_EGRESS_HOSTS)")"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "---"
 	echo ""
 	echo "# Churn Convergence"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	sweep_outcome_recorded "$RESULTS_DIR" md
@@ -798,11 +815,13 @@ report_charts() {
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
+	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"
 	echo ""
 	echo "# Churn Convergence — Charts"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	churn_rows | awk -F'\t' '

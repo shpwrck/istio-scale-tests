@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
-# A member listed twice, or a remote equal to the source, is refused before any cluster
-# call: every --contexts and --remote-contexts entrypoint, SETUP_CONTEXTS, no suite
-# splitting a member list with split_csv, and a --resume of a sweep an older harness
-# started with a member twice. Through the real entrypoints (PL33), with an empty
-# kubeconfig and kubectl and oc stubs that log every call.
+# A member listed twice, a remote equal to the source, or two members the platform record
+# would write under one name, is refused before any cluster call: every --contexts and
+# --remote-contexts entrypoint, SETUP_CONTEXTS, no suite splitting a member list with
+# split_csv, and a --resume of a sweep an older harness started with a member twice.
+# Through the real entrypoints (PL33), with an empty kubeconfig and kubectl and oc stubs
+# that log every call.
 
 load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
@@ -93,12 +94,18 @@ STUB
 }
 
 # _refuses <suite/script> <stderr fragment> <args...>: --dry-run with an empty kubeconfig
-# exits non-zero with the fragment on stderr, before any kubectl or oc call.
+# exits non-zero with the fragment on stderr, before any kubectl or oc call. With
+# REFUSES_RUN=1, the run itself (no --dry-run), its results under the test's temp dir.
 _refuses() {
-	local s="$1" want="$2"
+	local s="$1" want="$2" r
+	local -a dry=(--dry-run)
 	shift 2
 	: > "$STUB_LOG"
-	PATH="${BIN}:${PATH}" KUBECONFIG="$KC" run --separate-stderr "${ROOT}/tests/${s}.sh" --dry-run "$@"
+	((${REFUSES_RUN:-0} == 0)) || dry=()
+	r="${BATS_TEST_TMPDIR}/results"
+	PATH="${BIN}:${PATH}" KUBECONFIG="$KC" CHURN_RESULTS_DIR="$r" COEXEC_RESULTS_DIR="$r" \
+		CONTROLPLANE_RESULTS_DIR="$r" DATAPLANE_RESULTS_DIR="$r" GWAPI_RESULTS_DIR="$r" \
+		PROPAGATION_RESULTS_DIR="$r" run --separate-stderr "${ROOT}/tests/${s}.sh" ${dry[@]+"${dry[@]}"} "$@"
 	if [[ "$status" -eq 0 || "$stderr" != *"$want"* ]]; then
 		echo "${s} $*: exit ${status}, stderr: ${stderr}" >&2
 		return 1
@@ -160,6 +167,32 @@ _refuses() {
 	done
 }
 
+@test "every entrypoint that writes the platform record refuses two members it would record under one name, before any cluster call, in its --dry-run and its run" {
+	_stub_bin
+	local s run want="lab~a and lab_a would be recorded under one name, lab_a (the record writes a member's name with A-Z, a-z, 0-9 and _.:/@+- only): rename one of the two contexts"
+	local -a extra=()
+	for run in 0 1; do
+		for s in churn-dataplane/004-run-sweep churn/003-run-sweep controlplane/002-collect-resource-metrics \
+			controlplane/003-run-sweep dataplane/003-run-sweep propagation/006-run-sweep; do
+			REFUSES_RUN="$run" _refuses "$s" "$want" --contexts 'lab~a,lab_a'
+		done
+		REFUSES_RUN="$run" _refuses gateway-api/001-run-ingress-check "$want" --contexts 'lab~a,lab_a' --workload-context lab_a
+		for s in propagation/002-run-endpoint-probe churn/002-run-churn-probe dataplane/002-run-latency-probe \
+			churn-dataplane/002-run-baseline-probe churn-dataplane/003-run-churn-probe; do
+			extra=()
+			[[ "$s" != churn-dataplane/003-run-churn-probe ]] || extra=(--churn-rate 5)
+			REFUSES_RUN="$run" _refuses "$s" "$want" --source-context 'lab~a' --remote-contexts lab_a ${extra[@]+"${extra[@]}"}
+		done
+	done
+	# Tuning 003's state file names are stricter still: its own check refuses the pair first.
+	_refuses tuning/003-run-tuning-sweep "contexts lab~a and lab_a have one state file name" \
+		--suite churn-dataplane --contexts 'lab~a,lab_a' --gitops-context ci-hub
+	[ ! -e "${BATS_TEST_TMPDIR}/results" ]
+	# Names the record keeps apart run on (a dry run passes the check).
+	PATH="${BIN}:${PATH}" KUBECONFIG="$KC" run --separate-stderr "${ROOT}/tests/dataplane/002-run-latency-probe.sh" --dry-run --source-context 'lab:a' --remote-contexts lab_a
+	assert_success
+}
+
 @test "no suite script splits a member list with split_csv any more (split_contexts does)" {
 	run grep -nE 'split_csv[[:space:]]+"\$\{?(CONTEXTS_CSV|REMOTE_CONTEXTS_CSV|MEM_GUARD_CONTEXTS_CSV|SETUP_CONTEXTS)' \
 		"$ROOT"/tests/*/[0-9]*.sh
@@ -180,6 +213,12 @@ _refuses() {
 	# A key holding a quote or a bracket is still one key (no arithmetic on it).
 	run split_contexts "x\"y],x\"y]" OUT --contexts
 	assert_output --partial 'lists x"y] twice'
+	# A list over 200 characters is counted, not repeated: 500 members listed twice.
+	local ctxs
+	ctxs="$(seq -f 'member-%03g' 1 500 | paste -sd, -)"
+	run split_contexts "${ctxs},${ctxs}" OUT --contexts
+	assert_failure
+	assert_output "error: --contexts lists member-001 twice (1000 items): list each mesh member once"
 }
 
 @test "003 --resume refuses a sweep an older harness started with a member twice, whatever --contexts says: start a new sweep" {

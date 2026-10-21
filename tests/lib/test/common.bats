@@ -678,3 +678,30 @@ _in_path() {
 	grep -qE '\$\(git[^)]*describe' "${BATS_TEST_TMPDIR}/old.sh"
 	grep -qE 'HARNESS(_SHA)?="?\$\(git' "${BATS_TEST_TMPDIR}/old.sh"
 }
+
+# --- kv_value / file_sha256 ---
+
+@test "kv_value: a key's value among k=v tokens (spaces, tabs or newlines), unknown without it, never a glob's match; file_sha256: the hex sum, unknown without a tool" {
+	run kv_value mem_mi "cpu_m=100 mem_mi=2048"
+	assert_output 2048
+	run kv_value cpu_m $'mem_mi=1\ncpu_m=250\tx=y'
+	assert_output 250
+	# Another key that starts with it is not it; a value keeps its own =.
+	run kv_value cpu "cpu_m=1 cpu=a=b"
+	assert_output "a=b"
+	run kv_value replicas "cpu_m=1"
+	assert_output unknown
+	run kv_value total ""
+	assert_output unknown
+	# A * token stays a token: a file named a=x in the working directory is no value of a.
+	cd "$BATS_TEST_TMPDIR"
+	: > "a=x"
+	run kv_value a "*"
+	assert_output unknown
+	printf 'abc' > "${BATS_TEST_TMPDIR}/f"
+	run file_sha256 "${BATS_TEST_TMPDIR}/f"
+	assert_output ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+	mkdir -p "${BATS_TEST_TMPDIR}/empty"
+	run _in_path "${BATS_TEST_TMPDIR}/empty" file_sha256 "${BATS_TEST_TMPDIR}/f"
+	assert_output unknown
+}

@@ -205,6 +205,7 @@ _envelope() {
 	(
 		source "${ROOT}/tests/lib/capacity.sh"
 		source "${ROOT}/tests/lib/envelope.sh"
+		source "${ROOT}/tests/lib/platform.sh"
 		render_scale_envelope "$run" "$CP_REPORT" "ci-a,ci-b" false
 	) > "${d}/scale-envelope-t2.md" 2>/dev/null
 }
@@ -323,6 +324,7 @@ _envelope() {
 	(
 		source "${ROOT}/tests/lib/capacity.sh"
 		source "${ROOT}/tests/lib/envelope.sh"
+		source "${ROOT}/tests/lib/platform.sh"
 		render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
 	) > "${d}/scale-envelope-t2.md" 2>/dev/null
 	grep -q '^## Scale envelope' "${d}/scale-envelope-t2.md"

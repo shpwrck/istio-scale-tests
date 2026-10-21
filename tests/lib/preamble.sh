@@ -10,7 +10,8 @@
 #       terraform/ (submodules never count), or "unknown"
 #   kube_versions <ctx> <kubectl_argv...>          -> kubectl server gitVersion, "unreachable"/"unknown" semantics
 #   probe_kube_versions <ctxs_csv> <kubectl_argv...>
-#                                                  -> CSV of ctx=ver pairs, concurrent with 5s timeout (PL2)
+#                                                  -> CSV of ctx=ver pairs, PLATFORM_READ_PARALLEL
+#                                                     at a time, each with a 5s timeout (PL2)
 #   tuning_baseline_state <ctx> <kubectl_argv...>  -> two lines (TUNING_BASELINE=, SIDECAR_EGRESS_HOSTS=)
 #                                                     queried from the LIVE mesh, on|off|unknown (PL2)
 #   istio_live_version <ctx> <kubectl_argv...>     -> the version the member RUNS (its active
@@ -103,35 +104,32 @@ kube_versions() {
 	printf '%s\n' "$gitv"
 }
 
-# Concurrent probe of multiple contexts. Returns ctx1=ver1,ctx2=ver2,...
+# _kube_versions_one <ctx> <dir>: <ctx>'s kube_versions with the kubectl argv of the
+# probe_kube_versions call it runs under (_pkv_argv, dynamic scope), for each_bounded.
+# shellcheck disable=SC2329
+_kube_versions_one() {
+	kube_versions "$1" "${_pkv_argv[@]}"
+}
+
+# Probe of multiple contexts, PLATFORM_READ_PARALLEL at a time (each_bounded,
+# tests/lib/common.sh). Returns ctx1=ver1,ctx2=ver2,... in the given order; a member whose read
+# left no answer at all (no temp dir, say) reads unknown.
 # Usage: probe_kube_versions "$ctxs_csv" <kubectl_argv...>
 # shellcheck disable=SC2329
 probe_kube_versions() {
 	local ctxs_csv="$1"
 	shift
-	local -a ctxs=()
+	local -a ctxs=() _pkv_argv=("$@")
 	split_csv "$ctxs_csv" ctxs
-	local tmp
-	tmp="$(mktemp -d)"
-	# Temp files are named by index: context names can contain '/' (oc login style).
-	local i pids=()
+	local tmp="" i v out=""
+	tmp="$(mktemp -d 2>/dev/null)" || tmp=""
+	[[ -z "$tmp" ]] || each_bounded "${PLATFORM_READ_PARALLEL:-20}" _kube_versions_one "$tmp" ${ctxs[@]+"${ctxs[@]}"}
 	for i in "${!ctxs[@]}"; do
-		(
-			v="$(kube_versions "${ctxs[i]}" "$@")"
-			printf '%s=%s\n' "${ctxs[i]}" "$v" > "${tmp}/${i}.kv"
-		) &
-		pids+=($!)
+		v=""
+		[[ -z "$tmp" ]] || v="$(head -n 1 "${tmp}/${i}.row" 2>/dev/null || true)"
+		out+="${out:+,}${ctxs[i]}=${v:-unknown}"
 	done
-	local p
-	for p in ${pids[@]+"${pids[@]}"}; do wait "$p" 2>/dev/null || true; done
-	local first=1 line out=""
-	for i in "${!ctxs[@]}"; do
-		if [[ -r "${tmp}/${i}.kv" ]]; then
-			line="$(<"${tmp}/${i}.kv")"
-			if ((first)); then out="$line"; first=0; else out+=",${line}"; fi
-		fi
-	done
-	rm -rf "$tmp"
+	[[ -z "$tmp" ]] || rm -rf "$tmp"
 	printf '%s\n' "$out"
 }
 
@@ -203,7 +201,7 @@ tuning_baseline_state() {
 	_tb_exists() {
 		local kind="$1" name="$2" out rc
 		if out="$("${k[@]}" --context="$ctx" --request-timeout=5s -n istio-system \
-			get "$kind" "$name" -o name 2>/dev/null)"; then rc=0; else rc=$?; fi
+			get "$kind" "$name" -o name --ignore-not-found 2>/dev/null)"; then rc=0; else rc=$?; fi
 		if ((rc != 0)); then printf 'unknown\n'; return 0; fi
 		if [[ -n "$out" ]]; then printf 'on\n'; else printf 'off\n'; fi
 	}
@@ -1824,10 +1822,15 @@ NS_LIFECYCLE_HEADER=$'timestamp\tcontext\tseries\tnamespace_count\taction\tnames
 
 # ns_lifecycle_init <file> <run_id>: write the PL2 preamble and the header once. A
 # no-op when the file exists (the first writer wins; every writer uses this function).
+# The preamble carries the run config and the platform record of the shell's last
+# platform_probe (a sweep's, or the one a standalone 001 or 005 reads when it creates the
+# file); the caller sources tests/lib/config.sh and tests/lib/platform.sh.
 # shellcheck disable=SC2329
 ns_lifecycle_init() {
 	local file="$1" run_id="${2:-unknown}" dir hs hk
 	[[ -n "$file" ]] || return 0
+	declare -F config_preamble_lines >/dev/null || die "ns_lifecycle_init needs config_preamble_lines (source tests/lib/config.sh)"
+	declare -F platform_preamble_lines >/dev/null || die "ns_lifecycle_init needs platform_preamble_lines (source tests/lib/platform.sh)"
 	[[ -f "$file" ]] && return 0
 	dir="$(dirname "$file")"
 	mkdir -p "$dir"
@@ -1843,6 +1846,8 @@ ns_lifecycle_init() {
 		echo "# APPLY_CHUNK_OBJECTS=${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-unknown}"
 		echo "# APPLY_ATTEMPTS=${CONTROLPLANE_APPLY_ATTEMPTS:-unknown}"
 		echo "# NS_DELETE_TIMEOUT_SEC=${CONTROLPLANE_NS_DELETE_TIMEOUT_SEC:-unknown}"
+		config_preamble_lines
+		platform_preamble_lines "$(platform_probed_contexts)"
 		echo "# NOTE=001 runs its applies and Sidecar deletes at kubectl -v=4. api_429_retried counts client-go's 'Got a Retry-After response' lines (a 429 with Retry-After that client-go retried; at the default verbosity it prints nothing); api_429_exhausted counts TooManyRequests errors that reached kubectl after its retries; client_throttle_waits counts client-side rate-limiter waits over 50 ms (kubectl 1.34 showed none on server-side apply). N/A = not measured (readiness waits and 005's deletes). leftover-check rows (003, one per context at each series start): namespaces = the controlplane-test namespaces present, objects = how many of them are still discovered, status LEFTOVER above CONTROLPLANE_LEFTOVER_NS_WARN."
 		printf '%s\n' "$NS_LIFECYCLE_HEADER"
 	} > "$file"

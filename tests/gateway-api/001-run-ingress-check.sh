@@ -25,7 +25,7 @@
 #
 # Usage:
 #   ./tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
-#     --workload-context <mesh-b-ctx> [--hub-context <acm-hub-ctx>] [--dry-run]
+#     --workload-context <mesh-b-ctx> [--hub-context <hub-ctx>] [--dry-run]
 #   ./tests/gateway-api/001-run-ingress-check.sh --config tests/gateway-api/configs/smoke.env \
 #     --contexts <mesh-a-ctx>,<mesh-b-ctx> --workload-context <mesh-b-ctx>
 # ci-dry-run: --contexts ci-a,ci-b --workload-context ci-b
@@ -45,6 +45,10 @@ source "${ROOT}/tests/lib/preamble.sh"
 # reach_sanitize: masks IPs and hostnames in the response text this script records.
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"
+# platform_probe, platform_pod_filter, platform_gitops_namespace: the platform record (operator
+# build included), the builds' pod filter and the hub's Argo CD namespace.
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"
 
 CONTEXTS_CSV="${SETUP_CONTEXTS}"
 WORKLOAD_CTX="${GWAPI_WORKLOAD_CONTEXT}"
@@ -65,9 +69,8 @@ INGRESS_FROM_FLAG=0
 
 # Fixed by the charts (do not override them there): the ingress gateway and its pod selector
 # (charts/spoke-ingress-gateway), the echo label, the Service port (service.port) and the DNS
-# domain suffix (clusterDomain) of charts/mesh-verify-gateway-api, istiod's Gateway API
-# controller name and pod label, and the OSSM operator's namespace and package
-# (charts/spoke-ossm-operator).
+# domain suffix (clusterDomain) of charts/mesh-verify-gateway-api, and istiod's Gateway API
+# controller name and pod label. The operators' namespaces are in tests/lib/platform.sh.
 INGRESS_DEPLOY=istio-ingressgateway
 INGRESS_SELECTOR=istio=ingressgateway
 ECHO_SELECTOR=app=gwapi-echo
@@ -75,8 +78,6 @@ SVC_PORT=8080
 GW_CONTROLLER=istio.io/gateway-controller
 CLUSTER_DOMAIN=cluster.local
 ISTIOD_SELECTOR=app=istiod
-OSSM_OPERATOR_NS=openshift-operators
-OSSM_PACKAGE=servicemeshoperator3
 # Fixed by this script (not knobs: the bounds they poll within are --wait-timeout and
 # GWAPI_GATE_PASSES). POLL_SEC: seconds between status polls in the wait (step 2).
 # GATE_POLL_SEC: seconds between the data-plane gate's rounds per ingress (step 2), so
@@ -160,11 +161,11 @@ Deploy the check first (charts/mesh-verify-gateway-api-appset.yaml; tests/gatewa
   --config FILE           Run config of KEY=value lines (SETUP_CONTEXTS and the GWAPI_* keys of
                           config/options.env; tests/gateway-api/README.md, "Run config").
                           Precedence: flag > --config > environment > default.
-  --contexts CSV          Mesh members, never the ACM hub; at least two (default: \$SETUP_CONTEXTS).
-  --workload-context CTX  The member that runs the echo workload, i.e. whose ACM ManagedCluster
-                          name is the chart's workloadCluster; one of --contexts
-                          (default: \$GWAPI_WORKLOAD_CONTEXT).
-  --hub-context CTX       ACM hub context: also read the Argo CD health of the per-member
+  --contexts CSV          Mesh members, never the hub; at least two (default: \$SETUP_CONTEXTS).
+  --workload-context CTX  The member that runs the echo workload, i.e. whose Argo CD cluster
+                          name (on OpenShift: ACM ManagedCluster) is the chart's
+                          workloadCluster; one of --contexts (default: \$GWAPI_WORKLOAD_CONTEXT).
+  --hub-context CTX       Hub context: also read the Argo CD health of the per-member
                           Applications (best effort). Not one of --contexts.
                           (default: \$GWAPI_HUB_CONTEXT; empty = skip)
   --ingress CTX=ADDR      Ingress address of a member (host or IP, optional :PORT) when its
@@ -205,12 +206,17 @@ Environment:
   ingress, and of its parse, ${GWAPI_ISTIOCTL_TIMEOUT_SEC} s), GWAPI_NAMESPACE (${NS}),
   GWAPI_REMOTE_NAMESPACE (${NS_REMOTE}),
   GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}),
-  GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE}), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
+  GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE:-empty}; empty: the namespace of the hub's
+  platform, openshift-gitops on OpenShift, else argocd), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
+  TEST_PLATFORM (${TEST_PLATFORM:-auto}): the hub's platform, for its Argo CD namespace (auto asks
+  the hub; kubernetes or openshift is taken as given). The platform record asks each member what
+  it serves either way, and warns when that is not TEST_PLATFORM.
   Environment only (the Istio version read; this read-only check warns and never stops on it):
   ISTIO_VERSION_READY_WAIT_SEC (how long a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out, is read again, ${ISTIO_VERSION_READY_WAIT_SEC} s; a rollout still running then reads as
   unknown), ISTIO_VERSION_READY_POLL_SEC (every ${ISTIO_VERSION_READY_POLL_SEC} s), ISTIO_PROXY_READ_PARALLEL
   (members whose proxy versions are read at once, ${ISTIO_PROXY_READ_PARALLEL}).
+$(platform_help_lines reads)
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
 observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),
@@ -298,13 +304,16 @@ warn() { echo "warning: $*" >&2; }
 
 CONTEXTS=()
 split_contexts "$CONTEXTS_CSV" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 ((${#CONTEXTS[@]} >= 2)) || die "--contexts (or SETUP_CONTEXTS) needs at least two mesh members (one runs the workload, the others show the cross-cluster path); got '${CONTEXTS_CSV}'"
 declare -A IS_MEMBER=()
 for ctx in "${CONTEXTS[@]}"; do IS_MEMBER[$ctx]=1; done
-[[ -n "$WORKLOAD_CTX" ]] || die "--workload-context (or GWAPI_WORKLOAD_CONTEXT) is required: the member whose ACM ManagedCluster name is the chart's workloadCluster"
+[[ -n "$WORKLOAD_CTX" ]] || die "--workload-context (or GWAPI_WORKLOAD_CONTEXT) is required: the member whose Argo CD cluster name (on OpenShift: ACM ManagedCluster) is the chart's workloadCluster"
 [[ -n "${IS_MEMBER[$WORKLOAD_CTX]:-}" ]] || die "--workload-context ${WORKLOAD_CTX} is not one of --contexts (${CONTEXTS[*]})"
 if [[ -n "$HUB_CTX" && -n "${IS_MEMBER[$HUB_CTX]:-}" ]]; then
-	die "--hub-context ${HUB_CTX} is also in --contexts: --contexts lists mesh members only, never the ACM hub"
+	die "--hub-context ${HUB_CTX} is also in --contexts: --contexts lists mesh members only, never the hub"
 fi
 is_pos_int "$REQUESTS" || die "--requests (or GWAPI_REQUESTS) must be a positive integer; got '${REQUESTS}'"
 is_pos_int "$TIMEOUT_SEC" || die "--timeout (or GWAPI_TIMEOUT_SEC) must be a positive integer; got '${TIMEOUT_SEC}'"
@@ -316,8 +325,9 @@ is_nonneg_int "$GWAPI_SETTLE_SEC" || die "GWAPI_SETTLE_SEC must be a non-negativ
 is_nonneg_int "$REPROBE_DELAY" || die "GWAPI_REPROBE_DELAY_SEC must be a non-negative integer; got '${REPROBE_DELAY}'"
 is_pos_int "$GWAPI_GATE_PASSES" || die "GWAPI_GATE_PASSES must be a positive integer; got '${GWAPI_GATE_PASSES}'"
 [[ "$SKIP_PROXY_CONFIG" == 0 || "$SKIP_PROXY_CONFIG" == 1 ]] || die "GWAPI_SKIP_PROXY_CONFIG must be 0 or 1; got '${SKIP_PROXY_CONFIG}'"
+platform_validate
 DNS_LABEL_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-for kv in "GWAPI_NAMESPACE=${NS}" "GWAPI_REMOTE_NAMESPACE=${NS_REMOTE}" "GWAPI_SHARED_NAMESPACE=${NS_SHARED}" "GWAPI_GATEWAY=${GW_NAME}" "GWAPI_ARGOCD_NAMESPACE=${GWAPI_ARGOCD_NAMESPACE}" "GWAPI_ARGOCD_APPSET=${GWAPI_ARGOCD_APPSET}"; do
+for kv in "GWAPI_NAMESPACE=${NS}" "GWAPI_REMOTE_NAMESPACE=${NS_REMOTE}" "GWAPI_SHARED_NAMESPACE=${NS_SHARED}" "GWAPI_GATEWAY=${GW_NAME}" "GWAPI_ARGOCD_NAMESPACE=${GWAPI_ARGOCD_NAMESPACE:-argocd}" "GWAPI_ARGOCD_APPSET=${GWAPI_ARGOCD_APPSET}"; do
 	[[ "${kv#*=}" =~ $DNS_LABEL_RE ]] || die "${kv%%=*} must be a lowercase DNS label; got '${kv#*=}'"
 done
 [[ "$NS_REMOTE" != "$NS" ]] || die "GWAPI_REMOTE_NAMESPACE must differ from GWAPI_NAMESPACE (${NS}): S7-S9 need a backend namespace that exists on the workload member only"
@@ -409,7 +419,7 @@ if ((DRY_RUN)); then
 	proxy_plan="one istioctl proxy-config endpoints dump per ingress, ${PC_SLOTS} ingresses at a time, filtered for ${#FQDNS[@]} backends in one jq pass, ${GWAPI_ISTIOCTL_TIMEOUT_SEC} s limit on the read and on the parse (at most ${PC_SLOT_WAIT} s in all)"
 	((SKIP_PROXY_CONFIG)) && proxy_plan="skipped (--skip-proxy-config)"
 	argo_plan="skipped (no --hub-context)"
-	[[ -n "$HUB_CTX" ]] && argo_plan="hub ${HUB_CTX}: Applications of ApplicationSet ${GWAPI_ARGOCD_NAMESPACE}/${GWAPI_ARGOCD_APPSET}"
+	[[ -n "$HUB_CTX" ]] && argo_plan="hub ${HUB_CTX}: Applications of ApplicationSet ${GWAPI_ARGOCD_NAMESPACE:-<Argo CD namespace of the hub platform: openshift-gitops on OpenShift, else argocd>}/${GWAPI_ARGOCD_APPSET}"
 	pc_worst=0
 	((SKIP_PROXY_CONFIG)) || pc_worst=$PC_SLOT_WAIT
 	echo "=== Gateway API multicluster ingress check: dry run (no cluster is contacted) ==="
@@ -422,7 +432,7 @@ if ((DRY_RUN)); then
 			echo "Ingress ${ctx}: LoadBalancer status of istio-system/${INGRESS_DEPLOY}"
 		fi
 	done
-	echo "Preflight:      Gateway API CRDs, GatewayClass istio, namespace labels and scenario set, ${NS_REMOTE} on the workload member only, ${NS_SHARED} and its ReferenceGrant everywhere, the backend Services on the other members, istiod env overrides, istiod/ingress/operator builds and pods, the echo Deployments, Istio CR version, tuning baseline (kubectl --request-timeout ${GWAPI_KUBECTL_TIMEOUT_SEC}s)"
+	echo "Preflight:      Gateway API CRDs, GatewayClass istio, namespace labels and scenario set, ${NS_REMOTE} on the workload member only, ${NS_SHARED} and its ReferenceGrant everywhere, the backend Services on the other members, istiod env overrides, istiod/ingress builds and pods, the echo Deployments, Istio CR version, tuning baseline (kubectl --request-timeout ${GWAPI_KUBECTL_TIMEOUT_SEC}s); the platform record (platform, operator, istiod and gateway proxy builds, node provider, istiod settings, tuning profile objects; tests/lib/platform.sh; TEST_PLATFORM ${TEST_PLATFORM:-auto})"
 	echo "Wait:           up to ${WAIT_TIMEOUT_SEC} s for Gateway Programmed, the echo Deployments Ready and every route's status (poll ${POLL_SEC} s), then ${GATE_DESC} answering 200 with the echo text through every ingress ${GWAPI_GATE_PASSES} time(s) in a row (same deadline; a streak under way may finish), then ${GWAPI_SETTLE_SEC} s settle"
 	echo "Traffic:        ${REQUESTS} requests x ${#SCENARIOS[@]} hosts x ${#CONTEXTS[@]} ingresses, curl --max-time ${TIMEOUT_SEC}; one ${GWAPI_DETAIL_TIMEOUT_SEC} s detail request per cell with a timeout; then each cell that did not answer 200 with the echo text, predicted 200 or making a YES when it fails (S7 through the other members), is re-probed once (${REQUESTS} requests) after ${REPROBE_DELAY} s (not through an ingress whose gate never passed); a failure counts toward an answer only if its re-probe repeats it"
 	echo "Proxy evidence: ${proxy_plan}"
@@ -544,28 +554,6 @@ SIDECAR_FILTER='if (.items | length) == 0 then "no-pods" else ([.items[] | ((.sp
 	| map(.name) | index("istio-proxy") != null] | if all then "yes" elif any then "partial" else "no" end) end'
 # Names of a list's items (Services, ReferenceGrants), sorted; "none" for an empty list.
 NAME_LIST_FILTER='[.items[]?.metadata.name] | sort | if length == 0 then "none" else join(",") end'
-CSV_FILTER='[.items[]? | select(.metadata.name | startswith("'"${OSSM_PACKAGE}"'."))
-	| "\(.spec.version // "unknown")/\(.status.phase // "unknown")"] | unique | if length == 0 then "absent" else join("|") end'
-
-# pod_filter <container>: jq program over a pod list, "<images>\t<fingerprint>\t<running>\t<pod>".
-# images: per pod, the container image's last path component (the registry host and path are
-# dropped: a mirror can name an internal host) plus the digest that ran (imageID); unique,
-# "|"-joined. fingerprint: name@startTime#restarts per pod, sorted: a restart, a replaced pod or
-# an added pod changes it (PL9). running: Running pods. pod: the first Running pod.
-pod_filter() {
-	# shellcheck disable=SC2016  # jq program
-	printf '%s' '. as $l
-	| ([$l.items[]? | . as $p
-	    | ([$p.spec.containers[]? | select(.name == "'"$1"'")][0].image // "") as $img
-	    | ([$p.status.containerStatuses[]? | select(.name == "'"$1"'")][0].imageID // "") as $id
-	    | select($img != "")
-	    | ($img | sub("^.*/"; "")) + (if ($img | test("@")) or (($id | test("@sha256:")) | not) then "" else "@" + ($id | sub("^.*@"; "")) end)]
-	   | unique | if length == 0 then "none" else join("|") end) as $images
-	| ([$l.items[]? | "\(.metadata.name)@\(.status.startTime // "-")#\([.status.containerStatuses[]?.restartCount // 0] | add // 0)"]
-	   | sort | if length == 0 then "none" else join(",") end) as $fp
-	| [$l.items[]? | select(.status.phase == "Running") | .metadata.name] as $run
-	| "\($images)\t\($fp)\t\($run | length)\t\($run[0] // "-")"'
-}
 
 # preflight_member <i> <ctx>: writes key<TAB>value lines to $WORK/pre-<i>.kv and the failed
 # reads to $WORK/pre-<i>.err.
@@ -601,11 +589,11 @@ preflight_member() {
 		pf svc_main "$ctx" "$NAME_LIST_FILTER" -n "$NS" get svc
 		pf svc_shared "$ctx" "$NAME_LIST_FILTER" -n "$NS_SHARED" get svc
 		pf istiod_env "$ctx" "$ISTIOD_ENV_FILTER" -n istio-system get deploy -l "$ISTIOD_SELECTOR"
-		# The builds that ran and the pod fingerprints for restart detection (PL9).
-		pf "istiod_image istiod_fp" "$ctx" "$(pod_filter discovery)" -n istio-system get pods -l "$ISTIOD_SELECTOR"
-		pf "ingress_image ingress_fp ingress_replicas ingress_pod" "$ctx" "$(pod_filter istio-proxy)" \
+		# The builds that ran and the pod fingerprints for restart detection (PL9). The
+		# operator build comes from the platform record (platform_probe, below).
+		pf "istiod_image istiod_fp" "$ctx" "$(platform_pod_filter discovery)" -n istio-system get pods -l "$ISTIOD_SELECTOR"
+		pf "ingress_image ingress_fp ingress_replicas ingress_pod" "$ctx" "$(platform_pod_filter istio-proxy)" \
 			-n istio-system get pods -l "$INGRESS_SELECTOR"
-		pf ossm_operator "$ctx" "$CSV_FILTER" -n "$OSSM_OPERATOR_NS" get clusterserviceversions.operators.coreos.com
 		pf istio_cr_version "$ctx" '.spec.version // "unset"' get istios.sailoperator.io default
 		pf "echo echo_text" "$ctx" "$ECHO_FILTER" -n "$NS" get deploy -l "$ECHO_SELECTOR"
 		pf echo_sidecar "$ctx" "$SIDECAR_FILTER" -n "$NS" get pods -l "$ECHO_SELECTOR"
@@ -629,6 +617,10 @@ for i in "${!CONTEXTS[@]}"; do
 	(preflight_member "$i" "${CONTEXTS[i]}") 2>"${WORK}/pre-${i}.stderr" &
 	pids+=("$!")
 done
+# The platform record (tests/lib/platform.sh), read while the preflight runs: the platform, the
+# operator build (the Sail operator Deployment on Kubernetes, the OSSM CSV on OpenShift; unknown,
+# with a warning, when the platform or the read is unknown, never a false absent) and the rest.
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
 KUBE_VERSIONS="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 PREFLIGHT_KEYS=(namespace scenario_set_ns crd gatewayclass gateway scenario_set_gw remote_namespace shared_namespace
@@ -643,6 +635,7 @@ for i in "${!CONTEXTS[@]}"; do
 			[[ -n "$k" ]] && PRE["${ctx}|${k}"]="${v:-unknown}"
 		done <"${WORK}/pre-${i}.kv"
 	fi
+	PRE["${ctx}|ossm_operator"]="$(platform_member_value "$ctx" operator)"
 done
 
 # A member that answered none of the reads (a mistyped context, an API server that cannot be
@@ -652,8 +645,9 @@ for i in "${!CONTEXTS[@]}"; do
 	ctx="${CONTEXTS[i]}"
 	answered=0
 	for k in "${PREFLIGHT_KEYS[@]}"; do
-		# The tuning baseline is the lib's own composite (never plain "unknown"): not a read here.
-		case "$k" in tuning_baseline | sidecar_egress_hosts) continue ;; esac
+		# The tuning baseline is the lib's own composite (never plain "unknown") and the operator
+		# build the platform record's (which warned for it): not reads here.
+		case "$k" in tuning_baseline | sidecar_egress_hosts | ossm_operator) continue ;; esac
 		if [[ "${PRE[$ctx|$k]}" != unknown ]]; then
 			answered=1
 			break
@@ -717,7 +711,7 @@ fi
 # Stop when the check is not deployed (a whole-run precondition: nothing is written).
 problems=()
 for ctx in "${CONTEXTS[@]}"; do
-	[[ "${PRE[$ctx|crd]}" != absent ]] || problems+=("${ctx}: no Gateway API CRDs (httproutes.gateway.networking.k8s.io)")
+	[[ "${PRE[$ctx|crd]}" != absent ]] || problems+=("${ctx}: no Gateway API CRDs (httproutes.gateway.networking.k8s.io): install the standard channel (tests/gateway-api/README.md, Deploy)")
 	[[ "${PRE[$ctx|namespace]}" != absent ]] || problems+=("${ctx}: namespace ${NS} is missing")
 	[[ "${PRE[$ctx|gateway]}" != absent ]] || problems+=("${ctx}: Gateway istio-system/${GW_NAME} is missing")
 	case "${PRE[$ctx|gatewayclass]}" in
@@ -725,7 +719,7 @@ for ctx in "${CONTEXTS[@]}"; do
 	*) warn "${ctx}: GatewayClass istio is ${PRE[$ctx|gatewayclass]}, but the status reads look for ${GW_CONTROLLER}: its routes will read no-status (see ISTIOD_ENV PILOT_GATEWAY_API_CONTROLLER_NAME)" ;;
 	esac
 	if [[ "$ctx" == "$WORKLOAD_CTX" ]]; then
-		[[ "${PRE[$ctx|echo]}" != absent ]] || problems+=("${ctx} (--workload-context): no echo Deployment (${ECHO_SELECTOR}) in ${NS}; the chart's workloadCluster must be this member's ACM ManagedCluster name")
+		[[ "${PRE[$ctx|echo]}" != absent ]] || problems+=("${ctx} (--workload-context): no echo Deployment (${ECHO_SELECTOR}) in ${NS}; the chart's workloadCluster must be this member's cluster name (Argo CD cluster; on OpenShift ACM ManagedCluster)")
 		if [[ "${PRE[$ctx|remote_namespace]}" == absent ]]; then
 			problems+=("${ctx} (--workload-context): namespace ${NS_REMOTE} (the S7-S9 backends) is missing; sync a chart revision that renders it")
 		elif [[ "${PRE[$ctx|echo_remote]}" == absent ]]; then
@@ -738,7 +732,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		fi
 	else
 		if [[ "${PRE[$ctx|echo]}" != absent && "${PRE[$ctx|echo]}" != unknown ]]; then
-			problems+=("${ctx}: runs the echo Deployment, but --workload-context is ${WORKLOAD_CTX}; pass the member whose ManagedCluster name is the chart's workloadCluster")
+			problems+=("${ctx}: runs the echo Deployment, but --workload-context is ${WORKLOAD_CTX}; pass the member whose cluster name is the chart's workloadCluster")
 		fi
 		# Not stops: only the scenarios that depend on them, and their rows on this member say so.
 		case "${PRE[$ctx|remote_namespace]}" in
@@ -754,7 +748,7 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 if ((${#problems[@]})); then
 	for p in ${problems[@]+"${problems[@]}"}; do echo "error: ${p}" >&2; done
-	die "the check is not deployed as expected (above). Deploy it from the ACM hub: fill in the placeholders of charts/mesh-verify-gateway-api-appset.yaml and apply it (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
+	die "the check is not deployed as expected (above). Deploy it from the hub: fill in the placeholders of charts/mesh-verify-gateway-api-appset.yaml and apply it (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
 fi
 
 # --- Step 2: bounded wait for the Gateway, the echo Deployments and every route's status (PL4),
@@ -1286,14 +1280,20 @@ CHART_REVISION=unknown
 # argocd_health: Applications of the ApplicationSet -> $WORK/argo.rows
 # (application, destination, role, health, sync, synced revision, HTTPRoute health); the
 # workload cluster -> $WORK/argo.workload. Calls die on a failed read: run it in a subshell.
+# GWAPI_ARGOCD_NAMESPACE empty: the namespace the hub's platform installs (-> $WORK/argo.ns).
 argocd_health() {
-	local f="${WORK}/apps.json" fs="${WORK}/appset.json" rc=0 wl
-	kget "$HUB_CTX" "$fs" -n "$GWAPI_ARGOCD_NAMESPACE" get applicationsets.argoproj.io "$GWAPI_ARGOCD_APPSET" || rc=$?
-	((rc == 0)) || die "could not read ApplicationSet ${GWAPI_ARGOCD_NAMESPACE}/${GWAPI_ARGOCD_APPSET} on ${HUB_CTX} (kubectl: $(reach_sanitize "$(head -c 300 "${fs}.err" 2>/dev/null)"))"
+	local f="${WORK}/apps.json" fs="${WORK}/appset.json" rc=0 wl ns="$GWAPI_ARGOCD_NAMESPACE"
+	if [[ -z "$ns" ]]; then
+		ns="$(platform_gitops_namespace "$HUB_CTX" 2>"${WORK}/argo.ns.err")" ||
+			die "could not tell the hub's platform to pick its Argo CD namespace; set GWAPI_ARGOCD_NAMESPACE (argocd, or openshift-gitops on OpenShift) ($(reach_sanitize "$(head -c 400 "${WORK}/argo.ns.err" 2>/dev/null)"))"
+	fi
+	printf '%s\n' "$ns" >"${WORK}/argo.ns"
+	kget "$HUB_CTX" "$fs" -n "$ns" get applicationsets.argoproj.io "$GWAPI_ARGOCD_APPSET" || rc=$?
+	((rc == 0)) || die "could not read ApplicationSet ${ns}/${GWAPI_ARGOCD_APPSET} on ${HUB_CTX} (kubectl: $(reach_sanitize "$(head -c 300 "${fs}.err" 2>/dev/null)")); GWAPI_ARGOCD_NAMESPACE and GWAPI_ARGOCD_APPSET name it"
 	wl="$(jq -r '.spec.template.spec.source.helm.valuesObject.workloadCluster // "unset"' "$fs" 2>/dev/null)" || wl=unknown
 	printf '%s\n' "${wl:-unknown}" >"${WORK}/argo.workload"
-	kget "$HUB_CTX" "$f" -n "$GWAPI_ARGOCD_NAMESPACE" get applications.argoproj.io || rc=$?
-	((rc == 0)) || die "could not list Applications in ${GWAPI_ARGOCD_NAMESPACE} on ${HUB_CTX} (kubectl: $(reach_sanitize "$(head -c 300 "${f}.err" 2>/dev/null)"))"
+	kget "$HUB_CTX" "$f" -n "$ns" get applications.argoproj.io || rc=$?
+	((rc == 0)) || die "could not list Applications in ${ns} on ${HUB_CTX} (kubectl: $(reach_sanitize "$(head -c 300 "${f}.err" 2>/dev/null)")); GWAPI_ARGOCD_NAMESPACE names the namespace"
 	jq -r --arg appset "$GWAPI_ARGOCD_APPSET" --arg wl "$wl" '.items[]
 		| select(any(.metadata.ownerReferences[]?; .kind == "ApplicationSet" and .name == $appset))
 		| (.spec.destination.name // "-") as $dst
@@ -1308,7 +1308,9 @@ argocd_health() {
 if [[ -n "$HUB_CTX" ]]; then
 	echo "Argo CD health on ${HUB_CTX}..." >&2
 	if (argocd_health) 2>"${WORK}/argo.stderr"; then
-		ARGO_STATE="read from ${HUB_CTX}: $(wc -l <"${WORK}/argo.rows" | tr -d ' ') Application(s) of ${GWAPI_ARGOCD_NAMESPACE}/${GWAPI_ARGOCD_APPSET}"
+		argo_ns="$(cat "${WORK}/argo.ns")"
+		[[ -n "$GWAPI_ARGOCD_NAMESPACE" ]] || echo "Argo CD namespace on ${HUB_CTX}: ${argo_ns} (from its platform; GWAPI_ARGOCD_NAMESPACE sets it)" >&2
+		ARGO_STATE="read from ${HUB_CTX}: $(wc -l <"${WORK}/argo.rows" | tr -d ' ') Application(s) of ${argo_ns}/${GWAPI_ARGOCD_APPSET}"
 		WORKLOAD_CLUSTER="$(cat "${WORK}/argo.workload" 2>/dev/null || echo unknown)"
 		CHART_REVISION="$(awk -F'\t' '!seen[$6]++ { printf "%s%s", (n++ ? "," : ""), $6 }' "${WORK}/argo.rows")"
 		[[ -n "$CHART_REVISION" ]] || CHART_REVISION=unknown
@@ -1368,7 +1370,7 @@ restarted() {
 		echo unknown
 		return 0
 	}
-	after="$(jq -r "$(pod_filter x)" "$f" 2>/dev/null | cut -f2)" || after=""
+	after="$(jq -r "$(platform_pod_filter x)" "$f" 2>/dev/null | cut -f2)" || after=""
 	if [[ -z "$after" ]]; then
 		echo unknown
 	elif [[ "$after" == "$before" ]]; then
@@ -1721,6 +1723,7 @@ emit_preamble() {
 	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 	istio_version_kv | sed 's/^/# /'
 	config_preamble_lines
+	platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]}")"
 	echo "# SCENARIO_SET=${SCENARIO_SET}"
 	echo "# CONTEXTS=$(IFS=,; echo "${CONTEXTS[*]}")"
 	echo "# WORKLOAD_CONTEXT=${WORKLOAD_CTX}"
@@ -2344,7 +2347,7 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo ""
 	echo "Builds, pods and readiness (\`restarted\` 1 = a pod restarted, was replaced or added during the run; \`unknown\` = not measured):"
 	echo ""
-	echo "| Member | istiod image | Ingress istio-proxy image | OSSM operator | Istio CR version | Ingress replicas (pod read by istioctl) | istiod / ingress restarted | Data-plane gate passed after (s) |"
+	echo "| Member | istiod image | Ingress istio-proxy image | Operator build | Istio CR version | Ingress replicas (pod read by istioctl) | istiod / ingress restarted | Data-plane gate passed after (s) |"
 	echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
 	for ctx in "${CONTEXTS[@]}"; do
 		pc_cell="not read"
@@ -2376,6 +2379,7 @@ PREAMBLE_KV_RE='^# ([A-Za-z_][^=]*)=(.*)$'
 	echo "| --- | --- |"
 	echo "| Run ID | \`${RUN_ID}\` |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+	platform_md_row "$(IFS=,; echo "${CONTEXTS[*]}")"
 	echo "| Members | $(join_ticks "${CONTEXTS[@]}") (workload \`${WORKLOAD_CTX}\`) |"
 	echo "| Requests per cell | ${REQUESTS}, curl --max-time ${TIMEOUT_SEC} s (detail ${GWAPI_DETAIL_TIMEOUT_SEC} s) |"
 	crv_note="vs the script's commit: ${CHART_REVISION_VS_HARNESS}"

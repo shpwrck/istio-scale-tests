@@ -23,6 +23,8 @@ source "${ROOT}/tests/lib/config.sh"
 config_preload propagation "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -71,6 +73,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 KUBECTL=()
 resolve_kubectl KUBECTL
 

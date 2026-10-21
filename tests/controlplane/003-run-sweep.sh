@@ -52,6 +52,10 @@ source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the peak poller
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # probe_kube_versions for the pre-created preamble
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/capacity.sh"  # cap_node_totals / cap_istiod_limits for the capacity lines
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/envelope.sh"  # cluster-infra preamble + campaign-end scale envelope
@@ -217,7 +221,8 @@ explicit scoping, no --resume.
   _BURST_FACTOR). It compares the container working set (kubectl top; else Envoy
   server.memory_physical_size, else server.memory_allocated) and istiod RSS with the
   limit. A live sweep also adds every mesh member its remote secrets name to the
-  guard set (or warns when a member has no kube context), and refuses to start
+  guard set (and stops when one has no kube context of its name; with
+  --mem-guard-contexts it warns), and refuses to start
   while a controlplane-test namespace of an earlier run is still discovered.
 
 Other:
@@ -265,37 +270,41 @@ Other:
                               started with --config resumes only with the same
                               file (same sha256; add --config
                               <DIR>/run-config-<RUN_ID>.env); one started without
-                              it warns when --config is given. --contexts must
-                              name the members the sweep started on, in the same
-                              order (mesh size N measures the first N), the mesh
-                              must run the ISTIO_VERSION the sweep recorded, and
-                              each member the active revision it recorded
-                              (ISTIO_ACTIVE_REVISIONS), under either
+                              it warns when --config is given. It stops when a
+                              member now has another platform, mesh build
+                              (operator, istiod, gateway proxy), istiod env,
+                              tuning profile objects, node provider or Kubernetes
+                              version than the TSV records, or its source member
+                              other tuning levers or istiod limits (README,
+                              --resume); a value it cannot read only warns.
+                              --contexts must name the members the sweep started
+                              on, in the same order (mesh size N measures the
+                              first N), the mesh must run the ISTIO_VERSION the
+                              sweep recorded, and each member the active revision
+                              it recorded (ISTIO_ACTIVE_REVISIONS), under either
                               ISTIO_VERSION_CHECK policy; otherwise start a new
-                              sweep (also to add members for a larger mesh
-                              size). Nor if the Istio CR or its active
-                              IstioRevision was edited since the sweep started
-                              (ISTIO_GENERATIONS), nor a sweep whose TSV preamble
-                              lists a member twice (an older harness took it
-                              twice). Nor is a sweep resumed whose
-                              sweep-outcome.txt (or .prev.txt) records a PROBLEM
-                              (the version, the active revision or the
-                              generation of the Istio CR or its active
-                              IstioRevision changed under it, or the
-                              end-of-sweep version check failed; not that the
-                              cells could not be counted, which every run
-                              redoes, nor that the harness changed during the
-                              sweep). The resume carries that harness PROBLEM
-                              into its own outcome, still a PROBLEM (exit 4)
-                              ending "(kept: <why>)": <n> row(s) of that run
-                              are in the figures; the rows in the figures ran
-                              more than one harness, or one not recorded; that
-                              run's rows could not be counted; or its record
-                              names no date, so the run it is about is not
-                              known. When that run wrote no rows, or its rows
-                              were all run again later, and the rows the
-                              figures keep ran one harness, the outcome writes
-                              it as a NOTE instead, ending "(that run wrote no
+                              sweep (also to add members for a larger mesh size).
+                              Nor if the Istio CR or its active IstioRevision was
+                              edited since the sweep started (ISTIO_GENERATIONS),
+                              nor a sweep whose TSV preamble lists a member twice
+                              (an older harness took it twice). Nor is a sweep
+                              resumed whose sweep-outcome.txt (or .prev.txt)
+                              records a PROBLEM (the version, the active revision
+                              or the generation of the Istio CR or its active
+                              IstioRevision changed under it, or the end-of-sweep
+                              version check failed; not that the cells could not
+                              be counted, which every run redoes, nor that the
+                              harness changed during the sweep). The resume
+                              carries that harness PROBLEM into its own outcome,
+                              still a PROBLEM (exit 4) ending "(kept: <why>)":
+                              <n> row(s) of that run are in the figures; the rows
+                              in the figures ran more than one harness, or one
+                              not recorded; that run's rows could not be counted;
+                              or its record names no date, so the run it is about
+                              is not known. When that run wrote no rows, or its
+                              rows were all run again later, and the rows the
+                              figures keep ran one harness, the outcome writes it
+                              as a NOTE instead, ending "(that run wrote no
                               rows)" or "(its rows were all run again later)",
                               without the advice to run the sweep again. Before
                               its first cell, a resume (as a first run) counts
@@ -304,9 +313,9 @@ Other:
                               mesh members their remote secrets name, deletes
                               those on the --contexts members (005-cleanup.sh),
                               then waits --settle, so no cell runs on another's
-                              leftovers or inside their deletion's pushes;
-                              it deletes nothing on the other members: when
-                              they hold some, it stops first and prints the 005
+                              leftovers or inside their deletion's pushes; it
+                              deletes nothing on the other members: when they
+                              hold some, it stops first and prints the 005
                               command for them. An earlier run's notes about the
                               end of the sweep are carried into the new outcome,
                               once. A resume that passes its checks marks the
@@ -316,36 +325,38 @@ Other:
                               outcome; front matter stale_since_resume), until it
                               writes them again at its end. The TSV keeps the
                               first run's ISTIO_NOTREADY_AT_START (the outcome
-                              repeats it as a note) and HARNESS_SHA (when it
-                              died before it wrote the TSV, the resume that
-                              wrote it keeps its own there, and the reports
-                              list the first run's values as unknown); the
-                              resume records its own readiness, with its
-                              start time, in a note of the sweep outcome
-                              (ISTIO_NOTREADY_AT_RESUME=...), and warns when it
-                              runs another harness (HARNESS_CONTENT_KEY; when
-                              only git describe differs, an INFO) than the last
-                              known one before it, or unknown, or reads other
-                              Kubernetes server versions. resumes.txt in the
-                              sweep dir keeps one line per resume (start time,
-                              HARNESS_SHA, readiness, kube versions, the TSV's
-                              line count, which starts its attempt, the proxy
-                              versions and generations it read, the TSV it
-                              applies to, its HARNESS_CONTENT_KEY); the outcome
-                              notes each harness or kube version change in it,
-                              each resume on an unknown harness, and each earlier
-                              resume that started not ready. planned-cells.txt in
-                              the sweep dir lists every cell the first run
-                              planned (each resume adds its own): a cell planned
-                              but never run counts as failed (NOT_RUN), and the
-                              outcome names it and the full command that resumes
-                              with the flags that planned it; a resume whose axis
-                              flags leave planned cells out lists them at its
-                              start, each with the full command that resumes with
-                              them. Resume with those flags to finish the
-                              sweep. A resume that added no rows (every cell of
-                              its flags was done) says so, and the reports
-                              leave it out of the rows' provenance.
+                              repeats it as a note) and HARNESS_SHA (when it died
+                              before it wrote the TSV, the resume that wrote it
+                              keeps its own there, and the reports list the first
+                              run's values as unknown); the resume records its
+                              own readiness, with its start time, in a note of
+                              the sweep outcome (ISTIO_NOTREADY_AT_RESUME=...),
+                              and warns when it runs another harness
+                              (HARNESS_CONTENT_KEY; when only git describe
+                              differs, an INFO) than the last known one before
+                              it, or unknown, or reads another Kubernetes server
+                              version than an earlier resume on a member the TSV
+                              records none for (one the TSV records stops it,
+                              above). resumes.txt in the sweep dir keeps one
+                              line per resume (start time, HARNESS_SHA,
+                              readiness, kube versions, the TSV's line count,
+                              which starts its attempt, the proxy versions and
+                              generations it read, the TSV it applies to, its
+                              HARNESS_CONTENT_KEY); the outcome notes each
+                              harness or kube version change in it, each resume
+                              on an unknown harness, and each earlier resume that
+                              started not ready. planned-cells.txt in the sweep
+                              dir lists every cell the first run planned (each
+                              resume adds its own): a cell planned but never run
+                              counts as failed (NOT_RUN), and the outcome names
+                              it and the full command that resumes with the flags
+                              that planned it; a resume whose axis flags leave
+                              planned cells out lists them at its start, each
+                              with the full command that resumes with them.
+                              Resume with those flags to finish the sweep. A
+                              resume that added no rows (every cell of its flags
+                              was done) says so, and the reports leave it out of
+                              the rows' provenance.
   --extend-plan               With --resume: also run cells no earlier run of the
                               sweep planned (planned-cells.txt records them as a
                               new PLAN). Env CONTROLPLANE_EXTEND_PLAN=1 does the
@@ -450,6 +461,7 @@ Environment:
   CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
   (default 2): warn when a cluster's connected proxies and its Running sidecar pods
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
+$(platform_help_lines all)
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
   step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
@@ -628,6 +640,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
 is_pos_int "$MAX_MATRIX" || die "CONTROLPLANE_MAX_MATRIX must be a positive integer (got: $MAX_MATRIX)"
 # 002 reads the same two knobs per combo; validate once here so a typo fails the
@@ -738,6 +751,9 @@ else
 	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
@@ -1125,7 +1141,7 @@ if [[ -n "$RESUME_DIR" ]]; then
 	elif [[ -z "$_resume_cfg" && -f "$_resume_snapshot" ]]; then
 		_resume_with_cfg=1
 		_resume_cfg="$(basename "$_resume_snapshot")"
-		_resume_sha="$(_config_sha256 "$_resume_snapshot")"
+		_resume_sha="$(file_sha256 "$_resume_snapshot")"
 	fi
 	_resume_hint=""
 	if [[ -f "$_resume_snapshot" ]]; then
@@ -1219,6 +1235,7 @@ precreate_tsv_preamble() {
 		echo "# VSDR_SUBSETS=${VSDR_SUBSETS}"
 		echo "# VSDR_APPLY=${VSDR_APPLY}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]}")"
 		# Namespace-scaling keys through the emitter 002 uses too (PL36). A legacy sweep
 		# records GROWTH_MODE=off.
 		local growth_mode_key="off"
@@ -1315,7 +1332,7 @@ capacity_plan_warn() {
 			esac
 		done
 		if ! [[ "$alloc_cpu_m" =~ ^[0-9]+$ ]]; then
-			echo "  $ctx: WARN: node allocatable CPU unreadable; left out of the fit estimate." >&2
+			echo "  $ctx: WARN: node allocatable CPU unreadable (the node list failed, or no node counts as a worker: infra and tainted control-plane/master nodes are left out); left out of the fit estimate." >&2
 			continue
 		fi
 		# shellcheck disable=SC2207
@@ -1348,7 +1365,7 @@ capacity_plan_warn() {
 		fi
 	done
 	if [[ -z "$min_free" ]]; then
-		echo "  WARN: node allocatable CPU unreadable on every context; cannot estimate services-that-fit." >&2
+		echo "  WARN: node allocatable CPU unreadable on every context (the node list failed, or no node counts as a worker); cannot estimate services-that-fit." >&2
 		echo "" >&2
 		return 0
 	fi
@@ -1486,10 +1503,10 @@ guard_add_mesh_members() {
 	((${#new_members[@]} == 0)) || echo "Memory guard: added mesh member(s) ${new_members[*]} (named by the remote secrets); samples ${GUARD_CONTEXTS[*]}"
 	((${#missing[@]})) || return 0
 	if [[ -n "$MEM_GUARD_CONTEXTS_CSV" ]]; then
-		echo "WARNING: memory guard: mesh member(s) ${missing[*]} ingest the series' Services but are not in --mem-guard-contexts (${MEM_GUARD_CONTEXTS_CSV}); their istiod and gateways are not guarded unless a context of another name covers them." >&2
+		echo "WARNING: memory guard: mesh member(s) ${missing[*]} (named by the Istio remote secrets) are not in --mem-guard-contexts (${MEM_GUARD_CONTEXTS_CSV}); their istiod and gateways are not guarded unless a context of another name covers them. A member that left the mesh stays named until its remote secret is deleted (README.md, \"Grow the mesh\")." >&2
 		return 0
 	fi
-	die "memory guard: mesh member(s) ${missing[*]} (named by the Istio remote secrets) have no kube context of that name, so their istiod and gateways could not be guarded. Pass --mem-guard-contexts with a context for every member (or the subset you accept), or set MEM_STOP_PCT 0 to run unguarded."
+	die "memory guard: mesh member(s) ${missing[*]} (named by the Istio remote secrets) have no kube context of that name, so their istiod and gateways could not be guarded. A member that left the mesh stays named until its remote secret is deleted from every other member: their wiring gate reads NotReady and prints the delete command (README.md, \"Grow the mesh\"). Otherwise pass --mem-guard-contexts with a context for every member (or the subset you accept), or set MEM_STOP_PCT 0 to run unguarded."
 }
 
 # leftover_preflight: before a live growth sweep, count the controlplane-test namespaces
@@ -1512,8 +1529,8 @@ leftover_preflight() {
 	local c kv total disc out="" bad=""
 	for c in "${CONTEXTS[@]:0:${MAX_MESH_SIZE}}"; do
 		kv="$(growth_test_ns_counts "$c" "${KUBECTL[@]}")"
-		total="$(_growth_kv total "$kv")"
-		disc="$(_growth_kv discovered "$kv")"
+		total="$(kv_value total "$kv")"
+		disc="$(kv_value discovered "$kv")"
 		out="${out:+${out},}${c}=${total}/${disc}"
 		if [[ "$disc" =~ ^[0-9]+$ ]] && ((disc > 0)); then
 			bad="${bad:+${bad}; }${c}: ${disc} discovered"
@@ -1536,7 +1553,7 @@ leftover_counts() {
 	local -a lc_pids=()
 	mkdir -p "$dir" 2>/dev/null || true
 	for ctx in "$@"; do
-		(_growth_kv total "$(growth_test_ns_counts "$ctx" "${KUBECTL[@]}")" > "${dir}/${i}" 2>/dev/null) &
+		(kv_value total "$(growth_test_ns_counts "$ctx" "${KUBECTL[@]}")" > "${dir}/${i}" 2>/dev/null) &
 		lc_pids+=("$!")
 		i=$((i + 1))
 	done
@@ -2001,6 +2018,25 @@ if [[ -n "$RESUME_DIR" && -f "$PLANNED_FILE" ]] && ! ((GROWTH || DRY_RUN)); then
 	fi
 	unset _np_matrix
 fi
+# ensure_output_dir: create the sweep dir (a --resume's exists) and say where it is.
+ensure_output_dir() {
+	[[ -d "$OUTPUT_DIR" ]] && return 0
+	mkdir -p "$OUTPUT_DIR"
+	echo "Output directory: $OUTPUT_DIR" >&2
+}
+# The platform record of every member, read once before the first cell: each 002 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share), the pre-created preamble writes it
+# (tests/lib/platform.sh). A --resume appends to a TSV whose preamble keeps the record it started
+# with: other builds or tuning levers stop it here, before it changes anything (the leftover
+# check's deletions, the outcome record moved aside, the pages marked, the metrics preflight's
+# wait), so the sweep dir stays as it was.
+if ! ((DRY_RUN)); then
+	platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+	[[ -z "$RESUME_DIR" ]] || platform_resume_check "${OUTPUT_DIR}/controlplane-${RUN_ID}.tsv" "$(IFS=,; echo "${CONTEXTS[*]}")" "${CONTEXTS[0]}"
+	ensure_output_dir
+	platform_probe_share "$OUTPUT_DIR"
+	platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
+fi
 # The cleanup to run when SIGKILL cut a step's own cleanup short (sweep_step's warning;
 # console only), from the repo root as the other sweeps name theirs.
 # shellcheck disable=SC2034  # read by sweep_step (tests/lib/common.sh)
@@ -2161,10 +2197,13 @@ fi
 # ever added at the end; a file keeps the columns its first line names. The resume also
 # writes a "# RESUMED_AT=<time> TSV_LINES=<n> HARNESS_SHA=<sha> HARNESS_CONTENT_KEY=<key>
 # ISTIO_NOTREADY_AT_RESUME=<...> ISTIO_GENERATIONS=<...> ISTIO_PROXY_VERSIONS=<...>
-# KUBE_VERSIONS=<ctx=ver,...>" line into the TSV itself, where its rows begin, so a TSV
-# copied without resumes.txt still keeps its attempts apart and names each attempt's
-# harness, Istio reads and Kubernetes versions (KUBE_VERSIONS last: the rest of the line;
-# 002 compares its harness with this line's). From that file the outcome notes every
+# PLATFORM=<...> ... TUNING_OBJECTS_BY_CONTEXT=<...> KUBE_VERSIONS=<ctx=ver,...>" line into
+# the TSV itself, where its rows begin, so a TSV copied without resumes.txt still keeps its
+# attempts apart and names each attempt's harness, Istio reads, platform record (the record
+# platform_probe read for this run: platform_resume_words; the reports merge it with the
+# preamble's, and the next --resume compares it too) and Kubernetes versions (KUBE_VERSIONS
+# last: the rest of the line; 002 compares its harness with this line's). The record is no
+# resumes.txt column: its readers read the TSV's line. From that file the outcome notes every
 # earlier resume that started with a member not ready (this one's is the version recheck's
 # note), and the harness segments: a note per resume whose harness files differ from the
 # run before it (another HARNESS_CONTENT_KEY; another HARNESS_SHA when a key is not
@@ -2210,9 +2249,10 @@ if [[ -n "$RESUME_DIR" ]] && ! ((DRY_RUN)); then
 	# key.
 	printf '%s\n' "$_resume_line" >> "$_resumes_log" \
 		|| die "--resume: could not append to ${_resumes_log}, which tells this run's rows from earlier ones; ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
-	((_resume_lines == 0)) || printf '# RESUMED_AT=%s TSV_LINES=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s ISTIO_NOTREADY_AT_RESUME=%s ISTIO_GENERATIONS=%s ISTIO_PROXY_VERSIONS=%s KUBE_VERSIONS=%s\n' \
+	_resume_words="$(platform_resume_words "$(IFS=,; echo "${CONTEXTS[*]}")")"
+	((_resume_lines == 0)) || printf '# RESUMED_AT=%s TSV_LINES=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s ISTIO_NOTREADY_AT_RESUME=%s ISTIO_GENERATIONS=%s ISTIO_PROXY_VERSIONS=%s%s KUBE_VERSIONS=%s\n' \
 		"$RESUME_AT" "$_resume_lines" "$HARNESS_SHA" "${HARNESS_CONTENT_KEY:-unknown}" "${ISTIO_NOTREADY_AT_START:-unchecked}" \
-		"${ISTIO_GENERATIONS:-unchecked}" "${ISTIO_PROXY_VERSIONS:-unchecked}" "$_resume_kv" >> "$_resume_tsv" \
+		"${ISTIO_GENERATIONS:-unchecked}" "${ISTIO_PROXY_VERSIONS:-unchecked}" "${_resume_words:+ ${_resume_words}}" "$_resume_kv" >> "$_resume_tsv" \
 		|| die "--resume: could not append the resume's start line to ${_resume_tsv}, which tells this run's rows from earlier ones; ${NO_CELL_RAN}. Fix the sweep dir (permissions, disk space), then run the same --resume again."
 fi
 # The notes compare this resume with the runs before it, from the TSV it found: one that held
@@ -2374,12 +2414,6 @@ fmt_ns_pattern() {
 	else
 		printf '%s-0..%s-%d\n' "$NS" "$NS" "$(( nc - 1 ))"
 	fi
-}
-
-ensure_output_dir() {
-	[[ -d "$OUTPUT_DIR" ]] && return 0
-	mkdir -p "$OUTPUT_DIR"
-	echo "Output directory: $OUTPUT_DIR" >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -2557,7 +2591,6 @@ trap '_sweep_rc=$?; sweep_step_kill || true; stop_peak_metrics_poller 2>/dev/nul
 # --config also gets the run-config-<RUN_ID>.env replay copy; a resumed one keeps the
 # config it started with.
 if ((! DRY_RUN)); then
-	ensure_output_dir
 	# Until its outcome is written at the end, sweep-outcome.txt says this run has not
 	# finished (a run that dies keeps it; a --resume moved a finished record to .prev above).
 	# Its next step is the full command (the record is shared: "<sweep dir>", which the
@@ -2594,6 +2627,7 @@ if ((! DRY_RUN)); then
 			"MEM_STOP_PCT=${MEM_STOP_PCT}" "MEM_GUARD_CONTEXTS=$(IFS=,; echo "${GUARD_CONTEXTS[*]}")" \
 			"GUARD_SCHEMA=2" "GW_MODEL=intercept ${GW_MI_INTERCEPT} Mi; eastwestgateway ${EWGW_MI_PER_1000} Mi per 1000 Services x ${EWGW_BURST}; ingressgateway ${INGW_MI_PER_1000} Mi per 1000 Services x ${INGW_BURST}" \
 			"NOTE=rel_projected = base + (current - base) x ratio^power from the series start (ratio 1: the first step and changes that add no Services); abs_projected (gateways) = (intercept + Mi per 1000 Services x services_after / 1000) x burst factor, plus the non-heap part of a working-set reading (ws - Envoy physical heap); services_after = the context's istiod pilot_services + the Services the step adds; projected = the larger, compared with stop_pct % of limit_mi. metric: rss = istiod process_resident_memory_bytes (max over replicas, per-replica limit); ws = the gateway container's working set (kubectl top), else physical = Envoy server.memory_physical_size, else allocated = server.memory_allocated (istio-proxy limit). verdict stale_base: a gateway's Envoy allocated memory exceeded 1.5 x the model + 100 Mi at the series start (memory kept from an earlier series)."
+		{ config_preamble_lines; platform_preamble_lines "$(platform_probed_contexts)"; } >> "$GUARD_FILE"
 		printf 'timestamp\tseries\tcell\tcontext\tcomponent\tmetric\tcurrent_mi\tbase_mi\tratio\tpower\trel_projected_mi\tservices_after\tabs_projected_mi\tprojected_mi\tlimit_mi\tstop_pct\tverdict\n' >> "$GUARD_FILE"
 	fi
 fi
@@ -2681,8 +2715,8 @@ guard_sample_ctx() {
 	while IFS=$'\t' read -r pod plim kind; do
 		[[ -n "$pod" ]] || continue
 		kv="$(growth_envoy_stats "$ctx" istio-system "$pod" "${KUBECTL[@]}")"
-		mem="$(_growth_kv mem_mi "$kv")"
-		phy="$(_growth_kv physical_mi "$kv")"
+		mem="$(kv_value mem_mi "$kv")"
+		phy="$(kv_value physical_mi "$kv")"
 		ws="${wsm[$pod]:-}"
 		if [[ "$ws" =~ ^[0-9]+$ ]]; then metric=ws; val="$ws"
 		elif [[ "$phy" =~ ^[0-9]+$ ]]; then metric=physical; val="$phy"
@@ -2750,7 +2784,7 @@ guard_baseline() {
 		[[ "$amodel" =~ ^[0-9]+$ ]] || continue
 		if ((alloc > amodel + 100)); then
 			stale=1
-			echo "WARNING: memory guard: ${key}: Envoy allocated ${alloc} Mi at the series start, above the ${amodel} Mi the model allows for ${svc} Services (memory kept from an earlier series). Restart the gateways between series (oc -n istio-system rollout restart deploy -l 'istio in (ingressgateway,eastwestgateway)' on each member, nothing measuring) for clean numbers; the absolute projection still guards every step." >&2
+			echo "WARNING: memory guard: ${key}: Envoy allocated ${alloc} Mi at the series start, above the ${amodel} Mi the model allows for ${svc} Services (memory kept from an earlier series). Restart the gateways between series (kubectl -n istio-system rollout restart deploy -l 'istio in (ingressgateway,eastwestgateway)' on each member, nothing measuring) for clean numbers; the absolute projection still guards every step." >&2
 			guard_log "series start" "${key%%|*}" "${key#*|}" allocated "$alloc" "$alloc" 1 1 "$alloc" "$svc" "$amodel" "$alloc" "$lim" stale_base
 		fi
 	done
@@ -3044,8 +3078,8 @@ g_series_start_count() {
 	local c kv total disc st
 	for c in "${CONTEXTS[@]:0:$G_MS}"; do
 		kv="$(growth_test_ns_counts "$c" "${KUBECTL[@]}")"
-		total="$(_growth_kv total "$kv")"
-		disc="$(_growth_kv discovered "$kv")"
+		total="$(kv_value total "$kv")"
+		disc="$(kv_value discovered "$kv")"
 		st=OK
 		[[ "$total" =~ ^[0-9]+$ ]] && ((total > LEFTOVER_NS_WARN)) && st=LEFTOVER
 		echo "Series ${G_SID} start: ${c} holds ${total} controlplane-test namespace(s) from earlier series or runs (${disc} discovered)"
@@ -3469,6 +3503,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete. $combo_idx combinations enumerated; no clusters touched." >&2
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$OUTPUT_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 if [[ -n "$SWEEP_STOPPED" ]]; then

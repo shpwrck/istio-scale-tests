@@ -106,6 +106,13 @@
 #                                        (\ " and control characters), for frontmatter
 #   file_min_bytes <file> <n>         -> true when <file> holds at least <n> bytes; forks
 #                                        nothing when it does
+#   file_sha256 <file>                -> the file's hex sha256, or unknown when no tool
+#                                        (sha256sum, shasum) works
+#   kv_value <key> <tokens>           -> the value of <key>=... among "k=v k=v" tokens, or
+#                                        unknown
+#   each_bounded <max> <fn> <tmp> <item>...
+#                                     -> run <fn> on each item in the background, <max> at a
+#                                        time (the platform record's PLATFORM_READ_PARALLEL)
 #
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
@@ -163,16 +170,20 @@ split_csv() {
 # split_contexts <csv> <out_arrayname> <what> [<source_ctx>]: split a context list like
 # split_csv, then refuse a member listed twice (a duplicate would deploy, scrape and count
 # that member twice) and, with <source_ctx>, a remote equal to the source. Call it before
-# any cluster change; <what> names the flag or variable the operator fixes.
+# any cluster change; <what> names the flag or variable the operator fixes. The refusal
+# repeats the list, or says how many items it has when it is over 200 characters (a
+# fleet's runs to thousands).
 # shellcheck disable=SC2329
 split_contexts() {
-	local _sc_csv="$1" _sc_what="$3" _sc_src="${4:-}" _sc_x
+	local _sc_csv="$1" _sc_what="$3" _sc_src="${4:-}" _sc_x _sc_shown
 	split_csv "$_sc_csv" "$2"
 	local -n _sc_out="$2"
 	local -A _sc_seen=()
+	_sc_shown="$_sc_csv"
+	((${#_sc_shown} <= 200)) || _sc_shown="${#_sc_out[@]} items"
 	for _sc_x in ${_sc_out[@]+"${_sc_out[@]}"}; do
 		[[ -z "${_sc_seen[$_sc_x]+x}" ]] \
-			|| die "${_sc_what} lists ${_sc_x} twice (${_sc_csv}): list each mesh member once"
+			|| die "${_sc_what} lists ${_sc_x} twice (${_sc_shown}): list each mesh member once"
 		[[ -z "$_sc_src" || "$_sc_x" != "$_sc_src" ]] \
 			|| die "${_sc_what} lists the source context ${_sc_x}: the remotes are the other mesh members"
 		_sc_seen[$_sc_x]=1
@@ -2451,6 +2462,8 @@ controlplane_attempts() {
 		function pv(k) { return ((k in pre) && pre[k] != "") ? pre[k] : "unknown" }
 		# lv(k): key k of this "# RESUMED_AT=" or "# HARNESS_CHANGED_AT=" line, up to the next
 		# key it records (KUBE_VERSIONS, its last, to the end of the line); unknown when absent.
+		# Its keys: those of the line itself, then the platform record before KUBE_VERSIONS
+		# (PLATFORM_KEYS in tests/lib/platform.sh, which platform.bats checks against this list).
 		function lv(k,    p, s, i, q, e) {
 			if (!(p = index($0, " " k "="))) return "unknown"
 			s = substr($0, p + length(k) + 2); e = length(s) + 1
@@ -2460,7 +2473,7 @@ controlplane_attempts() {
 		}
 		function z(t) { sub(/\+00:00$/, "Z", t); return t }
 		BEGIN {
-			nlk = split("RESUMED_AT TSV_LINES HARNESS_SHA HARNESS_CONTENT_KEY ISTIO_NOTREADY_AT_RESUME ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS KUBE_VERSIONS HARNESS_CHANGED_AT", lk, " ")
+			nlk = split("RESUMED_AT TSV_LINES HARNESS_SHA HARNESS_CONTENT_KEY ISTIO_NOTREADY_AT_RESUME ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS PLATFORM TEST_PLATFORM PLATFORM_BY_CONTEXT MESH_OPERATOR_BY_CONTEXT ISTIOD_IMAGE_BY_CONTEXT PROXY_IMAGE_BY_CONTEXT NODE_PROVIDER_BY_CONTEXT ISTIOD_ENV_BY_CONTEXT TUNING_OBJECTS_BY_CONTEXT KUBE_VERSIONS HARNESS_CHANGED_AT", lk, " ")
 			while ((r = (getline line < res)) > 0) {
 				n = split(line, f, "\t")
 				if (f[1] == "RESUMED_AT") { split("", col); for (i = 1; i <= n; i++) col[f[i]] = i; continue }
@@ -2680,4 +2693,65 @@ file_min_bytes() {
 	sz=$(wc -c < "$f" 2>/dev/null || echo 0)
 	sz="${sz//[^0-9]/}"
 	((${sz:-0} >= n))
+}
+
+# --- sha256 and key=value tokens ---
+
+# file_sha256 <file>: the file's hex sha256 (a --config file's RUN_CONFIG_SHA256, the platform
+# record's istiod env digest, a resume's run config), or unknown when no hashing tool
+# (sha256sum, shasum) works.
+# shellcheck disable=SC2329
+file_sha256() {
+	local out=""
+	if command -v sha256sum >/dev/null 2>&1; then
+		out="$(sha256sum < "$1" 2>/dev/null)" || out=""
+	elif command -v shasum >/dev/null 2>&1; then
+		out="$(shasum -a 256 < "$1" 2>/dev/null)" || out=""
+	fi
+	out="${out%% *}"
+	if [[ "$out" =~ ^[0-9a-f]{64}$ ]]; then echo "$out"; else echo unknown; fi
+}
+
+# each_bounded <max> <fn> <tmp> <item>...: run "<fn> <item> <tmp>/<i>" for each item in the
+# background, <max> at a time (a whole number above zero, else 20: 500 members would otherwise
+# start 500 reads, and their kubectl processes, at once), with its stdout in <tmp>/<i>.row and its
+# stderr in <tmp>/<i>.warn (<i>: the item's index; files by index, since a context name can hold
+# a /), and wait for all of them. The pool runs in a subshell of its own, so its waits see only
+# its jobs, never one of the caller's. <fn> sees the caller's variables (a local array included).
+# shellcheck disable=SC2329
+each_bounded() {
+	local _eb_max="$1" _eb_fn="$2" _eb_tmp="$3"
+	shift 3
+	[[ "$_eb_max" =~ ^[1-9][0-9]*$ ]] || _eb_max=20
+	(
+		local _eb_i _eb_n=0
+		local -a _eb_m=("$@")
+		for _eb_i in "${!_eb_m[@]}"; do
+			if ((_eb_n >= _eb_max)); then
+				wait -n || true
+				_eb_n=$((_eb_n - 1))
+			fi
+			mkdir -p "${_eb_tmp}/${_eb_i}"
+			("$_eb_fn" "${_eb_m[_eb_i]}" "${_eb_tmp}/${_eb_i}" >"${_eb_tmp}/${_eb_i}.row" 2>"${_eb_tmp}/${_eb_i}.warn") &
+			_eb_n=$((_eb_n + 1))
+		done
+		wait
+	)
+}
+
+# kv_value <key> <tokens>: the value of <key>=... among whitespace-separated "k=v" tokens (what
+# cap_istiod_limits, cap_node_totals, env_collect_infra and the growth probes print), or
+# unknown without one. The tokens are split without pathname expansion.
+# shellcheck disable=SC2329
+kv_value() {
+	local _kv_t
+	local -a _kv_toks=()
+	read -r -d '' -a _kv_toks <<<"$2" || true
+	for _kv_t in ${_kv_toks[@]+"${_kv_toks[@]}"}; do
+		if [[ "$_kv_t" == "${1}="* ]]; then
+			printf '%s\n' "${_kv_t#"${1}="}"
+			return 0
+		fi
+	done
+	echo unknown
 }

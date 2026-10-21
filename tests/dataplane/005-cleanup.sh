@@ -15,6 +15,8 @@ source "${ROOT}/tests/lib/config.sh"
 config_preload dataplane "$@"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_pos_int "$DELETION_TIMEOUT" || die "--deletion-timeout (or DATAPLANE_NS_DELETE_TIMEOUT_SEC) must be a positive integer; got '$DELETION_TIMEOUT'"
 
 KUBECTL=()

@@ -39,6 +39,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
@@ -203,6 +205,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 # fortio gets -t "${DURATION}s": `5m` would be a 5 ms window, not an error.
 is_pos_int "$DURATION" || die "--duration (or COEXEC_BASELINE_DURATION_SEC) must be a positive integer; got '$DURATION'"
@@ -220,6 +223,9 @@ command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
 [[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
+# The source and its remotes, each under a name of its own in the platform record
+# (platform_members_check): refused here, before any cluster call, in a --dry-run too.
+platform_members_check "$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"}
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -254,6 +260,8 @@ KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
 # probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
 istio_version_resolve "$ALL_CTXS_CSV" 0 "${KUBECTL[@]}"
 mapfile -t IV_KV < <(istio_version_kv)
+# The platform record (tests/lib/platform.sh), before any window: inherited from 004, else read here.
+platform_probe "$ALL_CTXS_CSV"
 
 # Preflight + record the source istiod replica count for the TSV preamble (PL2).
 # The fanout (tests/lib/fanout.sh) scrapes EVERY Running istiod pod, so multi-
@@ -290,7 +298,7 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
-	config_preamble_lines >> "$OUTPUT_FILE"
+	{ config_preamble_lines; platform_preamble_lines "$ALL_CTXS_CSV"; } >> "$OUTPUT_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 
@@ -301,8 +309,10 @@ CLIENT_POD="$(fortio_client_pod "$SOURCE_CTX" "$NS" fortio-client "${KUBECTL[@]}
 # and the window, through each cluster's fortio-server-<ctx> Service.
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every cluster's fortio-server-<ctx> (${REACH_REQUESTS} requests each; details on stderr)..."
-	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
-		"HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=churn-dataplane" \
+	# A sweep's 002s share one reach file (its RUN_ID): its header records every member the
+	# sweep covers (the inherited record), not the first mesh size's.
+	if reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)" "RUN_ID=${RUN_ID}" \
+		"HARNESS_SHA=${HARNESS_SHA}" "HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=churn-dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then

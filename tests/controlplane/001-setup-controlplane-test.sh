@@ -62,6 +62,10 @@ source "${ROOT}/tests/lib/capacity.sh"  # read-only capacity probes
 source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the apply timings
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # ns_lifecycle_init / _row / _api_counts
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_chart_args: the OpenShift overlay per member
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -202,7 +206,9 @@ Environment:
   CONTROLPLANE_APPLY_ATTEMPTS / CONTROLPLANE_APPLY_BACKOFF_S (apply retry, default 3 / 5s),
   CONTROLPLANE_APPLY_CHUNK_OBJECTS (objects per apply batch, default 200; <=0 disables),
   CONTROLPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  BUSYBOX_VERSION (dummy workload image tag).
+  BUSYBOX_VERSION (dummy workload image tag),
+  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
+  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
 
   Scale coverage (off by default): SCALE_SIZING_MODE (fixed|auto; auto derives the
   service count from cluster capacity; legacy layout only), SCALE_TARGET_FRACTION,
@@ -338,6 +344,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_pos_int "$SERVICE_COUNT" || die "--service-count must be a positive integer (got: $SERVICE_COUNT)"
 is_pos_int "$REPLICAS" || die "--replicas must be a positive integer (got: $REPLICAS)"
 is_pos_int "$NAMESPACE_COUNT" || die "--namespace-count must be a positive integer (got: $NAMESPACE_COUNT)"
@@ -690,7 +697,7 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 		if [[ -n "$alloc" && -n "$current" ]] && is_nonneg_int "$alloc" && is_nonneg_int "$current"; then
 			remaining=$((alloc - current))
 			if ((NEEDED_PODS > remaining)); then
-				die "context $ctx: need $NEEDED_PODS pods but only $remaining slots available ($alloc allocatable − $current non-terminal pods). Reduce --service-count, --replicas, --namespace-count or --measurement-pods, or add nodes."
+				die "context $ctx: need $NEEDED_PODS pods but only $remaining slots available ($alloc allocatable − $current non-terminal pods). Reduce --service-count, --replicas, --namespace-count or --measurement-pods (or their keys CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT or CONTROLPLANE_MEASUREMENT_PODS: in the environment of a tuning sweep, which runs this setup with --contexts only), or add nodes."
 			fi
 			echo "  $ctx: $remaining pod slots available ($NEEDED_PODS needed) — OK"
 			# Under-provision coverage floor (auto mode only).
@@ -735,14 +742,14 @@ if ! ((DRY_RUN)) && ((NEEDED_PODS > 0)); then
 			if (( CPU_NEEDED_M > cpu_free )); then
 				cpu_fit=$(( cpu_free / CPU_PER_POD_M ))
 				if [[ "${SCALE_CPU_PREFLIGHT_ENFORCE:-1}" == "1" ]]; then
-					die "context $ctx: ${cpu_line}; about ${cpu_fit} pods fit. Reduce --service-count, --replicas, --namespace-count or --measurement-pods, or add nodes (SCALE_CPU_PREFLIGHT_ENFORCE=0 only warns, for a node autoscaler)."
+					die "context $ctx: ${cpu_line}; about ${cpu_fit} pods fit. Reduce --service-count, --replicas, --namespace-count or --measurement-pods (or their keys CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT or CONTROLPLANE_MEASUREMENT_PODS: in the environment of a tuning sweep, which runs this setup with --contexts only), or add nodes (SCALE_CPU_PREFLIGHT_ENFORCE=0 only warns, for a node autoscaler)."
 				fi
 				echo "  WARN: $ctx: ${cpu_line}; about ${cpu_fit} pods fit; the rest stay Pending unless a node autoscaler adds capacity (SCALE_CPU_PREFLIGHT_ENFORCE=0)." >&2
 			else
 				echo "  $ctx: ${cpu_line} — OK"
 			fi
 		else
-			echo "  $ctx: could not read node CPU or pod requests (alloc=${cpu_alloc:-unknown}, requested=${cpu_req:-unknown}) — skipping the CPU check" >&2
+			echo "  $ctx: could not read node CPU or pod requests (alloc=${cpu_alloc:-unknown}, requested=${cpu_req:-unknown}) — skipping the CPU check. alloc is unknown when the node list fails or no node counts as a worker (infra nodes and control-plane/master nodes with a NoSchedule or NoExecute taint are left out; tests/lib/capacity.sh)" >&2
 		fi
 	done
 	echo ""
@@ -803,6 +810,8 @@ if ! ((DRY_RUN)) && [[ -s "$TARGETS_FILE" ]]; then
 fi
 
 if [[ -n "$LIFECYCLE_FILE" ]] && ! ((DRY_RUN)); then
+	# A new file (a standalone run; a sweep creates it first): its preamble needs the record.
+	[[ -f "$LIFECYCLE_FILE" ]] || platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 	ns_lifecycle_init "$LIFECYCLE_FILE" "standalone-001"
 fi
 
@@ -966,6 +975,16 @@ fi
 EXPECTED_DEPLOYS_FILE="${WORKDIR_ROOT}/expected-deploys"
 echo 0 > "$EXPECTED_DEPLOYS_FILE"
 
+# Each member's chart overlay (tests/lib/platform.sh), resolved before the applies start: a
+# member it cannot tell fails the run before any cluster changes, and no platform read lands
+# inside an apply's ns-lifecycle duration (t0 below). The args, one per line (none on Kubernetes).
+declare -A OVERLAY_BY_CTX=()
+for ctx in "${CONTEXTS[@]}"; do
+	((SKIP_APPLY || DELETE_SIDECARS)) && break
+	platform_chart_args "$CHART_DIR" "$ctx" PLATFORM_ARGS || exit 1
+	OVERLAY_BY_CTX[$ctx]="$(printf '%s\n' ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"})"
+done
+
 # Apply each context concurrently; any failure fails the join below.
 APPLY_PIDS=()
 for ctx in "${CONTEXTS[@]}"; do
@@ -998,7 +1017,9 @@ for ctx in "${CONTEXTS[@]}"; do
 		fi
 		echo "Setting up controlplane-test on context $ctx (part ${PARTS}, sidecar-scoping=${SIDECAR_SCOPING}, traffic-config=${TRAFFIC_CONFIG})"
 		rendered="${ctx_dir}/rendered.yaml"
-		helm template controlplane-test "$CHART_DIR" --set clusterName="$ctx" "${HELM_ARGS[@]}" > "$rendered" \
+		PLATFORM_ARGS=()
+		[[ -z "${OVERLAY_BY_CTX[$ctx]:-}" ]] || mapfile -t PLATFORM_ARGS <<<"${OVERLAY_BY_CTX[$ctx]}"
+		helm template controlplane-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} --set clusterName="$ctx" "${HELM_ARGS[@]}" > "$rendered" \
 			|| { echo "error: helm template failed on $ctx" >&2; exit 1; }
 		# Under a sweep, a chart file changed for this render reaches its outcome (harness_read).
 		harness_read _hs _hk

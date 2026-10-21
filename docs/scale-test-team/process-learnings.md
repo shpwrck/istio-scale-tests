@@ -403,3 +403,117 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 **How to preempt:** Write `! cmd || false` (keeps `$output` and `$status`) or `run ! cmd` (bats 1.5+; overwrites them); bats-assert's `refute`, `refute_output` and `refute_line` fail properly. `tests/lib/lint-bats-negation.sh` (`tests/lib/verify.sh` step 7) flags a line that starts with `! ` in a test, setup or helper body when it is not the block's last command and does not end in `|| false` (or `|| return`, `|| exit`, `|| fail`, `|| { ...; false; }`). The same exemption covers every command but the last of an `a && b` list, so `[ -e f ] && [ ! -s f ]` passes when `f` is missing: write two assertions.
 
 (PL46 was added after carry-over round 5: a review found the mid-test negations; once converted to `|| false` all 52 still passed, every negated grep reading a file that exists, and the lint keeps new ones out. The 19 mid-test `[ ] && [ ]` assertions found with them were split into one assertion per line, and also still pass.)
+
+## PL47 — A new deployment axis goes into every result's provenance in the same change
+
+**Why:** Making the harness run on two platforms (Kubernetes with the Sail operator, OpenShift with OSSM, on kind or cloud nodes) turned "which platform and mesh build produced this row" into a hidden variable. Round 1 of the de-Red-Hat cycle found that only the gateway-api check recorded the operator build: every other TSV and report would have averaged kind and cloud, Sail and OSSM runs without a trace, and a resumed sweep would have credited new rows to the build it started on.
+
+**How to preempt:** When a change adds an axis results depend on (platform, operator, node provider, mesh build), add it to the shared provenance emitter in that change (`tests/lib/platform.sh`), read it live before any measurement window, and write it from every TSV writer and placeholder (`config-suites.bats` checks the pairing). Every report merges it over its inputs and warns in its body when they differ; a `--resume` compares it with the record the sweep started with and refuses a definite change; a long sweep re-reads it at the end. Values that cannot be read are `unknown`, never a guess.
+
+(PL47 to PL54 were added after the de-Red-Hat cycle: rounds 1 to 4.)
+
+## PL48 — A changed IaC default needs a plan-time guard against live state
+
+**Why:** Defaulting `platform` to `kubernetes` made an existing OpenShift deployment whose tfvars never set it plan as Kubernetes: the plan would have destroyed the ArgoCD CR and the ACM releases and replaced the app-of-apps, whose resources finalizer takes the mesh with it. Nothing in the diff looked dangerous.
+
+**How to preempt:** When a new default changes what a root manages, read the live system at plan time (a data source with a postcondition) and fail before any change when it disagrees, naming the setting that fixes it. Keep an unreadable target a warning, so `terraform destroy` and plans with nothing to do there still work.
+
+## PL49 — Never delete the object a generator selects from while re-registering
+
+**Why:** The ApplicationSets generate a member's Applications from its Argo CD cluster Secret, and the Applications carry the resources finalizer. A re-registration that deletes and recreates the Secret (the obvious way to rotate a token or move a ServiceAccount) deletes every Application of that member, and with them its mesh.
+
+**How to preempt:** Update registration objects in place; put destroy-time cleanup in a separate resource that only runs on destroy. Prove a re-registration on a lab by comparing every Application's creationTimestamp before and after.
+
+## PL50 — Freeze the files Terraform reads between plan and apply
+
+**Why:** Editing a chart or values file that Terraform reads (`file()`, chart checksums, `charts/argocd-config/values.yaml`) after `terraform plan -out` failed the apply with "inconsistent result" and dropped a resource from state. Re-planning fixed it, but an apply that half-succeeds against a shared hub is how drift starts.
+
+**How to preempt:** Don't edit files under `charts/` or `terraform/` while a saved plan is pending; when you must, re-plan and read the new plan before applying.
+
+## PL51 — Run CI's exact lint invocation before pushing
+
+**Why:** `tests/lib/verify.sh` ran shellcheck one file at a time, while CI runs one shellcheck over every file, which follows `source` of files on the same command line. A library's array locals then shared names with scalars in four report scripts (SC2178/SC2128): green locally, red in both required jobs.
+
+**How to preempt:** Copy CI's command (`find tests/ terraform/ -name '*.sh' ... | xargs shellcheck --shell=bash`) and run it as is before every push that touches shell. Prefix library locals and globals (`_pl_*`, `PLATFORM_*`) so they cannot collide with a caller.
+
+## PL52 — A check through a load-balanced Service samples one replica; check every endpoint
+
+**Why:** The wiring gate read istiod's `/metrics` through `istiod.istio-system.svc`, so each probe saw one of three replicas. Each replica connects to every peer API server itself, so one replica that cannot reach a peer leaves a third of the proxies without that member's endpoints, while the gate fails one probe in three and stays Ready.
+
+**How to preempt:** When a readiness check reads per-replica state (sync status, caches, connections), list the Service's Ready endpoints and check each one, naming the replica that fails. Only state that every replica derives from the same input (a parsed Secret count) is safe to sample.
+
+## PL53 — A completion check waits for what will be rendered, not for the first object per target
+
+**Why:** The apply's status check waited until every mesh member had an Application with a status. The gate's ApplicationSet, which Terraform creates with the cluster Secrets, satisfied that at once: on a greenfield kind apply the check passed after 11 s with 3 Applications, and 30 more came 7 minutes later (about 200 at 20 members) unchecked.
+
+**How to preempt:** Derive what to wait for from what the system declares it will create (each Application's `status.resources`, each ApplicationSet's generator) and count every expected child per parent; a test with only the first parent's children present must keep waiting.
+
+## PL54 — Sharding that re-indexes on every membership change must evict what a replica stops owning
+
+**Why:** Argo CD 3.5.3's round-robin sharding re-sorts every cluster on each cluster Add or Delete, but a controller drops a cluster's cache only on a Mod or Delete of that cluster's own Secret. With fixed replicas and Secrets arriving one by one, replicas kept full list/watch caches of members they no longer owned: about 13 stale caches after a simulated 20-spoke apply, the busiest controller caching 6-8 members where it owns 3. Round-robin itself was round 1's fix for consistent hashing, so the fix of a fix needed its own review.
+
+**How to preempt:** When an assignment depends on the whole membership, check what each owner does with state it stops owning, in the source. Pin the assignment where the owner can only evict on its own object's change (a `shard` in each cluster Secret, index in name order + 1 mod replicas), and verify per replica from its own metrics (`argocd_cluster_info` on :8082) that it holds only what it owns.
+
+## PL55 — A value that grows with the fleet never rides the arguments or the environment
+
+**Why:** The platform record (one line per member) was exported for a sweep's steps, and the json reports passed it to jq with `--argjson` and to awk in an environment variable. Linux refuses to start any command whose arguments or environment hold a single string over 128 KiB (MAX_ARG_STRLEN), which the record passes at about 400 members: every command a sweep step started, `kubectl` included, would have failed with "Argument list too long", and the three json reports did fail at 500 members. The same record made the reports quadratic: six TSVs of 500 members took minutes (a scan per member lookup, a fork per member).
+
+**How to preempt:** Hand anything sized by the fleet to child processes in a file (the sweep's `platform-record.txt`; jq `--slurpfile` from a process substitution; awk `getline` from a file), never `export` it, and index it once (an associative array) instead of scanning it per member. Test every entrypoint with a record of 500 members (`wide_ctxs` in `tests/lib/test/test_helper.bash`): each report in every format, and a sweep step that reads the shared record.
+
+## PL56 — A message about a fleet names what differs, five at most, with a count
+
+**Why:** Warnings and notes that printed whole per-member values hid the change they were about: a 40 KB line of 500 `member=build` pairs in the tuning comparison for the one member on another build, and two 90-character lever strings in a drift warning for the one lever that changed.
+
+**How to preempt:** Print only the members or levers that differ from the reference, the first five by name and then "and N more", with both values; keep the full values in the TSV. Test each such message at 500 members.
+
+(PL55 and PL56 were added after the same cycle's round 5.)
+
+## PL57 — A change made only through a patch leaves nothing to find; put a labelled marker on first and take it off last
+
+**Why:** The platform record found a tuning profile's objects by their label, but three of the four profiles only patch the Istio CR (istiod's env), which carries no label. A tuning run killed before its revert left those settings in place with nothing a record, a sweep or the cleanup could see: every later sweep measured the profile's configuration as the charts', and `005-cleanup.sh` could undo it only from the killed run's own state directory.
+
+**How to preempt:** When a tool changes shared state in place (a patch, an annotation, a setting), first put a labelled object on every target that names the change and holds what undoes it, and remove it last, only once the undo checks out. Records and cleanups then find it with the change's other objects in one label query, from any checkout, and the tool's own entry points can refuse to start over it.
+
+## PL58 — A check that a run held nothing foreign also checks that it held all of its own
+
+**Why:** Tuning 004 read a pass as `own` when no member held another profile's objects and some member held one of its own. A profile reverted during a pass (by hand, by a cleanup from another shell, or an Argo CD sync that put istiod's env back) still read `own`, and the comparison credited the profile with figures measured without it.
+
+**How to preempt:** Check both directions from the run's own record of what it applied (`state/objects`, `state/patch.json`): nothing it should not have, and every object it should have on every member, with the settings it sets differing from the baseline's. Read the record again after the window, so a change during it shows as `mixed` or `missing`, never as the run's.
+
+## PL59 — A cleanup that cannot see a record says what it did not check
+
+**Why:** `005-cleanup.sh` restored the members from their profile markers, found no Argo CD pause record under its results directory (the killed run wrote it in another checkout), and printed "Cleanup complete": the deny window stayed on the hub and the Istio CR Applications stopped syncing, with nothing saying so.
+
+**How to preempt:** When a cleanup finds state whose record is missing, find the rest by value where it can (`006-gitops-pause.sh --clear` matches the window `--pause` builds) and otherwise say which part it did not check and the command that does; never end on an unqualified "complete".
+
+(PL57 to PL59 were added after the same cycle's round 6.)
+
+## PL60 — A check moved from the run to each of its parts needs a reader in each part's report
+
+**Why:** Tuning 003 came to read each pass's record again after its probes and write what changed to the pass's `platform-drift.txt`, but 004 took only the record's keys from it: a Kubernetes version, a tuning lever or an istiod limit that changed during a pass was written down and shown nowhere in the comparison, and the drift check's own warning spoke of "the sweep" and of the controlplane report's window-peak percentages, which a pass's comparison does not show.
+
+**How to preempt:** When a check that ran once per run starts running once per part (a pass, a combo), give every kind of finding it writes a reader in that part's report, worded for the part (`platform_drift_changes`, read per pass; the drift check's `pass` wording), and test that a change of each kind reaches the report.
+
+## PL61 — A value that was not read is not known, never another value; one that holds two values is mixed
+
+**Why:** Tuning 004 compared each member's istiod settings with the baseline's, so a member whose istiod could not be read (`unknown`) read as other settings, and a pass whose TSVs disagree on a build read as another build than the baseline's: a profile could be credited with, or blamed for, a difference nobody had seen.
+
+**How to preempt:** Before comparing, split each side into its definite values and the rest. An unread or unrecorded value (`unknown`, `unreachable`, a digest `@unknown`) makes the comparison not known, with a warning that names the members. A member with two values from two reads (a `mixed:` merge of inputs that disagree, or a value that changed during the run) reads `mixed` with its own warning and is still compared value by value: it matches the other side when one of its values is that side's, and differs when none is. A member whose pods run two builds at once (`+`-joined) is one value for the build comparison, which so keeps a rollout caught midway loud; only the istiod settings row compares each pod's digest, so one istiod pod on the baseline's settings still shows a profile that was not in effect there. Test each with one member of several and with all of them.
+
+(PL60 and PL61 were added after the same cycle's round 7.)
+
+## PL62 — A read moved into each part makes each part its own reference; compare the parts with each other
+
+**Why:** Tuning 003 came to read each pass's tuning levers and istiod limits before its probe, and the read after the probe compared the pass with its own start, while 004 checked those values only within each pass. A root Sidecar removed between the baseline and a profile pass, or an istiod CPU limit doubled, was then compared with nothing: the table read `same` and credited the profile with the change, which the earlier read once per sweep had caught.
+
+**How to preempt:** When a value read once per run comes to be read once per part, compare each part's value with the reference part's, member by member, unless the part's own record shows that it set the value on purpose (a tuning profile's `state/objects` and `state/patch.json`), and then say so in a note. Test a change between two parts that no part's record explains, and one that a part's record does.
+
+(PL62 was added after the same cycle's round 8.)
+
+## PL63 — A capped list of a fleet names the members that matter most first
+
+**Why:** Tuning 004's notes named five members in the order they first appeared, so six members whose istiod replica count changed during a pass, and then six that a side did not read, hid the one that differed from the baseline: no line of the report named it. Ranking the members that differ ahead of those whose count changed still left them in one group with those not read, and it took two rounds to find both.
+
+**How to preempt:** Rank what a capped message lists by what it tells the reader (differs, then not known, then only mixed), cap after ranking, and say how many are left out ("and 1 more member" in the singular). Test six members of each lower rank ahead of one that differs, in the unit and end to end.
+
+(PL63 was added after the same cycle's round 14.)

@@ -4,21 +4,44 @@ Profile commands need PyYAML; the others use the standard library only.
 
   load PROFILE OUTDIR             validate a profile; write patch.json, resources.yaml,
                                   description, ossm_support, ossm_support_detail
+  check-name NAME                 exit 1 unless NAME may name a profile (the rule load
+                                  applies; no PyYAML needed)
+  names CSV                       print the first five names, then how many more
   revert-patch PATCH BEFORE OUT   write the merge patch that restores BEFORE (Istio CR
                                   JSON) at every path PATCH sets; warn on paths that
                                   already hold the profile value
   check PATCH LIVE [DEPLOY]       every PATCH leaf matches LIVE; pilot.env entries are
                                   also on the istiod Deployment's discovery container
   check-revert REVERT LIVE        LIVE matches REVERT at every leaf (null = absent)
-  resources RESOURCES_YAML        print "kind name namespace" per document
+  resources RESOURCES_YAML        print "kind name namespace" per document (a JSON file: no
+                                  PyYAML needed)
+  marker NAME DESC REVERT AT OUT  write the marker ConfigMap (JSON) of profile NAME applied at
+                                  AT, holding its description (file DESC) and the merge patch
+                                  that restores one member's Istio CR (file REVERT)
+  markers LIST_JSON OUTDIR        print "namespace name profile patch-file" per labelled
+                                  ConfigMap of a list, newest first; write each marker's
+                                  revert patch to OUTDIR (patch-file "-": none to restore from)
   apps APPS_JSON APPSET SUFFIX    print "name project" for Argo CD Applications owned by
                                   APPSET (falls back to names ending in -SUFFIX)
+  window APPS_CSV OUT_WINDOW      write the deny sync window this tool adds for APPS (the
+                                  same for the same APPS: found without a pause record)
   window-add PROJECT_JSON APPS_CSV OUT_WINDOW
                                   print a merge patch that adds a deny sync window for
                                   APPS; write the window JSON to OUT_WINDOW
   window-remove PROJECT_JSON WINDOW_JSON
                                   print a merge patch that removes the window; exit 3 if
                                   it is not there
+  windows-like PROJECT_JSON WINDOW_JSON SUFFIX
+                                  print "index names" for each other window of this tool's
+                                  shape whose Applications are all named *-SUFFIX (the
+                                  ApplicationSet's): a pause for another set of them
+  windows PROJECT_JSON WINDOW_JSON SUFFIX
+                                  print each sync window with its index: WINDOW (this tool's
+                                  pause of the Applications listed above it) without them, a
+                                  stale pause (this tool's shape for other Applications all
+                                  named *-SUFFIX) with the window whole on the line under it
+                                  (a hand removal's JSON patch tests it), any other as it is;
+                                  "none" without windows
   state-add STATE CTX NS PROJECT WINDOW_JSON
                                   record a paused AppProject window in the STATE file
   state-get STATE context|namespace|projects|window:PROJECT [OUT]
@@ -27,11 +50,30 @@ Profile commands need PyYAML; the others use the standard library only.
 
 import copy
 import json
+import re
 import sys
 
+# The label, and the kinds 005-cleanup.sh can find by it: profiles may only create these, and each
+# applied profile gets a marker of MARKER_KIND (cmd_marker) named MARKER_PREFIX<profile> in
+# MARKER_NAMESPACE. Keep them in sync with tests/lib/platform.sh (PLATFORM_TUNING_LABEL,
+# PLATFORM_TUNING_RESOURCE_KINDS, PLATFORM_TUNING_MARKER_KIND and _OBJECT_KIND,
+# PLATFORM_TUNING_MARKER_NS and PLATFORM_TUNING_MARKER_PREFIX), which every suite's platform
+# record reads and 005-cleanup.sh deletes by; platform.bats checks.
 LABEL = "istio-scale-tests/tuning-profile"
-# Kinds 005-cleanup.sh can find by label; profiles may only create these.
 ALLOWED_KINDS = {"DestinationRule", "Sidecar", "Telemetry", "EnvoyFilter"}
+# The marker 001-apply-profile.sh puts on each member before it changes anything there, and
+# 002-revert-profile.sh deletes last: while it is there, every platform record names the profile
+# (even one that only sets istiod's env), and 005-cleanup.sh can restore that member's Istio CR
+# from it without the state dir of the run that applied it.
+MARKER_KIND = "ConfigMap"
+MARKER_NAMESPACE = "istio-system"
+MARKER_PREFIX = "tuning-profile-"
+# A profile's name labels its objects and names its marker: a DNS label, none of the words a
+# platform record's TUNING_OBJECTS_BY_CONTEXT value uses for itself (tests/lib/platform.sh), and
+# not the name of tuning 003's pass without a profile.
+NAME_RE = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+RECORD_WORDS = ("none", "unknown", "mixed", "unlabelled")
+RESERVED_NAMES = RECORD_WORDS + ("baseline",)
 MISSING = object()
 
 
@@ -73,6 +115,30 @@ def fmt(path):
     return "." + ".".join(path)
 
 
+def check_name(name, where):
+    if not re.match(NAME_RE, name) or len(MARKER_PREFIX + name) > 63:
+        die(f"{where}: a profile's name ('{name}') must be lowercase letters, digits and '-', at most "
+            f"{63 - len(MARKER_PREFIX)} characters: it labels the profile's objects and names its marker ConfigMap")
+    if name in RESERVED_NAMES:
+        die(f"{where}: a profile's name ('{name}') must not be one of {', '.join(RESERVED_NAMES)}: the platform "
+            f"record uses {', '.join(RECORD_WORDS)} for itself, and baseline names a tuning sweep's pass without a "
+            "profile")
+
+
+def cmd_check_name(name):
+    check_name(name, f"profiles/{name}.yaml")
+
+
+def names(items):
+    """The first five, comma-separated, then how many more (one line at any fleet size)."""
+    out = ", ".join(items[:5])
+    return out + (f" and {len(items) - 5} more" if len(items) > 5 else "")
+
+
+def cmd_names(csv):
+    print(names([a for a in csv.split(",") if a]))
+
+
 def cmd_load(profile, outdir):
     try:
         import yaml
@@ -85,6 +151,7 @@ def cmd_load(profile, outdir):
     name = profile.rsplit("/", 1)[-1]
     if name.endswith(".yaml"):
         name = name[: -len(".yaml")]
+    check_name(name, profile)
     desc = " ".join(str(doc.get("description") or "").split())
     support = str(doc.get("ossm_support") or "")
     if support not in ("supported", "configurable"):
@@ -126,6 +193,51 @@ def cmd_load(profile, outdir):
     for key, val in (("description", desc), ("ossm_support", support), ("ossm_support_detail", detail)):
         with open(f"{outdir}/{key}", "w", encoding="utf-8") as f:
             f.write(val + "\n")
+
+
+def cmd_marker(name, desc_file, revert_file, applied_at, out_file):
+    with open(desc_file, encoding="utf-8") as f:
+        desc = " ".join(f.read().split())
+    with open(revert_file, encoding="utf-8") as f:
+        revert = json.load(f)
+    write_json(out_file, {
+        "apiVersion": "v1",
+        "kind": MARKER_KIND,
+        "metadata": {"name": MARKER_PREFIX + name, "namespace": MARKER_NAMESPACE, "labels": {LABEL: name}},
+        "data": {
+            "profile": name,
+            "description": desc,
+            "applied-at": applied_at,
+            "istio-revert.json": json.dumps(revert, sort_keys=True),
+        },
+    })
+
+
+def cmd_markers(list_file, outdir):
+    """The labelled ConfigMaps of a list (kubectl get configmaps -A -l LABEL -o json), newest
+    first (applied-at: a later profile's revert patch restores what an earlier one had set, so it
+    goes first), one line each: "namespace name profile file", the file holding the marker's
+    revert patch. A ConfigMap that is no marker, or a marker whose patch does not parse, gets
+    the file "-": the caller cannot restore that member's Istio CR from it."""
+    items = read_json(list_file).get("items") or []
+    rows = []
+    for i, cm in enumerate(items):
+        md = cm.get("metadata") or {}
+        data = cm.get("data") or {}
+        name = md.get("name") or "-"
+        prof = (md.get("labels") or {}).get(LABEL) or data.get("profile") or "unknown"
+        path = "-"
+        if name.startswith(MARKER_PREFIX):
+            try:
+                patch = json.loads(data.get("istio-revert.json") or "")
+            except ValueError:
+                patch = None
+            if isinstance(patch, dict):
+                path = f"{outdir}/{i}.json"
+                write_json(path, patch)
+        rows.append((data.get("applied-at") or "", md.get("namespace") or "-", name, prof, path))
+    for _, ns, name, prof, path in sorted(rows, reverse=True):
+        print(f"{ns} {name} {prof} {path}")
 
 
 def cmd_revert_patch(patch_file, before_file, out_file):
@@ -202,13 +314,19 @@ def cmd_check_revert(revert_file, live_file):
 
 
 def cmd_resources(res_file):
-    import yaml
-
     with open(res_file, encoding="utf-8") as f:
-        for r in yaml.safe_load_all(f):
-            if r:
-                md = r["metadata"]
-                print(r["kind"], md["name"], md["namespace"])
+        text = f.read()
+    try:
+        # A marker (one JSON document) needs no PyYAML.
+        docs = [json.loads(text)]
+    except ValueError:
+        import yaml
+
+        docs = yaml.safe_load_all(text)
+    for r in docs:
+        if r:
+            md = r["metadata"]
+            print(r["kind"], md["name"], md["namespace"])
 
 
 def cmd_apps(apps_file, appset, suffix):
@@ -240,6 +358,10 @@ def matches(entry, window):
     return all(entry.get(k) == v for k, v in window.items())
 
 
+def cmd_window(apps_csv, out_window):
+    write_json(out_window, window_for([a for a in apps_csv.split(",") if a]))
+
+
 def cmd_window_add(project_file, apps_csv, out_window):
     proj = read_json(project_file)
     window = window_for([a for a in apps_csv.split(",") if a])
@@ -263,6 +385,42 @@ def cmd_window_remove(project_file, window_file):
         "metadata": {"resourceVersion": proj["metadata"]["resourceVersion"]},
         "spec": {"syncWindows": kept or None},
     }))
+
+
+def shaped(w, suffix):
+    """A window of this tool's shape (window_for) for Applications all named *-SUFFIX, as the
+    ApplicationSet names them. One of that shape for any other Application is another team's."""
+    apps = w.get("applications") or []
+    shape = {k: v for k, v in window_for([]).items() if k != "applications"}
+    return matches(w, shape) and bool(apps) and all(a.endswith("-" + suffix) for a in apps)
+
+
+def cmd_windows_like(project_file, window_file, suffix):
+    """Each such window (shaped) for other Applications than WINDOW's, with its index: a pause
+    from before a member was added or removed, which --clear does not remove."""
+    proj, window = read_json(project_file), read_json(window_file)
+    for i, w in enumerate(proj.get("spec", {}).get("syncWindows") or []):
+        if shaped(w, suffix) and not matches(w, window):
+            print(i, names(sorted(w["applications"])))
+
+
+def cmd_windows(project_file, window_file, suffix):
+    window = read_json(window_file)
+    windows = read_json(project_file).get("spec", {}).get("syncWindows") or []
+    if not windows:
+        print("  none")
+    for i, w in enumerate(windows):
+        if matches(w, window):
+            print(f"  {i}: this tool's pause of the Applications above (--resume removes it with its pause"
+                  " record, --clear without one)")
+        elif shaped(w, suffix):
+            print(f"  {i}: a stale pause of this tool's, for other *-{suffix} Applications"
+                  f" ({names(sorted(w['applications']))}: from before a member was added or removed),"
+                  " which --clear does not remove; remove it by hand (tests/tuning/README.md,"
+                  ' "After a killed run"), its JSON patch testing this window:')
+            print(f"     {json.dumps(w, sort_keys=True)}")
+        else:
+            print(f"  {i}: {json.dumps(w, sort_keys=True)}")
 
 
 def cmd_state_add(state_file, ctx, ns, project, window_file):
@@ -291,15 +449,22 @@ def cmd_state_get(state_file, key, out=None):
 
 COMMANDS = {
     "load": (cmd_load, 2, 2),
+    "check-name": (cmd_check_name, 1, 1),
+    "names": (cmd_names, 1, 1),
     "revert-patch": (cmd_revert_patch, 3, 3),
     "check": (cmd_check, 2, 3),
     "check-revert": (cmd_check_revert, 2, 2),
     "resources": (cmd_resources, 1, 1),
+    "marker": (cmd_marker, 5, 5),
+    "markers": (cmd_markers, 2, 2),
     "apps": (cmd_apps, 3, 3),
+    "window": (cmd_window, 2, 2),
     "window-add": (cmd_window_add, 3, 3),
     "window-remove": (cmd_window_remove, 2, 2),
     "state-add": (cmd_state_add, 5, 5),
     "state-get": (cmd_state_get, 2, 3),
+    "windows-like": (cmd_windows_like, 3, 3),
+    "windows": (cmd_windows, 3, 3),
 }
 
 if __name__ == "__main__":

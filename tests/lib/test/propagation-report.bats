@@ -24,6 +24,7 @@ prow() {
 fixture() {
 	{
 		echo "# RUN_ID=r1"
+		[[ -n "${NO_PLATFORM:-}" ]] || platform_fixture_lines src,rmt
 		echo "$HDR"
 		for m in 2 3; do
 			prow "$m" 1 1000 100
@@ -77,12 +78,112 @@ fixture() {
 
 @test "005: a phase with no valid sample is null in json, with the same keys" {
 	{
+		platform_fixture_lines src,rmt
 		echo "$HDR"
 		printf 'r1\t2\t1\tsrc\trmt\t0\tTIMEOUT\tN/A\tN/A\tTIMEOUT_ALL\tN/A\tN/A\t0/40\t40\t0\t0\t0\t5000\t10\n'
 	} > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -c '.rows[0] | [.mesh_size, .n_total, .n_valid, .avg_ms, .worst_bucket]' <<<"$output")" = '[2,1,0,null,null]' ]
+}
+
+@test "005: the platform record reaches every format; an input from before it reads unknown, with a warning (PL19)" {
+	fixture
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_line "  PLATFORM: kubernetes"
+	assert_line "  NODE_PROVIDER_BY_CONTEXT: src=kind,rmt=kind"
+	[[ "$stderr" != *"no PLATFORM line"* ]]
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
+	assert_line 'MESH_OPERATOR_BY_CONTEXT: "src=sail-operator:1.31.1/Available,rmt=sail-operator:1.31.1/Available"'
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.5,rmt=pilot:1.30.5"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.TEST_PLATFORM) \(.PROXY_IMAGE_BY_CONTEXT)"' <<<"$output")" = "kubernetes auto src=proxyv2:1.30.5,rmt=proxyv2:1.30.5" ]
+	rm "${RES}"/*.tsv
+	NO_PLATFORM=1 fixture
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.MESH_OPERATOR_BY_CONTEXT)"' <<<"$output")" = "unknown unknown" ]
+	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+}
+
+@test "005 (S-B2): a record of 500 members goes through every format; json lists them all" {
+	{
+		echo "# RUN_ID=r1"
+		platform_fixture_lines "$(wide_ctxs 500 src rmt)"
+		echo "$HDR"
+		prow 2 1 1000 100
+	} > "${RES}/endpoint-r1.tsv"
+	wide_record_report "$REPORT" "$RES" text csv json markdown charts
+}
+
+# --- 005: the platform record's warnings in the report's body (H10, H2) ---
+
+# second_sweep <sed>: endpoint-r2.tsv, a mesh=4 row, with the record edited by <sed>.
+second_sweep() {
+	{
+		echo "# RUN_ID=r2"
+		platform_fixture_lines src,rmt | sed "$1"
+		echo "$HDR"
+		prow 4 1 1000 100
+	} > "${RES}/endpoint-r2.tsv"
+}
+
+@test "005 (H10, H2): inputs that disagree and a build that changed during the sweep warn in every format's body" {
+	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+	RES="${BATS_TEST_TMPDIR}/sweep-h10"
+	mkdir -p "$RES"
+	fixture
+	second_sweep 's/rmt=sail-operator:1.31.1/rmt=sail-operator:1.31.2/'
+	# The sweep's drift check (platform_drift_check) found istiod on src on another build.
+	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.6' > "${RES}/platform-drift.txt"
+	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for rmt (sail-operator:1.31.1/Available;sail-operator:1.31.2/Available): the report mixes runs on different mesh operator builds; compare like with like"
+	local drift="ISTIOD_IMAGE_BY_CONTEXT changed during the sweep (platform-drift.txt in sweep-h10): src from pilot:1.30.5 to pilot:1.30.6; the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade; for publishable figures, run the sweep again on one build"
+	local fmt w top first
+	run --separate-stderr "$REPORT" --results-dir "$RES"
+	assert_success
+	assert_line "WARNING: ${dis}"
+	assert_line "WARNING: ${drift}"
+	assert_line "  ISTIOD_IMAGE_BY_CONTEXT: src=mixed:pilot:1.30.5;pilot:1.30.6,rmt=pilot:1.30.5"
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
+	assert_line "# WARNING: ${dis}"
+	assert_line "# WARNING: ${drift}"
+	for fmt in markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		for w in "$dis" "$drift"; do assert_line "> **Warning:** ${w}"; done
+		# Under the title, before the file list, the first section and the first chart.
+		top="$(grep -n '^> \*\*Warning:\*\*' <<<"$output" | tail -1 | cut -d: -f1)"
+		first="$(awk 'seen && /^(\| |## |```mermaid|> [^*]|\*\*Source files)/ { print NR; exit } /^# / { seen = 1 }' <<<"$output")"
+		((top < first)) || { echo "${fmt}: last warning at ${top}, first table, section or note at ${first}"; false; }
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -c '.warnings' <<<"$output")" = "$(jq -nc --arg a "$dis" --arg b "$drift" '[$a, $b]')" ]
+	[ "$(grep -c '^warning: ' <<<"$stderr")" -eq 2 ]
+}
+
+@test "005 (H10): inputs that agree, an operator state aside, warn in no format" {
+	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+	RES="${BATS_TEST_TMPDIR}/sweep-h10"
+	mkdir -p "$RES"
+	fixture
+	second_sweep 's#/Available#/Unavailable#g'
+	local fmt
+	for fmt in text csv markdown charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		assert_success
+		refute_output --partial "WARNING"
+		refute_output --partial "**Warning:**"
+		refute_output --regexp '(=|"|: )mixed:'
+		[[ "$stderr" != *warning* ]] || { echo "$stderr"; false; }
+	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_success
+	[ "$(jq -c '.warnings' <<<"$output")" = '[]' ]
+	[ "$(jq -r '.metadata.MESH_OPERATOR_BY_CONTEXT' <<<"$output")" = "src=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable,rmt=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable" ]
+	[ -z "$stderr" ]
 }
 
 @test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a sweep-level key that varies reads mixed (PL26)" {
@@ -95,6 +196,7 @@ fixture() {
 			echo "# HARNESS_SHA=h${d}"
 			echo "# ISTIO_VERSION=1.30.5"
 			echo "# ITERATIONS=$(if [[ $d == a ]]; then echo 3; else echo 5; fi)"
+			platform_fixture_lines src,rmt
 			echo "$HDR"
 			prow 2 1 1000 100
 		} > "${RES}/sweep-${d}/endpoint-r${d}.tsv"
@@ -205,7 +307,7 @@ p1rows() {
 }
 
 @test "005: 10 iterations x 3 remotes: P1's n is 10/10 in every format, so its p99 stays under the percentile floor" {
-	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
+	{ echo "# RUN_ID=r1"; platform_fixture_lines src,b,c,d; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	# P1 is one sample per iteration, so its n_total counts iterations too.
@@ -231,7 +333,7 @@ p1rows() {
 @test "005: 3 of 10 iterations overflowed: P1 reads 10 total, 7 valid, as 002's summary counts them" {
 	source "${ROOT}/tests/lib/propagation.sh"
 	# Every remote row of iterations 2, 5 and 9 carries p1_overflow=1 (P1 is source-side).
-	{ echo "# RUN_ID=r1"; echo "$HDR"; p1rows r1 4 10 b c d \
+	{ echo "# RUN_ID=r1"; platform_fixture_lines src,b,c,d; echo "$HDR"; p1rows r1 4 10 b c d \
 		| awk -F'\t' 'BEGIN { OFS = "\t" } $3 == 2 || $3 == 5 || $3 == 9 { $15 = 1 } 1'; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success

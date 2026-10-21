@@ -23,6 +23,7 @@ spec:
       {{- with include "gitops-hub-apps.valuesObject" (dict "root" $ "name" "hub-mesh-ca-intermediate-appset") }}{{ . | nindent 6 }}{{- end }}
       valueFiles:
         - values-mesh-ca-intermediate.yaml
+        - platform-{{ include "gitops-hub-apps.platform" . }}.yaml
       parameters:
         - name: repo.url
           value: {{ include "gitops-hub-apps.repoURL" . }}
@@ -32,7 +33,7 @@ spec:
           value: acm-openshift-gitops-placement
   destination:
     server: https://kubernetes.default.svc
-    namespace: openshift-gitops
+    namespace: {{ .Values.gitopsNamespace | quote }}
   syncPolicy:
     {{- include "gitops-hub-apps.syncPolicy" . | nindent 4 }}
 {{- end }}

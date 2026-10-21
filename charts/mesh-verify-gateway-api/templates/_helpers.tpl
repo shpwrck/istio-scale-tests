@@ -29,7 +29,7 @@ label, so a check with no workload member is never deployed. helm lint (no clust
 {{- end -}}
 {{- if .Values.clusterName -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .Values.workloadCluster)) -}}
-{{- fail (printf "workloadCluster %q is not an ACM ManagedCluster name: set template.source.helm.valuesObject.workloadCluster in charts/mesh-verify-gateway-api-appset.yaml to the member that runs the echo workload" (toString .Values.workloadCluster)) -}}
+{{- fail (printf "workloadCluster %q is not a member's cluster name (its Argo CD cluster name; on OpenShift its ACM ManagedCluster name): set template.source.helm.valuesObject.workloadCluster in charts/mesh-verify-gateway-api-appset.yaml to the member that runs the echo workload" (toString .Values.workloadCluster)) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

@@ -2,10 +2,10 @@
 # (the ESO operand reconciles this namespace).
 namespace: external-secrets-operator
 
-# Namespace holding the Terraform-created Argo CD cluster Secrets.
-sourceSecretsNamespace: openshift-gitops
+# Namespace holding the Terraform-created Argo CD cluster Secrets (the Argo CD namespace).
+sourceSecretsNamespace: argocd
 
-# ManagedCluster name (set per cluster by the ApplicationSet).
+# The member's Argo CD cluster name (set per cluster by the ApplicationSet).
 clusterName: ""
 
 nameOverride: ""
@@ -40,8 +40,8 @@ serviceAccountName: ""
 rbac:
   enabled: true
   argocd:
-    namespace: openshift-gitops
-    serviceAccountName: openshift-gitops-argocd-application-controller
+    namespace: argocd
+    serviceAccountName: argocd-application-controller
   labels: {}
   annotations: {}
 

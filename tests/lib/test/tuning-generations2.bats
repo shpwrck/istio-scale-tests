@@ -29,7 +29,9 @@ _need_yaml() {
 # that call's member (its generation + 1); with TUN_FAILCTX=<ctx>, that member's next two
 # Istio CR reads then fail (a read and its retry). TUN_VERIFY_FAIL: 001's istiod Deployment
 # read fails (its verification fails). TUN_ROLLOUT_FAIL_ONCE: the first rollout wait fails.
-# Any other call fails (the probes then fail: PROBE_FAILED).
+# A marker's apply, read and delete succeed, and the members hold no tuning profile objects (label
+# istio-scale-tests/tuning-profile: an empty list). Any other call fails (the probes then
+# fail: PROBE_FAILED).
 _member_stub() {
 	export TD="${BATS_TEST_TMPDIR}/tun"
 	mkdir -p "$TD"
@@ -71,6 +73,8 @@ case "$*" in
 *" -n istio-system get deployment istiod -o json"*)
 	[ -z "${TUN_VERIFY_FAIL:-}" ] || exit 1
 	jq -c '{spec: {template: {spec: {containers: [{name: "discovery", env: ((.spec.values.pilot.env // {}) | to_entries | map({name: .key, value: (.value | tostring)}))}]}}}}' "$d/cr.$c.json" ;;
+*" apply --server-side "*|*" delete --ignore-not-found -f "*|*" get --ignore-not-found -f "*|*" -n istio-system get ConfigMap tuning-profile-"*) exit 0 ;;
+*" -l istio-scale-tests/tuning-profile"*) echo '{"kind":"List","items":[]}' ;;
 *) exit 1 ;;
 esac
 STUB
@@ -109,8 +113,8 @@ member_sweep() {
 	_need_yaml
 	_member_stub
 	local p=01-push-throttling
-	# The sweep reads its baseline state (the Sidecar first) after its first read.
-	TUN_CRBUMP_ON="get sidecar.networking.istio.io default" member_sweep --no-baseline
+	# The sweep reads its members' Istio CR spec (for its end check) after its first read.
+	TUN_CRBUMP_ON="get istio.sailoperator.io default -o json" member_sweep --no-baseline
 	[ "$status" -eq 4 ]
 	[ "$(grep -c '^PROBLEM=' "$OUT")" -eq 1 ] || { cat "$OUT"; false; }
 	grep -qxF "PROBLEM=the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass ${p}: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); pass ${p} may measure another configuration than its profile's" "$OUT" \

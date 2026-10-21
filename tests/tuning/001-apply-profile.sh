@@ -5,7 +5,10 @@
 # generations once the apply settled (istio-generations-applied), which 002 compares
 # before its revert. A new apply clears what an earlier apply and its revert left in the
 # state dir (revert-started, istio-edited-during-pass, istio-generations-unchecked,
-# istio-generations-applied).
+# istio-generations-applied). First it puts a marker ConfigMap on each member
+# (tuning.py marker) that names the profile and holds that member's Istio CR revert patch:
+# every platform record shows it, and 005-cleanup.sh can undo the profile from it alone.
+# Refuses while any member holds a profile's objects already (a profile left applied).
 #
 # Does not pause Argo CD; use 006-gitops-pause.sh (or 003-run-tuning-sweep.sh).
 #
@@ -23,13 +26,15 @@ source "${ROOT}/tests/lib/common.sh"
 source "${ROOT}/tests/lib/preamble.sh" # istio_generations_read
 # shellcheck disable=SC1091
 source "${ROOT}/tests/tuning/lib/tuning.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate, platform_tuning_objects_refuse
 
 TUNING_DIR="${ROOT}/tests/tuning"
 HELPER="${TUNING_DIR}/lib/tuning.py"
 PROFILE=""
 CONTEXTS_CSV=""
 STATE_DIR=""
-ROLLOUT_TIMEOUT=300
+ROLLOUT_TIMEOUT="${TUNING_ROLLOUT_TIMEOUT:-300}"
 SKIP_VERIFY=0
 DRY_RUN=0
 
@@ -42,7 +47,10 @@ Apply a tuning profile: patch the Istio CR and apply the profile's resources. Sa
 the apply settled (istio-generations-applied; a member it could not read is a warning).
 A new apply clears what an earlier apply and its revert left in the state dir
 (revert-started, istio-edited-during-pass, istio-generations-unchecked,
-istio-generations-applied).
+istio-generations-applied). First it puts a marker ConfigMap on each member that names the
+profile and holds the patch that restores that member's Istio CR (002-revert-profile.sh
+deletes it last). It refuses to start while a member holds a profile's objects or marker
+already: a profile left applied, which ./tests/tuning/005-cleanup.sh undoes.
 
 Options:
   --profile NAME|PATH    Profile name (e.g. 01-push-throttling) or YAML path (required).
@@ -50,10 +58,13 @@ Options:
   --state-dir DIR        Where to save revert state
                          (default: tests/tuning/results/state-<profile>).
   --rollout-timeout N    Seconds to wait for the operator and istiod rollout
-                         (default: ${ROLLOUT_TIMEOUT}).
+                         (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
   --skip-verify          Skip the post-apply checks.
   --dry-run              Print the patch and resources; do not touch clusters.
   -h, --help             Show this help.
+
+Environment:
+$(platform_help_lines reads)
 
 Exit status: 0 applied and verified, 1 error, 2 applied but verification failed.
 Requires python3 with PyYAML.
@@ -80,7 +91,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PROFILE" ]] || die "--profile is required"
-is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
+platform_validate
 if [[ ! -f "$PROFILE" ]]; then
 	for cand in "${TUNING_DIR}/profiles/${PROFILE}" "${TUNING_DIR}/profiles/${PROFILE}.yaml"; do
 		[[ -f "$cand" ]] && { PROFILE="$cand"; break; }
@@ -93,6 +105,7 @@ CONTEXTS_CSV="${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}"
 CONTEXTS=()
 split_contexts "$CONTEXTS_CSV" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
+ctx_keys_distinct "${CONTEXTS[@]}"
 STATE_DIR="${STATE_DIR:-${TUNING_DIR}/results/state-${PROFILE_NAME}}"
 
 python3 -I -c 'import yaml' 2>/dev/null \
@@ -118,10 +131,18 @@ echo "    State dir:    ${STATE_DIR}"
 
 if ((DRY_RUN)); then
 	echo ""
+	echo "--- Before any change ---"
+	echo "check that no member holds a tuning profile's objects or marker (label ${PLATFORM_TUNING_LABEL}); stop if one does"
 	echo "--- Istio CR merge patch ---"
 	if ((HAS_PATCH)); then cat "$WORK/patch.json"; else echo "(none)"; fi
 	echo "--- Resources (server-side apply) ---"
 	if ((HAS_RESOURCES)); then cat "$WORK/resources.yaml"; else echo "(none)"; fi
+	echo "--- Marker (server-side apply on each member, before any change) ---"
+	echo '{}' >"$WORK/revert-none.json"
+	python3 -I "$HELPER" marker "$PROFILE_NAME" "$WORK/description" "$WORK/revert-none.json" dry-run "$WORK/marker.json"
+	read -r m_kind m_name m_ns < <(python3 -I "$HELPER" resources "$WORK/marker.json")
+	echo "${m_kind} ${m_ns}/${m_name}, labelled ${PLATFORM_TUNING_LABEL}=${PROFILE_NAME}:"
+	echo "  it holds the merge patch that restores that member's Istio CR"
 	echo "--- Dry run: no cluster changes; would save revert state to ${STATE_DIR}/ ---"
 	exit 0
 fi
@@ -144,13 +165,18 @@ if [[ -d "${TUNING_DIR}/results" ]]; then
 	[[ -z "$leftover" ]] \
 		|| die "profile $(<"$leftover") is still applied (${leftover%/active-profile}); run ./tests/tuning/005-cleanup.sh first"
 fi
+# And on the members: a profile's objects or marker from a run this checkout has no state of.
+platform_tuning_objects_refuse "$CONTEXTS_CSV" "this profile"
 mkdir -p "$STATE_DIR"
+APPLIED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 for ctx in "${CONTEXTS[@]}"; do
 	key="$(ctx_key "$ctx")"
 	"${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json >"${STATE_DIR}/istio-before-${key}.json" \
 		|| die "${ctx}: cannot read Istio CR 'default'"
 	python3 -I "$HELPER" revert-patch "$WORK/patch.json" "${STATE_DIR}/istio-before-${key}.json" \
 		"${STATE_DIR}/istio-revert-${key}.json"
+	python3 -I "$HELPER" marker "$PROFILE_NAME" "$WORK/description" "${STATE_DIR}/istio-revert-${key}.json" \
+		"$APPLIED_AT" "${STATE_DIR}/marker-${key}.json"
 	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
 		read -r kind name ns <<<"$line"
 		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
@@ -169,6 +195,24 @@ cp "$WORK/resources.yaml" "${STATE_DIR}/applied-resources.yaml"
 (IFS=,; echo "${CONTEXTS[*]}") >"${STATE_DIR}/contexts"
 echo "$PROFILE_NAME" >"${STATE_DIR}/active-profile"
 
+# The marker on every member before any change (002-revert-profile.sh deletes it last).
+read -r MARKER_KIND MARKER_NAME MARKER_NS < <(python3 -I "$HELPER" resources "${STATE_DIR}/marker-$(ctx_key "${CONTEXTS[0]}").json")
+# The objects the profile puts on every member, as the platform record names them: tuning 004
+# checks that each pass's record holds them all.
+{
+	echo "${MARKER_KIND}/${MARKER_NS}/${MARKER_NAME}"
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
+		read -r kind name ns <<<"$line"
+		echo "${kind}/${ns}/${name}"
+	done
+} >"${STATE_DIR}/objects"
+for ctx in "${CONTEXTS[@]}"; do
+	echo "--- ${ctx}: marking ${PROFILE_NAME} applied (${MARKER_KIND} ${MARKER_NS}/${MARKER_NAME}) ---"
+	"${KUBECTL[@]}" --context="$ctx" apply --server-side --field-manager=tuning-profile \
+		-f "${STATE_DIR}/marker-$(ctx_key "$ctx").json" \
+		|| die "${ctx}: could not create the profile's marker; nothing is patched yet. Remove the markers already created with ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR}"
+done
+
 for ctx in "${CONTEXTS[@]}"; do
 	if ((HAS_PATCH)); then
 		echo "--- ${ctx}: patching Istio CR ---"
@@ -184,8 +228,9 @@ done
 
 if ((HAS_PATCH)); then
 	echo "--- Waiting for the operator and istiod rollout ---"
+	deadline=$(($(date +%s) + ROLLOUT_TIMEOUT))
 	for ctx in "${CONTEXTS[@]}"; do
-		wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" || die "${ctx}: istiod did not roll out; revert with 002-revert-profile.sh --state-dir ${STATE_DIR}"
+		wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" "$deadline" || die "${ctx}: istiod did not roll out; revert with 002-revert-profile.sh --state-dir ${STATE_DIR}"
 	done
 fi
 
@@ -219,7 +264,7 @@ for ctx in "${CONTEXTS[@]}"; do
 		"${KUBECTL[@]}" --context="$ctx" -n istio-system get deployment "$deploy" -o json >"$WORK/deploy.json"
 		python3 -I "$HELPER" check "$WORK/patch.json" "$WORK/live.json" "$WORK/deploy.json" || fail=1
 	fi
-	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
+	for line in ${RES_LINES[@]+"${RES_LINES[@]}"} "${MARKER_KIND} ${MARKER_NAME} ${MARKER_NS}"; do
 		read -r kind name ns <<<"$line"
 		if "${KUBECTL[@]}" --context="$ctx" -n "$ns" get "$kind" "$name" -o name >/dev/null 2>&1; then
 			echo "  PASS  ${kind}/${name} exists in ${ns}"

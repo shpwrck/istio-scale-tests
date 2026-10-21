@@ -1,20 +1,26 @@
 # Standalone Argo CD Application (not part of the app-of-apps): deploys the Gateway API
 # multicluster ingress check (charts/mesh-verify-gateway-api) on every mesh member, with the echo
 # workload on ONE member. What it answers and how to run it: tests/gateway-api/README.md.
-# Three placeholders stay in git and are filled in on the way to the hub (Apply):
+# Five placeholders stay in git and are filled in on the way to the hub (Apply):
 #   - <repo-url> and <revision>: the repo and revision the hub's root Application syncs (set
 #     by terraform/platform), so the check deploys the same charts as the mesh. Applied as the
 #     placeholders, this Application shows a ComparisonError and deploys nothing;
-#   - <workload-cluster>: the ACM ManagedCluster name of the member that runs the workload
-#     (oc --context <acm-hub-ctx> get managedclusters). Applied as the placeholder, every
-#     member's Application fails to render with a message.
-# Apply:  read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+#   - <platform> and <gitops-namespace>: kubernetes and argocd, or openshift and
+#     openshift-gitops (terraform/platform output platform and gitops_namespace). With
+#     <gitops-namespace> left, kubectl fails at once (namespaces "<gitops-namespace>" not found);
+#   - <workload-cluster>: the Argo CD cluster name of the member that runs the workload (its
+#     kubeconfig context, which terraform/platform registers; on openshift the ACM
+#     ManagedCluster name). Applied as the placeholder, every member's Application fails to
+#     render with a message.
+# Apply:  NS=argocd PLATFORM=kubernetes   # openshift: NS=openshift-gitops PLATFORM=openshift
+#         read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" \
 #           get applications.argoproj.io hub-gitops-root \
 #           -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
 #         sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
-#           -e 's|<workload-cluster>|<managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
-#           | oc --context <acm-hub-ctx> apply -f -
-# Remove: oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
+#           -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" \
+#           -e 's|<workload-cluster>|<member-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
+#           | kubectl --context <hub-ctx> apply -f -
+# Remove: the same sed, piped to kubectl --context <hub-ctx> delete -f -
 #         (the finalizers remove the ApplicationSet, the per-member Applications and all they
 #         deployed, including the Gateway API Gateway in istio-system, the backend namespace
 #         mesh-verify-gwapi-shared and the workload member's mesh-verify-gwapi-remote)
@@ -22,7 +28,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: mesh-verify-gateway-api-appset
-  namespace: openshift-gitops
+  namespace: <gitops-namespace>
   finalizers:
     - resources-finalizer.argocd.argoproj.io
   labels:
@@ -38,6 +44,7 @@ spec:
       releaseName: gitops-mesh-verify-gateway-api-appset
       valueFiles:
         - values-mesh-verify-gateway-api.yaml
+        - platform-<platform>.yaml
       parameters:
         - name: repo.url
           value: <repo-url>
@@ -49,7 +56,7 @@ spec:
           value: <workload-cluster>
   destination:
     server: https://kubernetes.default.svc
-    namespace: openshift-gitops
+    namespace: <gitops-namespace>
   syncPolicy:
     automated:
       prune: false

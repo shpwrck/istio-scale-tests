@@ -16,6 +16,7 @@ spec:
     path: charts/gitops-hub-apps
     helm:
       valuesObject:
+        platform: {{ .Values.platform | quote }}
         gitopsNamespace: {{ .Values.gitopsNamespace | quote }}
         repo:
           url: {{ .Values.repo.url | quote }}

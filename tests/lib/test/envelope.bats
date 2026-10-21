@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0  # run --separate-stderr
 load test_helper
 source "${ROOT}/tests/lib/capacity.sh"
 source "${ROOT}/tests/lib/envelope.sh"
@@ -184,6 +185,177 @@ _net_kubectl() {
 	[[ "$output" == *"[75,90)"* ]]
 }
 
+# H4: kind nodes report the shared host, so the verdict leaves their figures out.
+@test "env_sla_verdict --nodes-excluded: CAUTION with the reason even when every figure is low" {
+	run env_sla_verdict --nodes-excluded "the nodes are kind's" 10 20 30 40 0 12 12
+	assert_success
+	assert_output "CAUTION|node figures left out: the nodes are kind's; the figures: peak utilization 20% < 75% across istiod, no restarts, all 12 samples valid"
+	# Node figures that would fail, or are unknown, do not count; istiod's still do.
+	run env_sla_verdict --nodes-excluded kind 10 20 95 99 0 12 12
+	assert_output "CAUTION|node figures left out: kind; the figures: peak utilization 20% < 75% across istiod, no restarts, all 12 samples valid"
+	run env_sla_verdict --nodes-excluded kind 10 20 unknown unknown 0 12 12
+	[[ "$output" == "CAUTION|node figures left out: kind; the figures: peak utilization 20%"* ]]
+	run env_sla_verdict --nodes-excluded kind 95 20 30 40 0 12 12
+	assert_output "FAIL|peak utilization 95% >= 90% — at/over a resource limit; also node figures left out: kind"
+	run env_sla_verdict --nodes-excluded kind 10 20 30 40 2 12 10
+	[[ "$output" == FAIL\|*"restart"*"; also node figures left out: kind" ]]
+	# The bands still come from args 8/9 after the option.
+	run env_sla_verdict --nodes-excluded kind 60 20 30 40 0 12 12 40 55
+	[[ "$output" == FAIL\|* ]]
+}
+
+@test "env_sla_verdict without --nodes-excluded: node figures count as before" {
+	run env_sla_verdict 10 20 30 40 0 12 12
+	assert_output "PASS|peak utilization 40% < 75% across istiod + nodes, no restarts, all 12 samples valid"
+	run env_sla_verdict 10 20 95 40 0 12 12
+	[[ "$output" == FAIL\|* ]]
+	run env_sla_verdict 10 20 30 unknown 0 12 12
+	[[ "$output" == CAUTION\|*"metrics API gap"* ]]
+}
+
+# fake_cp_report <file> <warnings JSON array>: a controlplane report stand-in whose JSON carries
+# the platform record of two kind members (one on another istiod build) and those warnings.
+fake_cp_report() {
+	local da db dc
+	da="sha256:$(printf 'a%.0s' {1..64})" db="sha256:$(printf 'b%.0s' {1..64})" dc="sha256:$(printf 'c%.0s' {1..64})"
+	cat > "$1" <<SH
+#!/usr/bin/env bash
+cat <<'JSON'
+{"metadata":{"run_id":"r","istio_version":"v1.30.5","harness_sha":"abc","platform":"kubernetes","test_platform":"auto",
+"node_provider_by_context":"mesh-a=kind,mesh-b=kind",
+"mesh_operator_by_context":"mesh-a=sail-operator:1.31.1@${da}/Available,mesh-b=sail-operator:1.31.1@${da}/Available",
+"istiod_image_by_context":"mesh-a=pilot:1.30.5@${db},mesh-b=mixed:pilot:1.30.5@${db};pilot:1.30.6@${dc}",
+"proxy_image_by_context":"mesh-a=proxyv2:1.30.5@${dc},mesh-b=proxyv2:1.30.5@${dc}",
+"istiod_env_by_context":"mesh-a=0123456789ab,mesh-b=0123456789ab",
+"tuning_objects_by_context":"mesh-a=none,mesh-b=none",
+"capacity":{"node_alloc_cpu_m":"4000","node_alloc_mem_mi":"16093"},
+"achieved_scale":{"connected_proxies_max":"10","connected_proxies_cluster_max":"10","istiod_cpu_peak_pct_of_limit_max":"20","istiod_cpu_pct_of_limit_max":"10","istiod_mem_pct_of_limit_max":"30","istiod_rss_pct_of_limit_max":"30","node_cpu_pct_max":"28","node_mem_pct_max":"35"},
+"sla":{"verdict":"CAUTION","headline":"node figures left out: the nodes are kind's"},
+"data_warnings":${2}},
+"results":[{"mesh_size":2,"service_count":10,"replicas":1,"namespace_count":1,"sidecar_scoping":"none","n_valid":1}]}
+JSON
+SH
+	chmod +x "$1"
+}
+
+@test "render_scale_envelope (H4): every data warning above the tables and the verdict; a Platform / mesh build row without member names" {
+	source "${ROOT}/tests/lib/platform.sh"
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh" w1 w2 t1 v
+	mkdir -p "$d"
+	fake_cp_report "$rep" '["Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host'"'"'s CPU and memory","input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members: the report mixes runs on different istiod builds; compare like with like"]'
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
+	assert_success
+	assert_output --partial "> **Data warning:** Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory"
+	assert_output --partial "> **Data warning:** input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members"
+	w1="$(grep -n '^> \*\*Data warning:\*\* Nodes on kind' <<<"$output" | cut -d: -f1)"
+	w2="$(grep -n '^> \*\*Data warning:\*\* input TSVs disagree' <<<"$output" | cut -d: -f1)"
+	t1="$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)"
+	v="$(grep -n '^> \*\*CAUTION\*\*' <<<"$output" | cut -d: -f1)"
+	((w1 < w2 && w2 < t1 && t1 < v)) || { echo "warnings at ${w1} and ${w2}, topology at ${t1}, verdict at ${v}"; false; }
+	# H17: ", " between the groups, " and " between a mixed member's builds, "; " between fields.
+	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa/Available; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member), mixed: pilot:1.30.5@sha256:bbbbbbbbbbbb and pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc; istiod env 0123456789ab; tuning objects none |"
+	# The envelope is pasted into campaign docs: no member names, no full digests.
+	refute_output --partial "mesh-a="
+	refute_output --partial "mesh-b="
+	refute_output --partial "$(printf 'b%.0s' {1..64})"
+	# No warnings: none printed.
+	fake_cp_report "$rep" '[]'
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
+	assert_success
+	refute_output --partial "**Data warning:**"
+}
+
+@test "env_limit_drift_warning (H6): a warning only when a limit read now differs from the recorded one" {
+	run env_limit_drift_warning 2000 4096 2000 4096
+	assert_success
+	assert_output ""
+	run env_limit_drift_warning 1000 4096 2000 4096
+	assert_output "istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now): the window-peak CPU and RSS % below use the recorded one, the kubectl top % each row's own (read with it), the Provisioned column the one read now; the limit changed during or after the sweep (an Argo CD sync, a tuning profile or a hand edit)"
+	run env_limit_drift_warning 1000 4096 2000 8192
+	assert_output --partial "(CPU 1000m recorded, 2000m now; memory 4096Mi recorded, 8192Mi now)"
+	# Not read on a side: nothing to compare.
+	run env_limit_drift_warning unknown 4096 2000 unknown
+	assert_output ""
+}
+
+# _lim_kubectl: istiod's Deployment with limits of 2 CPUs and 4Gi; every other read fails.
+_lim_kubectl() {
+	case " $* " in
+	*" get deploy istiod "*) echo '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"discovery","resources":{"requests":{"cpu":"500m","memory":"2Gi"},"limits":{"cpu":"2","memory":"4Gi"}}}]}}}}' ;;
+	*) return 1 ;;
+	esac
+}
+
+@test "render_scale_envelope (H6): the % of limit names the recorded limit; a live limit that differs warns above the tables" {
+	source "${ROOT}/tests/lib/platform.sh"
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh"
+	mkdir -p "$d"
+	fake_cp_report "$rep" '[]'
+	# The sweep recorded 1 CPU per replica (its % figures divide by it); istiod has 2 now.
+	sed -i 's/"node_alloc_mem_mi":"16093"/"node_alloc_mem_mi":"16093","istiod_cpu_limit_m":"1000","istiod_mem_limit_mi":"4096"/' "$rep"
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
+	assert_success
+	assert_output --partial "> **Data warning:** istiod's limit per replica differs from the one the sweep recorded at its start (CPU 1000m recorded, 2000m now)"
+	assert_output --partial "| **istiod CPU (window peak)** | 500m / 2000m | 20% of 1000m |"
+	assert_output --partial "| **istiod memory (RSS — OOM headroom)** | 2048Mi / 4096Mi | 30% of 4096Mi |"
+	# The kubectl top figures divide by each row's own limit (002, read with the row), not by the
+	# recorded one: no "of 1000m" there.
+	assert_output --partial "| istiod CPU (kubectl top at window end) | 500m / 2000m | 10% of each row's limit |"
+	assert_output --partial "| istiod memory (kubectl top) | 2048Mi / 4096Mi | 30% of each row's limit |"
+	[ "$(grep -n '^> \*\*Data warning:\*\* istiod' <<<"$output" | cut -d: -f1)" -lt "$(grep -n '^### 1\. Mesh topology' <<<"$output" | cut -d: -f1)" ]
+	# The same limit: no warning.
+	sed -i 's/"istiod_cpu_limit_m":"1000"/"istiod_cpu_limit_m":"2000"/' "$rep"
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
+	refute_output --partial "**Data warning:**"
+	assert_output --partial "| 20% of 2000m |"
+}
+
+@test "env_pct_cell: a % of limit cell names its limit only when both are numbers; a value not read stays bare" {
+	run env_pct_cell 20 1000 m
+	assert_output "20% of 1000m"
+	run env_pct_cell 12.5 4096 Mi
+	assert_output "12.5% of 4096Mi"
+	run env_pct_cell 10 row
+	assert_output "10% of each row's limit"
+	# No numeric limit: the % alone; no numeric %: the value as it is, never "unknown%".
+	run env_pct_cell 20 unknown m
+	assert_output "20%"
+	run env_pct_cell 28
+	assert_output "28%"
+	run env_pct_cell unknown 2000 m
+	assert_output "unknown"
+	run env_pct_cell N/A row
+	assert_output "N/A"
+	run env_pct_cell ""
+	assert_output "unknown"
+}
+
+@test "render_scale_envelope: with kubectl top down, its cells read unknown, not unknown% of a limit" {
+	source "${ROOT}/tests/lib/platform.sh"
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh"
+	mkdir -p "$d"
+	fake_cp_report "$rep" '[]'
+	sed -i 's/"node_alloc_mem_mi":"16093"/"node_alloc_mem_mi":"16093","istiod_cpu_limit_m":"2000","istiod_mem_limit_mi":"4096"/; s/"istiod_cpu_pct_of_limit_max":"10","istiod_mem_pct_of_limit_max":"30"/"istiod_cpu_pct_of_limit_max":"unknown","istiod_mem_pct_of_limit_max":"unknown"/; s/"node_cpu_pct_max":"28","node_mem_pct_max":"35"/"node_cpu_pct_max":"unknown","node_mem_pct_max":"unknown"/' "$rep"
+	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a" _lim_kubectl
+	assert_success
+	assert_output --partial "| istiod CPU (kubectl top at window end) | 500m / 2000m | unknown |"
+	assert_output --partial "| istiod memory (kubectl top) | 2048Mi / 4096Mi | unknown |"
+	assert_output --partial "| Worker-node CPU | — | unknown |"
+	assert_output --partial "| Worker-node memory | — | unknown |"
+	# The figures from the /metrics scrape still name the recorded limit.
+	assert_output --partial "| **istiod CPU (window peak)** | 500m / 2000m | 20% of 2000m |"
+	refute_output --partial "unknown%"
+}
+
+@test "render_scale_envelope: it needs platform.sh (platform_summary)" {
+	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh"
+	mkdir -p "$d"
+	fake_cp_report "$rep" '[]'
+	run render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
+	assert_failure
+	assert_output --partial "render_scale_envelope needs platform_summary (source tests/lib/platform.sh)"
+}
+
 # ---------------------------------------------------------------------------
 # istiod replicas over every context. Members can run different replica counts,
 # and the per-replica proxy figure is about 1/R of the cluster figure, so R must
@@ -232,6 +404,29 @@ _rep_kubectl() {
 	mesh-b) echo '{"spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"discovery","resources":{"requests":{"cpu":"1","memory":"1Gi"},"limits":{"cpu":"4","memory":"8Gi"}}}]}}}}' ;;
 	*) return 1 ;;
 	esac
+}
+
+# _conc_kubectl <kubectl args...>: counts the reads alive (their dirs under running/) as each
+# starts, in counts, then answers both the version read and istiod's Deployment read.
+_conc_kubectl() {
+	local ctx="" a
+	for a in "$@"; do [[ "$a" != --context=* ]] || ctx="${a#--context=}"; done
+	mkdir -p "${BATS_TEST_TMPDIR}/running/${ctx}"
+	find "${BATS_TEST_TMPDIR}/running" -mindepth 1 -maxdepth 1 -type d | wc -l >>"${BATS_TEST_TMPDIR}/counts"
+	sleep 0.2
+	rmdir "${BATS_TEST_TMPDIR}/running/${ctx}"
+	case " $* " in
+	*" version "*) printf '{"serverVersion":{"gitVersion":"v1.34.0"}}\n' ;;
+	*) echo '{"spec":{"replicas":2,"template":{"spec":{"containers":[{"name":"discovery","resources":{"limits":{"cpu":"2","memory":"4Gi"}}}]}}}}' ;;
+	esac
+}
+
+@test "env_istiod_scan: PLATFORM_READ_PARALLEL members at a time (each_bounded), each member's count in order" {
+	PLATFORM_READ_PARALLEL=2 run env_istiod_scan "m0,m1,m2,m3,m4" _conc_kubectl
+	assert_success
+	assert_output --partial "lim_cpu_m=2000 lim_mem_mi=4096 replicas=2 replicas_by_context=m0=2,m1=2,m2=2,m3=2,m4=2"
+	[ "$(wc -l <"${BATS_TEST_TMPDIR}/counts")" -eq 5 ]
+	[ "$(sort -n "${BATS_TEST_TMPDIR}/counts" | tail -1 | tr -d ' ')" -le 2 ]
 }
 
 @test "env_istiod_scan: req/lim from the first context, replicas from every context" {

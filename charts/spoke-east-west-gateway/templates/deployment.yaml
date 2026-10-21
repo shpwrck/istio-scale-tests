@@ -38,6 +38,7 @@ spec:
       containers:
         - name: istio-proxy
           image: auto
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
           env:
             - name: ISTIO_META_REQUESTED_NETWORK_VIEW
               value: {{ include "spoke-east-west-gateway.network" . | quote }}

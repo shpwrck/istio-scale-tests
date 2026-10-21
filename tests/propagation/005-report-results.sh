@@ -34,6 +34,7 @@
 # ISTIO_PROXY_VERSIONS (unknown for a TSV written before them; mixed when pooled inputs
 # differ), KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
 # report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
+# and the platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh)
 # over all input TSVs.
 #
 # Every endpoint-*.tsv under the results dir is read. More than one run there (several
@@ -71,6 +72,7 @@ source "${ROOT}/config/options.env"  # PROPAGATION_RESULTS_DIR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values (the platform record)
 source "${ROOT}/tests/lib/propagation.sh"  # PROP_ROW_AWK: which rows count (shared with 002)
 
 RESULTS_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
@@ -236,6 +238,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -d "$RESULTS_DIR" ]] || die "results directory not found: $RESULTS_DIR"
 
 ENDPOINT_FILES=()
@@ -262,8 +265,10 @@ fi
 #
 # Implementation: for each input file we collect a row of key=value pairs into
 # PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
-# over every input (config_merged_preamble): one value, or mixed:a,b with a warning.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA HARNESS_CONTENT_KEY REPORT_HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256)
+# over every input (config_merged_preamble): one value, or mixed:a,b with a warning; the
+# platform record's keys (PLATFORM_KEYS) by platform_report_values instead, below.
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA HARNESS_CONTENT_KEY REPORT_HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256
+	"${PLATFORM_KEYS[@]}")
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
 # (preserved so any scalar key, even one we have not classified, still appears).
@@ -307,6 +312,8 @@ done
 _hck="$(config_input_value HARNESS_CONTENT_KEY unknown "${ENDPOINT_FILES[@]}")"
 for k in "${SWEEP_LEVEL_KEYS[@]}"; do
 	case "$k" in RUN_CONFIG | RUN_CONFIG_SHA256) continue ;; esac
+	# The record's own merge warns for its keys (per member: a mesh size has other members).
+	! platform_report_is_key "$k" || continue
 	[[ "${PREAMBLE[$k]:-}" == mixed:* ]] || continue
 	if [[ "$k" == HARNESS_SHA && -n "$_hck" && "$_hck" != unknown && "$_hck" != mixed:* ]]; then
 		echo "note: the input TSVs' HARNESS_SHA values (${PREAMBLE[$k]#mixed:}) differ only in git describe (a commit or tag that left the harness files as they were): every input records HARNESS_CONTENT_KEY=${_hck}, the same harness files" >&2
@@ -319,6 +326,13 @@ done
 # mixed:a,b with a warning when they differ (PL26).
 PREAMBLE[RUN_CONFIG]="$(config_report_value RUN_CONFIG "${ENDPOINT_FILES[@]}")"
 PREAMBLE[RUN_CONFIG_SHA256]="$(config_report_value RUN_CONFIG_SHA256 "${ENDPOINT_FILES[@]}")"
+# The platform record over every input too (tests/lib/platform.sh): unknown for files written
+# before it, mixed (with a warning) when the inputs disagree.
+PLATFORM_VALUES="$(platform_report_values "${ENDPOINT_FILES[@]}")"
+while IFS= read -r kv; do PREAMBLE["${kv%%=*}"]="${kv#*=}"; done <<<"$PLATFORM_VALUES"
+# Every format's body repeats the record's warnings (inputs that disagree, a build that changed
+# during the sweep, a value not read; PL19).
+REPORT_WARNINGS="$(platform_report_warnings "${ENDPOINT_FILES[@]}")"
 # This report's own harness, every format; the results dir it reads is no harness change.
 PREAMBLE[REPORT_HARNESS_SHA]="$(report_harness_sha --exclude "$RESULTS_DIR")"
 # PL6: the report pools every TSV under the results dir; more than one run stops it
@@ -754,6 +768,7 @@ report_endpoint_text() {
 	format_preamble_text
 	echo "  TSV_COLUMNS: ${TSV_COLUMNS:-none}"
 	echo ""
+	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	if [[ -n "$DATA_WARNINGS" ]]; then data_warnings_lines "WARNING: "; echo ""; fi
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" -v ATT="$ATT_SPEC" "$AWK_AGG"'
 	function stats_line(label, src, ms, n,    arr, sum, i) {
@@ -807,6 +822,7 @@ report_endpoint_text() {
 report_endpoint_csv() {
 	format_preamble_csv_header
 	echo "# TSV_COLUMNS=${TSV_COLUMNS:-none}"
+	platform_warning_lines comment "$REPORT_WARNINGS"
 	data_warnings_lines "# WARNING: "
 	config_multi_run_csv
 	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
@@ -896,6 +912,7 @@ report_endpoint_markdown() {
 	echo ""
 	echo "# Endpoint Propagation Latency"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	if [[ -n "$DATA_WARNINGS" ]]; then data_warnings_lines "> **Warning:** "; echo ""; fi
@@ -995,6 +1012,7 @@ report_endpoint_json() {
 	# Emit a single object: { metadata: {...}, rows: [...] }.
 	printf '{"metadata":'
 	format_preamble_json
+	printf ',"warnings":%s' "$(platform_warning_lines json "$REPORT_WARNINGS")"
 	printf ',"pooled_runs":%s' "$(config_multi_run_json)"
 	printf ',"pooled_sweep_outcomes":%s' "$(lines_json "$POOLED_SWEEP_OUTCOMES")"
 	printf ',"sweep_outcome":%s' "$(sweep_outcome_recorded "$RESULTS_DIR" json)"
@@ -1047,6 +1065,7 @@ report_endpoint_charts() {
 	echo ""
 	echo "# Endpoint Propagation Latency — Charts"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	if [[ -n "$DATA_WARNINGS" ]]; then data_warnings_lines "> **Warning:** "; echo ""; fi

@@ -37,6 +37,8 @@ source "${ROOT}/config/versions.env"  # DATAPLANE_MIN_QPS_RATIO (fallback for TS
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_is_key
 
 RESULTS_DIR="$(config_repo_path "${DATAPLANE_RESULTS_DIR}")"
 FORMAT="text"
@@ -86,7 +88,8 @@ Every format includes a "Remote coverage" section before the results table: per
 mesh size and source, how many remotes passed every reach check (reach-*.tsv from
 002, statuses REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN), and the remotes
 with no or only some valid latency rows (n_valid/n_total with their statuses). A
-TSV recorded before the reach check has no reach file: "no reachability data".
+TSV recorded before the reach check has no reach file: "no reachability data". Reach
+files from meshes of one member only check the source itself: "no remote to check".
 
 Every format includes a "Local baseline" verdict: OK when every local cell has all
 rows valid and none below the QPS ratio, else one line per
@@ -181,6 +184,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$FORMAT" in
 md) FORMAT=markdown ;;
 text|csv|markdown|json|charts) ;;
@@ -245,12 +249,21 @@ unset _k _have
 # mixed:a,b with a warning when they differ (PL26).
 _pre=()
 for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
-	case "$kv" in RUN_CONFIG=* | RUN_CONFIG_SHA256=*) ;; *) _pre+=("$kv") ;; esac
+	case "$kv" in RUN_CONFIG=* | RUN_CONFIG_SHA256=*) ;; *) platform_report_is_key "${kv%%=*}" || _pre+=("$kv") ;; esac
 done
 PREAMBLE=(${_pre[@]+"${_pre[@]}"}
 	"RUN_CONFIG=$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 	"RUN_CONFIG_SHA256=$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")")
 unset _pre
+# The platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...) over every input too.
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
+while IFS= read -r kv; do PREAMBLE+=("$kv"); done <<<"$PLATFORM_VALUES"
+# Every format's body repeats the record's warnings (inputs that disagree, a build that changed
+# during the sweep, a value not read) and, on kind, the cross-cluster path's (PL19).
+REPORT_WARNINGS="$(platform_report_warnings "${TSV_FILES[@]}")"
+KIND_PATH_WARNING="$(platform_kind_path_warning "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")" \
+	"remote latency and the remote-minus-local delta are not a cloud load balancer's; quote them from cloud clusters only.")"
+[[ -z "$KIND_PATH_WARNING" ]] || { echo "WARNING: ${KIND_PATH_WARNING}" >&2; REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}${KIND_PATH_WARNING}"; }
 # This report's own harness, every format; the results dir it reads is no change to it.
 PREAMBLE+=("REPORT_HARNESS_SHA=$(report_harness_sha --exclude "$RESULTS_DIR")")
 
@@ -604,7 +617,8 @@ local_baseline_hint() {
 
 # --- Remote coverage ----------------------------------------------------------
 # REACH_ROWS: reach_coverage_rows over every reach-*.tsv under RESULTS_DIR (empty
-# when there is none, e.g. a TSV recorded before the reach check).
+# when there is none, e.g. a TSV recorded before the reach check; REACH_NO_REMOTE_LINE
+# when their rows are all local: a mesh of one member).
 REACH_ROWS="$(reach_coverage_rows "$RESULTS_DIR")"
 REACH_NOT_REACHABLE="$(awk -F'\t' 'NF >= 8 && $6 != "REACHABLE" { n++ } END { print n + 0 }' <<<"$REACH_ROWS")"
 # RV_ROWS: per remote (mesh_size, source_ctx, target_ctx) the latency rows' n_total,
@@ -705,6 +719,7 @@ report_text() {
 	[[ ${#PREAMBLE[@]} -gt 0 ]] && echo ""
 	echo "=== Data-Plane Latency Results ==="
 	echo ""
+	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf 'NOTE: %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	sweep_outcome_recorded "$RESULTS_DIR" text
@@ -739,6 +754,7 @@ report_text() {
 
 report_csv() {
 	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do echo "# $kv"; done
+	platform_warning_lines comment "$REPORT_WARNINGS"
 	config_multi_run_csv
 	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
 	sweep_outcome_recorded "$RESULTS_DIR" csv
@@ -854,6 +870,7 @@ report_markdown() {
 	echo ""
 	echo "# Data-Plane Latency Results"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	sweep_outcome_recorded "$RESULTS_DIR" md
@@ -982,34 +999,44 @@ report_json() {
 			   statuses: (.[5] | split(",") | map(capture("^(?<k>.*)=(?<v>[0-9]+)$") | {(.k): (.v | tonumber)}) | add // {})})
 	')
 
+	local warn_json diag_json
+	warn_json="$(platform_warning_lines json "$REPORT_WARNINGS")"
+	diag_json="$(istiod_diag_report json "$RESULTS_DIR")"
+	# The objects that grow with the members (the platform record in metadata, the warnings, the
+	# remote coverage and validity, the istiod diagnostics) go in as files (--slurpfile; $x[0]),
+	# never as arguments: Linux refuses to run a command with one argument string over 128 KiB,
+	# the record of about 360 members.
 	jq -n \
-		--argjson metadata "$meta_json" \
-		--argjson results "$results_json" \
-		--argjson local_baseline "$lb_json" \
-		--argjson remote_coverage "$rc_json" \
-		--argjson remote_validity "$rv_json" \
+		--slurpfile metadata <(printf '%s\n' "$meta_json") \
+		--slurpfile warnings <(printf '%s\n' "$warn_json") \
+		--slurpfile results <(printf '%s\n' "$results_json") \
+		--slurpfile local_baseline <(printf '%s\n' "$lb_json") \
+		--slurpfile remote_coverage <(printf '%s\n' "$rc_json") \
+		--slurpfile remote_validity <(printf '%s\n' "$rv_json") \
 		--argjson n_total "$TOTAL_ALL" \
 		--argjson n_valid "$VALID_ALL" \
 		--argjson n_dropped "$DROPPED_ALL" \
 		--argjson n_skipped "$SKIPPED_ALL" \
 		--argjson n_placeholder "$N_PLACEHOLDER" \
-		--argjson placeholders "$ph_json" \
+		--slurpfile placeholders <(printf '%s\n' "$ph_json") \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
 		--argjson no_valid "$RV_NO_VALID" \
-		--argjson istiod_diag "$(istiod_diag_report json "$RESULTS_DIR")" \
+		--slurpfile istiod_diag <(printf '%s\n' "$diag_json") \
 		--argjson pooled_runs "$(config_multi_run_json)" \
 		--argjson pooled_sweep_outcomes "$(printf '%s' "$POOLED_SWEEP_OUTCOMES" | jq -Rn '[inputs]')" \
 		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
-		'{metadata: $metadata, pooled_runs: $pooled_runs, pooled_sweep_outcomes: $pooled_sweep_outcomes,
+		'def one($x; $name): if ($x | length) == 1 then $x[0] else error("dataplane report: \($name) is not one JSON value") end;
+		{metadata: one($metadata; "metadata"), warnings: one($warnings; "warnings"),
+		  pooled_runs: $pooled_runs, pooled_sweep_outcomes: $pooled_sweep_outcomes,
 		  sweep_outcome: $sweep_outcome,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
-		            n_placeholder: $n_placeholder, placeholders: $placeholders,
+		            n_placeholder: $n_placeholder, placeholders: one($placeholders; "placeholders"),
 		            remotes_not_reachable: $not_reachable, remotes_without_valid_rows: $no_valid},
-		  remote_coverage: $remote_coverage.remote_coverage,
-		  remote_validity: $remote_validity,
-		  istiod_diag: $istiod_diag,
-		  local_baseline: $local_baseline, results: $results}'
+		  remote_coverage: one($remote_coverage; "remote_coverage").remote_coverage,
+		  remote_validity: one($remote_validity; "remote_validity"),
+		  istiod_diag: one($istiod_diag; "istiod_diag"),
+		  local_baseline: one($local_baseline; "local_baseline"), results: one($results; "results")}'
 }
 
 report_charts() {
@@ -1025,6 +1052,7 @@ report_charts() {
 	echo ""
 	echo "# Data-Plane Latency — Charts"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	# Name every local point that is drawn as 0 because it has no valid sample, and

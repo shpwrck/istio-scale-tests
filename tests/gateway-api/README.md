@@ -15,11 +15,14 @@ member, the echo workload on one. [`001-run-ingress-check.sh`](001-run-ingress-c
 what each member resolved, sends traffic through every member's ingress, and writes a report
 that leads with both answers.
 
-**Status:** confirmed in the lab on 2026-10-14: 22 of 22 rows matched the predictions below,
-and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded
-([campaign record](../../docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)).
+**Status:** confirmed in the lab on 2026-10-14 on OpenShift (OSSM 3.4.3): 22 of 22 rows matched
+the predictions below, and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded
+([campaign record](../../docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)). Confirmed
+again on 2026-10-18 on kind ([kind lab](../../docs/runbooks/kind-lab/README.md): upstream Istio
+1.30.5 through the Sail operator 1.31.1, Gateway API v1.6.1 standard channel): 22 of 22 rows
+matched.
 
-## Answer (Istio 1.30.5 / OSSM 3.4.3; predicted from the source, confirmed in the lab 2026-10-14)
+## Answer (Istio 1.30.5, OSSM 3.4.3 and upstream; predicted from the source, confirmed in the lab 2026-10-14 and on kind 2026-10-18)
 
 **For traffic, no. For the HTTPRoute status, yes.** An HTTPRoute attached to a Gateway routes to a
 Service that exists only in another member; the only side effect is that the route's status on
@@ -153,7 +156,7 @@ by the placement ApplicationSet (preset `values-mesh-verify-gateway-api.yaml`), 
 - The classic `Gateway` with S1's and S9's `VirtualService`s, the HTTPRoutes, the Services (one
   template, so the S3 stub is byte-identical), and, on the workload member only, the
   sidecar-injected `hashicorp/http-echo` Deployment `gwapi-echo`, whose body is the member's
-  ManagedCluster name.
+  cluster name.
 - On the workload member only: namespace `mesh-verify-gwapi-remote` (`remoteNamespace`, same
   labels; the label is what lets the other members' istiods discover its Services) with a second
   `gwapi-echo` Deployment, Services `echo-s7`, `echo-s8`, `echo-s9`, and ReferenceGrant `s7`
@@ -164,7 +167,7 @@ by the placement ApplicationSet (preset `values-mesh-verify-gateway-api.yaml`), 
 - The scenario set id, annotation `mesh-verify-gwapi/scenario-set` on every namespace and on the
   Gateway API Gateway (`_helpers.tpl`, not a value). The script records it per member and marks a
   member that runs another set (`SCENARIO_SET_MISMATCH`).
-- `workloadCluster` (the workload member's ACM ManagedCluster name) decides where the
+- `workloadCluster` (the workload member's cluster name, below) decides where the
   Deployments, the workload-only Services, the backend namespace and C2 go. Empty, or the
   `<workload-cluster>` placeholder, fails every member's render with a message rather than
   deploying a check without a workload; a render with no `clusterName` (CI's `helm lint`) shows
@@ -172,30 +175,43 @@ by the placement ApplicationSet (preset `values-mesh-verify-gateway-api.yaml`), 
 
 ## Deploy
 
-Needs the Gateway API CRDs on every member, ReferenceGrant included (recent OpenShift releases
-install the standard channel through the ingress operator; the script stops when HTTPRoute is
-missing), and the `istio` GatewayClass, which istiod creates.
+Needs the Gateway API CRDs on every member, ReferenceGrant included (the script stops when
+HTTPRoute is missing), and the `istio` GatewayClass, which istiod creates. Kubernetes does not
+ship the CRDs: install the standard channel on every member, at a version your Istio supports.
+The check was confirmed with v1.6.1 (the release cloud-provider-kind v0.12.0 installs on kind):
 
-1. Pick the workload member: `oc --context <acm-hub-ctx> get managedclusters`.
-2. Read the repo and revision the hub syncs the mesh from. [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
-   keeps `<repo-url>`, `<revision>` and `<workload-cluster>` placeholders: step 3 fills them in on
-   the way to the hub, so the check runs the same charts as the mesh and the cluster name never
-   lands in git.
+```bash
+kubectl --context <member-ctx> apply --server-side \
+  -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml
+```
+
+The preflight records the bundle version each member has. Recent OpenShift releases install the
+standard channel through the ingress operator.
+
+1. Pick the workload member. A member's cluster name is its Argo CD cluster name: the kubeconfig
+   context it was registered with (`terraform -chdir=terraform/platform output
+   mesh_member_spoke_keys` lists them), which on OpenShift is also its ACM ManagedCluster name.
+2. Read what the hub syncs the mesh from. [`charts/mesh-verify-gateway-api-appset.yaml`](../../charts/mesh-verify-gateway-api-appset.yaml)
+   keeps five placeholders: `<repo-url>`, `<revision>`, `<platform>`, `<gitops-namespace>` and
+   `<workload-cluster>`. `fill` fills them in on the way to the hub, so the check runs the same
+   charts as the mesh and the cluster name never lands in git.
 
    ```bash
-   read -r REPO REV < <(oc --context <acm-hub-ctx> -n openshift-gitops \
+   NS=argocd PLATFORM=kubernetes   # OpenShift: NS=openshift-gitops PLATFORM=openshift
+   WORKLOAD=<member-cluster-name>
+   read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" \
      get applications.argoproj.io hub-gitops-root \
      -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
+   fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
+     -e "s|<platform>|${PLATFORM:?}|g" -e "s|<gitops-namespace>|${NS:?}|g" \
+     -e "s|<workload-cluster>|${WORKLOAD:?}|g" charts/mesh-verify-gateway-api-appset.yaml; }
    ```
 
-3. Apply it on the hub with the workload member's ManagedCluster name, and wait for the per-member
-   Applications:
+3. Apply it on the hub, and wait for the per-member Applications:
 
    ```bash
-   sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
-     -e 's|<workload-cluster>|<managed-cluster-name>|' charts/mesh-verify-gateway-api-appset.yaml \
-     | oc --context <acm-hub-ctx> apply -f -
-   oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops | grep mesh-verify-gwapi
+   fill | kubectl --context <hub-ctx> apply -f -
+   kubectl --context <hub-ctx> get applications.argoproj.io -n "$NS" | grep mesh-verify-gwapi
    ```
 
    An Application may report `Degraded`: C1's missing backend is intentional, and Argo CD may
@@ -206,13 +222,13 @@ missing), and the `istio` GatewayClass, which istiod creates.
 
 ```bash
 tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
-  --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx> --dry-run
+  --workload-context <mesh-b-ctx> --hub-context <hub-ctx> --dry-run
 tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
-  --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx>
+  --workload-context <mesh-b-ctx> --hub-context <hub-ctx>
 ```
 
 `--contexts` lists mesh members only (at least two); `--workload-context` is the member whose
-ManagedCluster name is the chart's `workloadCluster`. The script deploys nothing, prints where its
+cluster name is the chart's `workloadCluster`. The script deploys nothing, prints where its
 results will go, and:
 
 1. **Preflight**, per member, recorded in the TSV preamble (`unset` = Istio's default; `unknown`
@@ -226,22 +242,41 @@ results will go, and:
      and `ENABLE_MCS_CLUSTER_LOCAL`;
    - the builds that ran: istiod's `discovery` image (`ISTIOD_IMAGE`), the ingress `istio-proxy`
      image (`INGRESS_PROXY_IMAGE`), each as the image's last path component plus the digest that
-     ran (the registry host and path are dropped), and the OSSM operator CSV version and phase
-     (`OSSM_OPERATOR`); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`, which can be
-     an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each active
-     IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
+     ran (the registry host and path are dropped; several are `+`-joined), and the operator build
+     (`OSSM_OPERATOR`, shown as "Operator build": on OpenShift the OSSM CSV, such as
+     `servicemeshoperator3:3.4.3/Succeeded`; on Kubernetes the Sail operator's image tag, the digest
+     its pod runs and its state, such as `sail-operator:1.31.1@sha256:<digest>/Available`; read on
+     the platform the member serves, on `TEST_PLATFORM`'s only when the member could not be asked;
+     `absent` only when that read of the served platform's operator answers with none; `unknown`,
+     with a warning, when the read fails, or when the member could not be asked and the read where
+     `TEST_PLATFORM` looks found none); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`,
+     which can be an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each
+     active IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
      `unknown` for a member that cannot be read or whose Istio CR is not settled), with
      `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in `ISTIO_ACTIVE_REVISIONS`, the
      generations of its Istio CR and active IstioRevision in `ISTIO_GENERATIONS`
      (`<ctx>=<cr>/<revision>`), the proxy versions connected to its istiod in
      `ISTIO_PROXY_VERSIONS`, and the `config/versions.env` pin in `ISTIO_VERSION_PIN`: this
-     read-only check warns on a difference and never stops on it. A member whose istiod or
-     IstioCNI is not ready (or whose istiod is rolling out) is read again every
-     `ISTIO_VERSION_READY_POLL_SEC` (5) for up to `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds,
-     both set in the environment only, as is `ISTIO_PROXY_READ_PARALLEL` (20), the members whose
-     proxy versions are read at once; the members still not ready then are in
-     `ISTIO_NOTREADY_AT_START` (`none` when every member was ready), with the wait in
-     `ISTIO_READY_WAITED_SEC`; and the tuning baseline;
+     read-only check warns on a difference and never stops on it. A member whose istiod or IstioCNI
+     is not ready (or whose istiod is rolling out) is read again every
+     `ISTIO_VERSION_READY_POLL_SEC` (5) for up to `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds, both
+     set in the environment only, as is `ISTIO_PROXY_READ_PARALLEL` (20), the members whose proxy
+     versions are read at once; the members still not ready then are in `ISTIO_NOTREADY_AT_START`
+     (`none` when every member was ready), with the wait in `ISTIO_READY_WAITED_SEC`; and the tuning
+     baseline;
+   - the platform record every suite writes (`tests/lib/platform.sh`): `PLATFORM`,
+     `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
+     `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways'
+     `istio-proxy` build), `NODE_PROVIDER_BY_CONTEXT` (the nodes' providerID scheme: `kind`,
+     `aws`, ...), `ISTIOD_ENV_BY_CONTEXT` (a digest of istiod's discovery container env
+     without `CLUSTER_ID`: its settings) and `TUNING_OBJECTS_BY_CONTEXT` (a tuning profile's
+     objects, `none` outside a tuning run). An image carries the digest its pods run (`@unknown`
+     when none has started: not read, never another build); `none` means no such pod.
+     `PLATFORM_BY_CONTEXT` is what each member serves (`security.openshift.io/v1` on
+     OpenShift), asked of the member whatever `TEST_PLATFORM` says (`unknown` when it cannot be
+     asked). `TEST_PLATFORM` (`config/options.env`, default `auto`) picks the hub's platform for its
+     Argo CD namespace: `auto` asks the hub, `kubernetes` or `openshift` is taken as given (a member
+     that serves the other platform gets a warning), and any other value stops the run;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
      and restart counts (for `ISTIOD_RESTARTED` / `INGRESS_RESTARTED`, below);
    - the echo Deployments (Ready and sidecar-injected on the workload member, absent elsewhere),
@@ -421,9 +456,14 @@ repeats every TSV preamble line.
 
 **Comparing re-runs:** each run writes a fresh `run-<RUN_ID>/`. Runs whose preambles match on
 `GWAPI_SCHEMA` (the rules that turn codes into answers), `SCENARIO_SET` (and `SCENARIO_SET[ctx]`),
-`ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `TIMEOUT_SEC`: a
+`PLATFORM`, `ISTIOD_IMAGE`, `OSSM_OPERATOR` and the knobs that shape a verdict (`REQUESTS`, `TIMEOUT_SEC`: a
 reply slower than it is `000`, `GATE_PASSES`, `SETTLE_SEC`, `REPROBE_DELAY_SEC`) have comparable
 verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
+`OSSM_OPERATOR` changed format after the 2026-10-14 runs: it was `<version>/<phase>`, several
+`|`-joined; it is now `servicemeshoperator3:<version>/<phase>` on OpenShift or
+`sail-operator:<tag>@<digest>/<state>` on Kubernetes, several `+`-joined. To compare with a
+2026-10-14 TSV, compare its version with the part after `servicemeshoperator3:`. The state after
+the last `/` (`Available`, `Unavailable`, a CSV phase) is not part of the build.
 
 TSV (`GWAPI_SCHEMA=5`; 21 tab-separated columns), one row per member × scenario: `run_id
 ingress_ctx role scenario kind host route backend expected_status observed_status expected_code
@@ -541,7 +581,7 @@ unchanged.
 ## Cleanup
 
 ```bash
-oc --context <acm-hub-ctx> delete -f charts/mesh-verify-gateway-api-appset.yaml
+fill | kubectl --context <hub-ctx> delete -f -   # fill from Deploy, step 2
 ```
 
 The finalizers remove the ApplicationSet, the per-member Applications and everything they deployed,
@@ -596,8 +636,11 @@ on the wait and the gate, no istioctl evidence):
   `GWAPI_GATE_PASSES`, `GWAPI_SETTLE_SEC`, `GWAPI_REPROBE_DELAY_SEC`, `GWAPI_DETAIL_TIMEOUT_SEC`,
   `GWAPI_KUBECTL_TIMEOUT_SEC`, `GWAPI_ISTIOCTL_TIMEOUT_SEC`, `GWAPI_NAMESPACE`,
   `GWAPI_REMOTE_NAMESPACE` (the chart's `remoteNamespace`), `GWAPI_SHARED_NAMESPACE`
-  (`sharedNamespace`), `GWAPI_GATEWAY`, `GWAPI_ARGOCD_NAMESPACE` and `GWAPI_ARGOCD_APPSET` have
-  no flag.
+  (`sharedNamespace`), `GWAPI_GATEWAY`, `GWAPI_ARGOCD_NAMESPACE` (empty by default: the Argo CD
+  namespace of the hub's platform, `openshift-gitops` on OpenShift, else `argocd`; the run logs
+  which) and `GWAPI_ARGOCD_APPSET` have no flag. `TEST_PLATFORM` (above),
+  `PLATFORM_READ_TIMEOUT` (each read of the platform record) and `PLATFORM_READ_PARALLEL` (members
+  read at once) are keys of every suite.
 - The shared `ISTIOD_DIAG_*` keys are accepted and unused. The script copies the config into the
   run directory as `run-config-<RUN_ID>.env`.
 - **Flags only:** `--dry-run`. Keep context names in `configs/<name>.local.env` (gitignored).

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Snapshot istiod pilot_* metrics from every Running istiod pod via port-forward.
-# Useful when OpenShift User Workload Monitoring is not enabled, or for
+# Useful when no Prometheus scrapes istiod (on OpenShift: User Workload Monitoring off), or for
 # point-in-time snapshots during a load test. Writes one .prom file per pod.
 #
 # Usage:
@@ -38,6 +38,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 FANOUT_PF_BASE="${PROPAGATION_SNAPSHOT_PF_BASE:-22014}"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
 
 CONTEXTS_CSV=""
 OUTPUT_DIR="$(config_repo_path "${PROPAGATION_RESULTS_DIR}")"
@@ -111,6 +113,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_pos_int "$INTERVAL" || die "--interval must be a positive integer (got: $INTERVAL)"
 
 CONTEXTS=()

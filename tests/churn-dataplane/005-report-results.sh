@@ -6,8 +6,9 @@
 # - Δp99_ms is aggregated only over valid baseline/churn pairs sharing a combo_id
 #   within one TSV file.
 # - Every output format carries the TSV preamble metadata, each key merged over every
-#   input (mixed:a,b when it varies, PL26), and RUN_CONFIG / RUN_CONFIG_SHA256 (the
-#   --config behind the inputs).
+#   input (mixed:a,b when it varies, PL26), RUN_CONFIG / RUN_CONFIG_SHA256 (the
+#   --config behind the inputs) and the platform record (PLATFORM,
+#   MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh).
 # - More than one run under the results dir stops the report unless
 #   --allow-multi-run, and then every format says so.
 # - Every output format has a "Remote coverage" section from the reach-*.tsv files
@@ -33,6 +34,8 @@ source "${ROOT}/config/options.env"  # COEXEC_RESULTS_DIR
 source "${ROOT}/tests/lib/reach.sh"  # reach_coverage_rows, reach_coverage_render
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_report
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_report_values, platform_report_lines
 
 RESULTS_DIR="$(config_repo_path "${COEXEC_RESULTS_DIR}")"
 FORMAT="text"
@@ -82,7 +85,8 @@ Example (one sweep, as 004 runs it; from the repo root):
 Every format has a "Remote coverage" section from the reach-*.tsv files next to the
 TSVs: per mesh size and source, how many remotes passed every reach check
 (REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN per remote). Without reach
-files (the check was off, or the TSV predates it) it says "no reachability data".
+files (the check was off, or the TSV predates it) it says "no reachability data"; with
+reach files that check the source itself only (a mesh of one), "no remote to check".
 Rows with any status but OK are left out of valid_runs, ERROR_RATE_HIGH (HTTP 200
 share below MIN_PCT_200) and REMOTE_UNREACHABLE (sweep stopped by the gate) included.
 Each average counts only the valid pairs with a number in that column (N/A when none).
@@ -157,6 +161,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$FORMAT" in
 text | csv | json | md | markdown | charts) ;;
 *) die "unknown format: $FORMAT (use text|csv|json|md|charts)" ;;
@@ -327,6 +332,14 @@ ON_UNREACHABLE_STR="$(extract_preamble_kv ON_UNREACHABLE)"
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
 RUN_CONFIG_STR="$(config_report_value RUN_CONFIG "${TSV_FILES[@]}")"
 RUN_CONFIG_SHA256_STR="$(config_report_value RUN_CONFIG_SHA256 "${TSV_FILES[@]}")"
+# The platform record over every input (a file without it reads unknown).
+PLATFORM_VALUES="$(platform_report_values "${TSV_FILES[@]}")"
+# Every format's body repeats the record's warnings (inputs that disagree, a build that changed
+# during the sweep, a value not read) and, on kind, the cross-cluster path's (PL19).
+REPORT_WARNINGS="$(platform_report_warnings "${TSV_FILES[@]}")"
+KIND_PATH_WARNING="$(platform_kind_path_warning "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")" \
+	"at mesh sizes above 1, where part of each window's requests take that path (the merged fortio-server Service has endpoints on every member), latency and the p99 change against the baseline phase are not a cloud load balancer's; quote them from cloud clusters only.")"
+[[ -z "$KIND_PATH_WARNING" ]] || { echo "WARNING: ${KIND_PATH_WARNING}" >&2; REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}${KIND_PATH_WARNING}"; }
 # This report's own harness, every format; the results dir it reads is no change to it.
 REPORT_HARNESS_SHA_STR="$(report_harness_sha --exclude "$RESULTS_DIR")"
 
@@ -476,7 +489,8 @@ function conv_cell(w, ov) {
 	return w
 }'
 
-# metadata_kv: the run's metadata as KEY=value lines, in the order every format shows them.
+# metadata_kv: the run's metadata as KEY=value lines, in the order every format shows them,
+# the platform record (PLATFORM_VALUES) last.
 metadata_kv() {
 	printf '%s\n' \
 		"RUN_ID=${RUN_ID:-unknown}" \
@@ -514,6 +528,7 @@ metadata_kv() {
 		"ON_UNREACHABLE=${ON_UNREACHABLE_STR:-unknown}" \
 		"RUN_CONFIG=${RUN_CONFIG_STR:-unknown}" \
 		"RUN_CONFIG_SHA256=${RUN_CONFIG_SHA256_STR:-unknown}"
+	[[ -z "$PLATFORM_VALUES" ]] || printf '%s\n' "$PLATFORM_VALUES"
 }
 
 # emit_metadata_lines <prefix>: text and csv: "<prefix> KEY=value" per metadata key.
@@ -544,6 +559,7 @@ report_text() {
 	sweep_outcome_recorded "$RESULTS_DIR" text
 	emit_metadata_lines "#"
 	echo ""
+	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	reach_coverage_render text <(printf '%s' "$REACH_ROWS")
 	echo ""
 	printf '  %-9s | %-10s | %14s | %15s | %-10s | %-10s | %15s | %15s | %15s | %15s | %12s | %12s | %18s | %33s\n' \
@@ -565,6 +581,7 @@ report_text() {
 
 report_csv() {
 	emit_metadata_lines "#"
+	platform_warning_lines comment "$REPORT_WARNINGS"
 	[[ -z "$ROWS_HARNESS_WARNING" ]] || printf '# WARNING: %s\n' "$ROWS_HARNESS_WARNING"
 	config_multi_run_csv
 	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
@@ -590,6 +607,15 @@ report_json() {
 			churn_convergence_p99_worst: (if .[13] == "N/A" then null else .[13] end),
 			churn_convergence_overflow_runs: (.[14] | num)
 		})')"
+	# The objects that grow with the members (the platform record, the warnings, the remote
+	# coverage, the istiod diagnostics) go in as files (--slurpfile), never as arguments: Linux
+	# refuses to run a command with one argument string over 128 KiB, the record of about 360
+	# members.
+	local plat_json warn_json rc_json diag_json
+	plat_json="$(platform_report_lines json "$PLATFORM_VALUES")"
+	warn_json="$(platform_warning_lines json "$REPORT_WARNINGS")"
+	rc_json="$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))"
+	diag_json="$(istiod_diag_report json "$RESULTS_DIR")"
 	jq -n \
 		--arg run_id           "${RUN_ID:-unknown}" \
 		--arg harness_sha      "${HARNESS_SHA:-unknown}" \
@@ -626,15 +652,21 @@ report_json() {
 		--arg on_unreachable   "${ON_UNREACHABLE_STR:-unknown}" \
 		--arg run_config       "${RUN_CONFIG_STR:-unknown}" \
 		--arg run_config_sha256 "${RUN_CONFIG_SHA256_STR:-unknown}" \
-		--argjson remote_coverage "$(reach_coverage_render json <(printf '%s' "$REACH_ROWS"))" \
+		--slurpfile platform   <(printf '%s\n' "$plat_json") \
+		--slurpfile warnings   <(printf '%s\n' "$warn_json") \
+		--slurpfile remote_coverage <(printf '%s\n' "$rc_json") \
 		--argjson not_reachable "$REACH_NOT_REACHABLE" \
-		--argjson istiod_diag  "$(istiod_diag_report json "$RESULTS_DIR")" \
-		--argjson rows         "$rows" \
+		--slurpfile istiod_diag <(printf '%s\n' "$diag_json") \
+		--slurpfile rows       <(printf '%s\n' "$rows") \
 		--argjson pooled_runs  "$(config_multi_run_json)" \
 		--argjson pooled_sweep_outcomes "$(printf '%s' "$POOLED_SWEEP_OUTCOMES" | jq -Rn '[inputs]')" \
 		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
 		--arg rows_harness_warning "$ROWS_HARNESS_WARNING" \
-		'{pooled_runs: $pooled_runs, pooled_sweep_outcomes: $pooled_sweep_outcomes, sweep_outcome: $sweep_outcome, data_warnings: (if $rows_harness_warning == "" then [] else [$rows_harness_warning] end), metadata: {run_id: $run_id, harness_sha: $harness_sha, harness_content_key: $harness_content_key, report_harness_sha: $report_harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256}, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		'def one($x; $name): if ($x | length) == 1 then $x[0] else error("churn-dataplane report: \($name) is not one JSON value") end;
+		one($platform; "platform") as $platform | one($warnings; "warnings") as $warnings
+		| one($remote_coverage; "remote_coverage") as $remote_coverage | one($istiod_diag; "istiod_diag") as $istiod_diag
+		| one($rows; "rows") as $rows
+		| {pooled_runs: $pooled_runs, pooled_sweep_outcomes: $pooled_sweep_outcomes, sweep_outcome: $sweep_outcome, data_warnings: (if $rows_harness_warning == "" then [] else [$rows_harness_warning] end), metadata: ({run_id: $run_id, harness_sha: $harness_sha, harness_content_key: $harness_content_key, report_harness_sha: $report_harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256} + $platform), warnings: $warnings, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -698,6 +730,7 @@ report_md() {
 	echo ""
 	echo "# sweep-summary"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	[[ -z "$ROWS_HARNESS_WARNING" ]] || printf '> **Warning:** %s\n\n' "$ROWS_HARNESS_WARNING"
@@ -740,6 +773,7 @@ report_md() {
 	_md_kv ON_UNREACHABLE "${ON_UNREACHABLE_STR:-unknown}" plain
 	_md_kv RUN_CONFIG "${RUN_CONFIG_STR:-unknown}"
 	_md_kv RUN_CONFIG_SHA256 "${RUN_CONFIG_SHA256_STR:-unknown}"
+	platform_report_lines md "$PLATFORM_VALUES"
 	echo ""
 	reach_coverage_render md <(printf '%s' "$REACH_ROWS")
 	echo ""
@@ -764,6 +798,7 @@ report_charts() {
 	echo ""
 	echo "# Churn x Data-Plane — Charts"
 	echo ""
+	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
 	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	[[ -z "$ROWS_HARNESS_WARNING" ]] || printf '> **Warning:** %s\n\n' "$ROWS_HARNESS_WARNING"

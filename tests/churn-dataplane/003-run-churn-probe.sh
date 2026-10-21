@@ -32,6 +32,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
@@ -215,6 +217,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 [[ -n "$CHURN_RATE" ]] || die "--churn-rate is required"
 [[ "$CHURN_RATE" =~ ^[0-9]+$ ]] || die "--churn-rate must be a non-negative integer"
@@ -240,6 +243,9 @@ command -v curl >/dev/null 2>&1 || die "curl not found on PATH"
 
 REMOTES=()
 [[ -n "$REMOTE_CONTEXTS_CSV" ]] && split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
+# The source and its remotes, each under a name of its own in the platform record
+# (platform_members_check): refused here, before any cluster call, in a --dry-run too.
+platform_members_check "$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"}
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
 RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
@@ -282,6 +288,8 @@ mapfile -t IV_KV < <(istio_version_kv)
 # Bootstrap output file if missing.
 if [[ ! -f "$OUTPUT_FILE" ]]; then
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
+	# The platform record (tests/lib/platform.sh), before the window: inherited, else read here.
+	platform_probe "$ALL_CTXS_CSV"
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
@@ -307,7 +315,7 @@ if [[ ! -f "$OUTPUT_FILE" ]]; then
 		"REACH_ATTEMPTS=${REACH_ATTEMPTS:-3}" \
 		"REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}" \
 		"ON_UNREACHABLE=$ON_UNREACHABLE"
-	config_preamble_lines >> "$OUTPUT_FILE"
+	{ config_preamble_lines; platform_preamble_lines "$ALL_CTXS_CSV"; } >> "$OUTPUT_FILE"
 	printf 'run_id\tharness_sha\tcombo_id\tmesh_size\tchurn_rate\tphase\tduration_s\tqps_target\tqps_actual\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tdelta_p99_ms\tistiod_restarted\tstatus\tchurn_ops_attempted\tchurn_ops_succeeded\txds_pushes_delta\teds_pushes_delta\tpush_triggers_delta\tconvergence_p99_ms\tqueue_time_p99_ms\tpush_time_p99_ms\n' >> "$OUTPUT_FILE"
 fi
 

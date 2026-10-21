@@ -2,7 +2,10 @@
 # Sweep tuning profiles against one test suite. Pauses Argo CD auto-sync of the
 # Istio CR Applications, runs the suite's setup once, then measures the baseline and
 # each profile (apply -> settle -> probe -> revert), writes sweep-comparison.md,
-# runs the suite's cleanup and resumes Argo CD.
+# runs the suite's cleanup and resumes Argo CD. It refuses to start while a member
+# holds a tuning profile's objects or marker (a profile left applied). Each pass reads
+# its own platform record before its probes and again after them, so a profile undone
+# or istiod's settings put back during the pass show in its comparison.
 #
 # Usage:
 #   ./tests/tuning/003-run-tuning-sweep.sh --suite SUITE --gitops-context CTX [options]
@@ -21,7 +24,13 @@ trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
-source "${ROOT}/tests/tuning/lib/tuning.sh" # ctx_key
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe: masked addresses)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits (platform_drift_check: istiod's limits)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM), platform_tuning_objects_refuse, each pass's record
+# shellcheck disable=SC1091
+source "${ROOT}/tests/tuning/lib/tuning.sh"  # ctx_key, ctx_keys_distinct
 
 TUNING_DIR="${ROOT}/tests/tuning"
 SUITE=""
@@ -35,7 +44,7 @@ RUN_CLEANUP=1
 SETTLE_SEC="${TUNING_SETTLE_SEC:-60}"
 CHURN_RATE="${TUNING_COEXEC_CHURN_RATE:-5}"
 OUTPUT_BASE="${TUNING_DIR}/results"
-ROLLOUT_TIMEOUT=300
+ROLLOUT_TIMEOUT="${TUNING_ROLLOUT_TIMEOUT:-300}"
 DRY_RUN=0
 
 usage() {
@@ -43,15 +52,17 @@ usage() {
 Usage: $(basename "$0") --suite SUITE --gitops-context CTX [options]
 
 For the baseline and each profile: apply, wait --settle seconds, run the suite's
-probe, revert. Writes sweep-comparison.md into the sweep directory.
+probe, revert. Writes sweep-comparison.md into the sweep directory. Refuses to start
+while a profile is left applied: its state under the results directory, or its objects
+or marker on a member (./tests/tuning/005-cleanup.sh undoes both).
 
 Options:
   --suite SUITE          propagation | controlplane | dataplane | churn |
                          churn-dataplane (required).
   --contexts CSV         Mesh member contexts; the first is the source for suites
                          that take one (default: \$SETUP_CONTEXTS).
-  --gitops-context CTX   ACM hub context running OpenShift GitOps, where Argo CD
-                         auto-sync is paused for the run (default: \$TUNING_GITOPS_CONTEXT).
+  --gitops-context CTX   Hub context running Argo CD, where its auto-sync is paused
+                         for the run (default: \$TUNING_GITOPS_CONTEXT).
   --no-gitops-pause      Do not pause Argo CD (mesh not managed by GitOps).
   --profiles CSV         Profile names, each once (default: every profile in profiles/).
   --no-baseline          Skip the no-profile pass.
@@ -61,7 +72,8 @@ Options:
   --churn-rate N         churn-dataplane only: churn operations/s (default: ${CHURN_RATE}).
   --output-dir DIR       Results base; the run writes sweep-<RUN_ID>/ there
                          (default: tests/tuning/results).
-  --rollout-timeout N    Seconds to wait for istiod after apply/revert (default: ${ROLLOUT_TIMEOUT}).
+  --rollout-timeout N    Seconds to wait for istiod after apply/revert
+                         (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
   --dry-run              Print the plan, check the probe arguments with each probe's
                          own --dry-run, and exit. Touches no cluster.
   -h, --help             Show this help.
@@ -72,11 +84,21 @@ Environment:
   ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
   long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
   whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE.
+  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE,
+  TUNING_ROLLOUT_TIMEOUT.
+  006-gitops-pause.sh, which pauses Argo CD, reads TUNING_GITOPS_NAMESPACE (the Argo CD
+  namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
+  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET}).
+  TEST_PLATFORM (config/options.env; auto, kubernetes or openshift; now ${TEST_PLATFORM:-auto}):
+  kubernetes or openshift is taken as the platform instead of asking each cluster, for the probe
+  suite's chart overlay and, with TUNING_GITOPS_NAMESPACE empty, for the hub whose Argo CD
+  namespace 006 pauses in (TUNING_GITOPS_NAMESPACE overrides that). The platform record of each
+  pass still asks every member what it serves.
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
   step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
   are read at once. Environment only (config/options.env).
+$(platform_help_lines reads)
 
 Exit codes:
   0  every pass (baseline and each profile) ran its probe
@@ -158,22 +180,29 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 case "$SUITE" in
 propagation | controlplane | dataplane | churn | churn-dataplane) ;;
 "") die "--suite is required (propagation, controlplane, dataplane, churn, churn-dataplane)" ;;
 *) die "unknown suite: $SUITE (propagation, controlplane, dataplane, churn, churn-dataplane)" ;;
 esac
 SUITE_DIR="${ROOT}/tests/${SUITE}"
-is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer"
-is_pos_int "$CHURN_RATE" || die "--churn-rate must be a positive integer"
-is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+is_nonneg_int "$SETTLE_SEC" || die "--settle (or TUNING_SETTLE_SEC) must be a non-negative integer; got '${SETTLE_SEC}'"
+is_pos_int "$CHURN_RATE" || die "--churn-rate (or TUNING_COEXEC_CHURN_RATE) must be a positive integer; got '${CHURN_RATE}'"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
 if ((GITOPS_PAUSE)) && [[ -z "$GITOPS_CTX" ]]; then
-	die "--gitops-context is required: the ACM hub context whose Argo CD manages the Istio CRs (or pass --no-gitops-pause)"
+	die "--gitops-context is required: the hub context whose Argo CD manages the Istio CRs (or pass --no-gitops-pause)"
 fi
 
 CONTEXTS=()
 split_contexts "${CONTEXTS_CSV:-${SETUP_CONTEXTS:-}}" CONTEXTS "--contexts (or SETUP_CONTEXTS)"
 ((${#CONTEXTS[@]})) || die "no contexts (set --contexts or SETUP_CONTEXTS)"
+# What 001-apply-profile.sh refuses for every profile pass, refused before the setup and the
+# baseline pass run.
+ctx_keys_distinct "${CONTEXTS[@]}"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 CONTEXTS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 SOURCE_CTX="${CONTEXTS[0]}"
 REMOTE_CSV="$(IFS=,; echo "${CONTEXTS[*]:1}")"
@@ -187,15 +216,18 @@ else
 	done
 fi
 ((${#PROFILES[@]})) || die "no profiles to sweep"
+command -v python3 >/dev/null ||
+	die "python3 is required (and PyYAML for a run): tests/tuning/lib/tuning.py checks each profile's name and applies it"
+declare -A LISTED=()
 for i in "${!PROFILES[@]}"; do
 	PROFILES[i]="${PROFILES[i]%.yaml}"
 	[[ -f "${TUNING_DIR}/profiles/${PROFILES[i]}.yaml" ]] || die "profile not found: ${PROFILES[i]} (see tests/tuning/profiles/)"
-	# Each pass writes to a directory named after its profile, so a second one would mix
-	# into the first's.
-	for ((j = 0; j < i; j++)); do
-		[[ "${PROFILES[j]}" != "${PROFILES[i]}" ]] \
-			|| die "profile listed twice in --profiles: ${PROFILES[i]} (each pass writes to a directory named after its profile): list each once"
-	done
+	# Each pass has its own directory: a name listed twice, or baseline (the pass without a
+	# profile), would share one. tuning.py's rule, which 001 applies too.
+	[[ -z "${LISTED[${PROFILES[i]}]+x}" ]] \
+		|| die "profile listed twice in --profiles: ${PROFILES[i]} (each pass writes to a directory named after its profile): list each once"
+	LISTED[${PROFILES[i]}]=1
+	python3 -I "${TUNING_DIR}/lib/tuning.py" check-name "${PROFILES[i]}" || exit 1
 done
 PASSES=()
 ((INCLUDE_BASELINE)) && PASSES+=(baseline)
@@ -279,6 +311,7 @@ done
 if ((DRY_RUN)); then
 	echo ""
 	echo "--- Plan ---"
+	echo "# check that no member holds a tuning profile's objects or marker (label ${PLATFORM_TUNING_LABEL}); stop if one does"
 	if ((GITOPS_PAUSE)); then
 		show "${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE"
 	fi
@@ -293,8 +326,10 @@ if ((DRY_RUN)); then
 			echo "kubectl scale deployment -l churn-target=true --replicas=${CHURN_BASE_REPLICAS:-1}  # each context"
 		fi
 		echo "sleep ${SETTLE_SEC}"
+		show "# read the platform record of every member into ${SWEEP_DIR}/${p}/platform-record.txt, and the tuning levers on ${SOURCE_CTX}"
 		n=1
 		while probe_argv "$n" "$p" "${SWEEP_DIR}/${p}"; do show "${PROBE_ARGV[@]}"; n=$((n + 1)); done
+		show "# read it again; what changed during the pass, and what it could not compare, goes to ${SWEEP_DIR}/${p}/platform-drift.txt"
 		if [[ "$p" != baseline ]]; then
 			show "${TUNING_DIR}/002-revert-profile.sh" --state-dir "${SWEEP_DIR}/${p}/state" \
 				--rollout-timeout "$ROLLOUT_TIMEOUT"
@@ -332,6 +367,9 @@ python3 -I -c 'import yaml' 2>/dev/null \
 [[ "$SUITE" != controlplane ]] || require_timeout
 KUBECTL=()
 resolve_kubectl KUBECTL
+# A profile left applied by a run whose state is not under the results dirs above (another
+# checkout, a deleted dir), or objects applied by hand, would contaminate every pass too.
+platform_tuning_objects_refuse "$CONTEXTS_CSV" "every pass of this sweep (the baseline included)"
 # The Istio version every member runs, read once before the first profile or setup
 # and exported, so every probe of every pass records it (ISTIO_VERSION_CHECK=fail stops
 # here on a mismatch, before anything changes).
@@ -400,13 +438,6 @@ if ((GITOPS_PAUSE)); then
 	sweep_step "${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE" \
 		|| die "could not pause Argo CD auto-sync"
 fi
-
-while IFS= read -r kv; do
-	case "$kv" in
-	TUNING_BASELINE=*) TUNING_BASELINE="${kv#*=}" ;;
-	SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${kv#*=}" ;;
-	esac
-done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
 
 # The sweep edits the Istio CR itself (each profile's apply and revert raise the Istio CR's
 # and the active IstioRevision's generations), so it reads them again around each of its
@@ -557,6 +588,20 @@ run_pass() {
 	# The proxies connected now (the pass's sidecars, once old istiod pods are gone): what
 	# its probes record as ISTIO_PROXY_VERSIONS.
 	istio_version_refresh --proxies-only "after the settle of pass ${label}" "$CONTEXTS_CSV" "${KUBECTL[@]}"
+	# This pass's own platform record (a profile changes istiod's env and its objects), read once
+	# for its probes, which reuse it (platform-record.txt in the pass dir), and its tuning levers,
+	# which its TSVs record; both read again after the probes: a profile undone, istiod's
+	# settings put back, a lever, an istiod limit or a Kubernetes version changed during the pass
+	# go to its platform-drift.txt, which 004 reads for the pass.
+	platform_probe_reset
+	platform_probe "$CONTEXTS_CSV"
+	platform_probe_share "$dir"
+	while IFS= read -r kv; do
+		case "$kv" in
+		TUNING_BASELINE=*) TUNING_BASELINE="${kv#*=}" ;;
+		SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${kv#*=}" ;;
+		esac
+	done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
 	while probe_argv "$n" "$label" "$dir"; do
 		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
 		rc=0
@@ -566,10 +611,11 @@ run_pass() {
 		if ((rc != 0)); then
 			echo "warn: probe for ${label} exited ${rc}; marking PROBE_FAILED" >&2
 			echo "PROBE_FAILED rc=${rc} $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${dir}/PROBE_FAILED"
-			return 0
+			break
 		fi
 		n=$((n + 1))
 	done
+	platform_drift_check "$dir" "$CONTEXTS_CSV" pass
 }
 
 ABORTED=0 ABORT_REASON=""

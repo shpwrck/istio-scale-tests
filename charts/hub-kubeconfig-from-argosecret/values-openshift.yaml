@@ -1,0 +1,6 @@
+# Platform overlay: listed after values.yaml when the platform is openshift.
+sourceSecretsNamespace: openshift-gitops
+rbac:
+  argocd:
+    namespace: openshift-gitops
+    serviceAccountName: openshift-gitops-argocd-application-controller

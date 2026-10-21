@@ -1,10 +1,31 @@
-# Shared defaults. Each values-<preset>.yaml sets only what differs:
-# identity, RBAC role names, applicationSet.name, destination and template.
-applicationSetNamespace: openshift-gitops
-applicationSetControllerNamespace: openshift-gitops
+# Shared defaults, for the kubernetes platform (upstream Argo CD in argocd). Each
+# values-<preset>.yaml sets only what differs: identity, RBAC role names,
+# applicationSet.name, destination and template. Callers list platform-<platform>.yaml
+# after the preset: platform-kubernetes.yaml changes nothing, platform-openshift.yaml
+# switches to OpenShift GitOps and the ACM Placement.
+applicationSetNamespace: argocd
+applicationSetControllerNamespace: argocd
 
 identity:
   component: ""
+
+# Where the mesh members come from:
+#   clusters: the Argo CD cluster Secrets that match clusters.selector. terraform/platform
+#     labels each mesh member's Secret istio-mesh-member=true.
+#   clusterDecisionResource: the ACM PlacementDecisions of placement.name (openshift).
+# Presets write the member's cluster name as {{clusterName}}; with the clusters generator it
+# becomes {{name}}, the cluster Secret's name field.
+generator: clusters
+
+# false: no Application per mesh member, only inClusterGenerator (hub-only presets).
+members:
+  enabled: true
+
+clusters:
+  # Required: an empty selector would also select the hub (in-cluster).
+  selector:
+    matchLabels:
+      istio-mesh-member: "true"
 
 placement:
   name: acm-openshift-gitops-placement
@@ -17,44 +38,58 @@ inClusterGenerator:
   enabled: false
   clusterName: in-cluster
 
-# Created by Terraform (kubernetes_manifest.placement_generator_configmap).
+# generator clusterDecisionResource only. Created by Terraform
+# (kubernetes_manifest.placement_generator_configmap).
 generatorConfigMap:
   name: acm-gitops-placement-generator
 
 clusterDecisionResource:
-  enabled: true
   requeueAfterSeconds: 30
   # Optional override; defaults to
   # cluster.open-cluster-management.io/placement: <placement.name>
   labelSelector: {}
 
+# generator clusterDecisionResource only: lets the ApplicationSet controller read the
+# PlacementDecisions.
 placementRbac:
   create: true
   roleName: ""
   roleBindingName: ""
-  applicationSetServiceAccountName: openshift-gitops-applicationset-controller
+  applicationSetServiceAccountName: argocd-applicationset-controller
 
 argocdApplicationControllerRbac:
   create: true
   roleName: ""
   roleBindingName: ""
-  serviceAccountName: openshift-gitops-argocd-application-controller
-  serviceAccountNamespace: openshift-gitops
+  serviceAccountName: argocd-application-controller
+  serviceAccountNamespace: argocd
 
 applicationSet:
   name: ""
 
 destination:
-  # clusterName: every Placement cluster by name; inClusterServer: hub API only.
+  # clusterName: every mesh member by name; inClusterServer: hub API only.
   mode: clusterName
   namespace: ""
 
 template:
   applicationNameSuffix: ""
   source:
+    # A chart in this repo (repo.url at repo.revision)...
     path: ""
+    # ...or a chart from a Helm repository: repoURL, chart and targetRevision (the chart
+    # version) together, instead of path.
+    repoURL: ""
+    chart: ""
+    targetRevision: ""
     # releaseName (clusterName mode only), parameters, valuesObject.
     helm: {}
+  # Extra syncPolicy.syncOptions of the generated Applications (e.g. CreateNamespace=true).
+  syncOptions: []
+
+# Value files of the member chart (charts in this repo only, relative to its directory),
+# listed in every generated Application. platform-openshift.yaml sets [values-openshift.yaml].
+memberValueFiles: []
 
 repo:
   url: ""

@@ -181,9 +181,17 @@ STUB
 }
 
 @test "a tuning sweep that stops after its start records the stop (die: its reason, exit 1, UNIT=passes) and what to do, not a sweep that has not finished" {
-	local res="${BATS_TEST_TMPDIR}/res-tuning" d
-	# The suite setup fails against the empty kubeconfig: the sweep stops (exit 1) after its start.
-	CONTROLPLANE_APPLY_ATTEMPTS=1 KUBECONFIG="$EK" run bash "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" --suite controlplane \
+	local res="${BATS_TEST_TMPDIR}/res-tuning" d tb="${BATS_TEST_TMPDIR}/tbin"
+	# The suite setup fails (a kubectl that lists no tuning profile objects and fails every
+	# other call, as against the empty kubeconfig): the sweep stops (exit 1) after its start.
+	mkdir -p "$tb"
+	cat > "${tb}/kubectl" <<'STUB'
+#!/bin/sh
+case "$*" in *" -l istio-scale-tests/tuning-profile"*) echo '{"kind":"List","items":[]}'; exit 0 ;; esac
+exit 1
+STUB
+	chmod +x "${tb}/kubectl"
+	PATH="${tb}:${PATH}" CONTROLPLANE_APPLY_ATTEMPTS=1 KUBECONFIG="$EK" run bash "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" --suite controlplane \
 		--contexts ci-a --no-gitops-pause --no-baseline --profiles 01-push-throttling --settle 0 --rollout-timeout 1 --output-dir "$res"
 	assert_failure 1
 	assert_output --partial "error: suite setup failed"

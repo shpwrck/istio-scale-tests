@@ -14,7 +14,8 @@
 #
 # Builds on tests/lib/fortio.sh, the one fortio JSON parser (PL41): this file only
 # classifies its output and aggregates coverage. Requires common.sh (split_csv, MD_CELL_AWK,
-# is_pos_int, is_nonneg_int), fortio.sh, config.sh (config_preamble_lines), jq, awk, sed.
+# is_pos_int, is_nonneg_int), fortio.sh, config.sh (config_preamble_lines), platform.sh
+# (platform_preamble_lines, for reach_write_header), jq, awk, sed.
 # In-process helpers never call die (PL40): a failed exec is an UNKNOWN row, and a
 # missing or malformed reach file renders as "no reachability data".
 #
@@ -69,6 +70,8 @@
 #
 # Coverage rows (reach_coverage_rows, tab-separated):
 #   mesh_size source_ctx target_ctx checks reachable_checks coverage_status top_code detail
+# or, for reach files whose rows are all local (a mesh of one member: no remote to check),
+# the one line REACH_NO_REMOTE_LINE.
 # coverage_status: REACHABLE (every check), FLAPPING (some), DEGRADED (none, some
 # 200s), UNREACHABLE (none, no 200s), UNKNOWN (no check could run). top_code and
 # detail come from the latest check that was not REACHABLE.
@@ -178,16 +181,19 @@ reach_classify() {
 # colon-separated hex groups (an uncompressed address has 8). Each unbracketed form
 # starts at the text start or after a non-alphanumeric character, so `code:-1`,
 # HH:MM:SS (3 groups), Envoy::Http and 268435581:SSL survive. Reason tokens such as
-# CERTIFICATE_VERIFY_FAILED have no dots and survive.
+# CERTIFICATE_VERIFY_FAILED have no dots and survive, and so does Go's Client.Timeout (kubectl's
+# "request canceled (Client.Timeout exceeded ...)"), which names no host.
 # shellcheck disable=SC2329
 reach_sanitize() {
 	local out
 	out="$(printf '%s' "$1" | tr '\t\r\n' '   ' | sed -E \
+		-e 's/Client\.Timeout/Client@Timeout/g' \
 		-e 's/\[[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(%[0-9A-Za-z_.-]+)?]/<ip>/g' \
 		-e 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g' \
 		-e 's/(^|[^0-9A-Za-z_])[0-9A-Fa-f:]*([0-9A-Fa-f]::|::[0-9A-Fa-f])([0-9A-Fa-f:]*[0-9A-Fa-f])?(%[0-9A-Za-z_.-]+)?/\1<ip>/g' \
 		-e 's/(^|[^0-9A-Za-z_])([0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{1,4}(%[0-9A-Za-z_.-]+)?/\1<ip>/g' \
 		-e 's/([A-Za-z0-9_-]+\.)+[A-Za-z][A-Za-z0-9-]*/<host>/g' \
+		-e 's/Client@Timeout/Client.Timeout/g' \
 		-e 's/ +/ /g' -e 's/^ //' -e 's/ $//' 2>/dev/null)" || out=""
 	[[ -n "$out" ]] || out="-"
 	printf '%s\n' "${out:0:256}"
@@ -230,18 +236,30 @@ reach_body_line() {
 	printf '%s\n' "$line"
 }
 
-# reach_write_header <tsv> <K=V...>: the only writer of a reach TSV's preamble and
-# header, and only when the file does not exist yet (PL36). REACH_SCHEMA, the
-# REACH_* knobs and the run config (RUN_CONFIG, RUN_CONFIG_SHA256: config.sh) are
-# always written; callers add RUN_ID, HARNESS_SHA, SUITE, NAMESPACE and ON_UNREACHABLE.
-# Returns 1 (the caller reports the check as not run) when config.sh is not sourced.
+# reach_write_header <tsv> [--contexts CSV] <K=V...>: the only writer of a reach TSV's
+# preamble and header, and only when the file does not exist yet (PL36). REACH_SCHEMA,
+# the REACH_* knobs, the run config (RUN_CONFIG, RUN_CONFIG_SHA256: config.sh) and the
+# platform record (platform.sh) are always written: of the members in --contexts (a
+# file the whole sweep appends to: every member it covers), else of the members the
+# run read (platform_probed_contexts). Callers add RUN_ID, HARNESS_SHA, SUITE,
+# NAMESPACE and ON_UNREACHABLE.
+# Returns 1 (the caller reports the check as not run) when config.sh or platform.sh
+# is not sourced.
 # shellcheck disable=SC2329
 reach_write_header() {
-	local tsv="$1" kv
+	local tsv="$1" kv _rw_ctxs=""
 	shift
+	if [[ "${1:-}" == --contexts ]]; then
+		_rw_ctxs="${2:-}"
+		shift 2
+	fi
 	[[ -e "$tsv" ]] && return 0
 	if ! declare -F config_preamble_lines >/dev/null; then
 		echo "reach_write_header: config_preamble_lines missing (source tests/lib/config.sh)" >&2
+		return 1
+	fi
+	if ! declare -F platform_preamble_lines >/dev/null; then
+		echo "reach_write_header: platform_preamble_lines missing (source tests/lib/platform.sh)" >&2
 		return 1
 	fi
 	{
@@ -249,6 +267,7 @@ reach_write_header() {
 		echo "# REACH_SCHEMA=${REACH_SCHEMA}"
 		for kv in "$@"; do echo "# ${kv}"; done
 		config_preamble_lines
+		platform_preamble_lines "${_rw_ctxs:-$(platform_probed_contexts)}"
 		echo "# REACH_REQUESTS=${REACH_REQUESTS:-10}"
 		echo "# REACH_QPS=${REACH_QPS:-10}"
 		echo "# REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}"
@@ -412,10 +431,15 @@ reach_print_summary() {
 		}' "$tsv" >&2 2>/dev/null || true
 }
 
+# The line reach_coverage_rows prints for reach files that hold local rows only (every run had a
+# mesh of one member, so there was no remote to check); reach_coverage_render says so.
+REACH_NO_REMOTE_LINE="# no remote target"
+
 # reach_coverage_rows <dir|file>...: every reach-*.tsv under the given directories
 # (and every given file), remote rows only, aggregated by (mesh_size, source_ctx,
 # target_ctx) in mesh-size order. Files are read in name order (reach-<RUN_ID>
-# sorts by time), so "latest" is the last row read.
+# sorts by time), so "latest" is the last row read. Files with local rows only:
+# REACH_NO_REMOTE_LINE; none, or no row at all: nothing.
 # shellcheck disable=SC2329
 reach_coverage_rows() {
 	local p f
@@ -428,9 +452,10 @@ reach_coverage_rows() {
 		fi
 	done
 	((${#files[@]})) || return 0
-	awk -F'\t' '
+	awk -F'\t' -v none="$REACH_NO_REMOTE_LINE" '
 		BEGIN { OFS = "\t" }
-		/^#/ || $1 == "run_id" || NF < 13 || $6 != "remote" { next }
+		/^#/ || $1 == "run_id" || NF < 13 { next }
+		$6 != "remote" { if ($6 == "local") loc++; next }
 		{
 			k = $3 SUBSEP $4 SUBSEP $5
 			if (!(k in checks)) { keys[++n] = k; ms[n] = $3 }
@@ -442,6 +467,7 @@ reach_coverage_rows() {
 			}
 		}
 		END {
+			if (n == 0 && loc > 0) { print none; exit }
 			for (i = 2; i <= n; i++) {
 				t = keys[i]; tm = ms[i]; j = i - 1
 				while (j >= 1 && ms[j] + 0 > tm + 0) { keys[j + 1] = keys[j]; ms[j + 1] = ms[j]; j-- }
@@ -483,6 +509,19 @@ reach_coverage_render() {
 			;;
 		csv) echo "# REMOTE_COVERAGE=no reachability data" ;;
 		json) echo '{"remote_coverage":{"data":false,"not_reachable":0,"groups":[]}}' ;;
+		esac
+		return 0
+	fi
+	# The check ran, but every run had a mesh of one member: nothing to cover.
+	if [[ "$rows" == "$REACH_NO_REMOTE_LINE" ]]; then
+		case "$fmt" in
+		text) echo "REMOTE COVERAGE: no remote to check (every run had a mesh of one member: its reach-*.tsv checks the source only)" ;;
+		md)
+			# shellcheck disable=SC2016  # literal backticks for markdown code
+			printf '## Remote coverage\n\nNo remote to check: every run had a mesh of one member, so its `reach-*.tsv` checks the source only.\n'
+			;;
+		csv) echo "# REMOTE_COVERAGE=no remote to check (a mesh of one member)" ;;
+		json) echo '{"remote_coverage":{"data":true,"not_reachable":0,"groups":[]}}' ;;
 		esac
 		return 0
 	fi

@@ -49,6 +49,8 @@ source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines; the dry-run's overlay
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
@@ -265,6 +267,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 is_pos_int "$POLL_INTERVAL_MS" || die "--poll-interval-ms must be a positive integer (got: $POLL_INTERVAL_MS)"
 is_pos_int "$ITERATIONS" || die "--iterations must be a positive integer (got: $ITERATIONS)"
@@ -284,6 +287,9 @@ REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
+# The source and its remotes, each under a name of its own in the platform record
+# (platform_members_check): refused here, before any cluster call, in a --dry-run too.
+platform_members_check "$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"}
 
 if [[ -z "$MESH_SIZE" ]]; then
 	MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
@@ -303,8 +309,10 @@ if ((DRY_RUN)); then
 	echo "001 creates the backer and canary Service; at t0 this probe only labels the"
 	echo "backer pod. No cluster is contacted in --dry-run."
 	echo ""
+	# The overlay 001 would add: TEST_PLATFORM's, else none (the Kubernetes render, no cluster call).
+	platform_chart_args "$CHART_DIR" "$SOURCE_CTX" PLATFORM_ARGS || exit 1
 	echo "--- Backer Deployment (created by 001, shown for reference) ---"
-	helm template propagation-test "$CHART_DIR" \
+	helm template propagation-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
 		--set clusterName="$SOURCE_CTX" \
 		--set namespace="$NS" \
 		--set backer.enabled=true \
@@ -313,7 +321,7 @@ if ((DRY_RUN)); then
 		--show-only templates/canary-deployment.yaml
 	echo ""
 	echo "--- Canary Service (selects on active label; here rendered ACTIVE) ---"
-	helm template propagation-test "$CHART_DIR" \
+	helm template propagation-test "$CHART_DIR" ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} \
 		--set clusterName="$SOURCE_CTX" \
 		--set namespace="$NS" \
 		--set backer.enabled=true \
@@ -342,6 +350,8 @@ KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KU
 # runs this probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a
 # mismatch.
 istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
+# The platform record (tests/lib/platform.sh): inherited from 006, else read here.
+platform_probe "$(IFS=,; echo "${ALL_CTXS[*]}")"
 
 # Preflight every context (tests/lib/fanout.sh): require >= 1 Running istiod pod.
 # Multi-replica istiod is supported via the per-pod fanout below. Record the
@@ -391,6 +401,7 @@ if ((WRITE_TSV)); then
 		echo "# FANOUT_METRICS_TIMEOUT=${METRICS_TIMEOUT}"
 		echo "# BACKER_IMAGE=${BACKER_IMAGE}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${ALL_CTXS[*]}")"
 		echo "# DATE=$(date -u -Iseconds)"
 	} > "$TSV_FILE"
 	# Columns (tab-separated). Old p1/p2/p3 cols preserved for back-compat with
@@ -1876,6 +1887,7 @@ md_cell -v _md_rmt "${REMOTES[*]:-none}"
 	echo "| Run ID | \`${RUN_ID}\` |"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+	platform_md_row "$(IFS=,; echo "${ALL_CTXS[*]}")"
 	echo "| Istio version | ${_md_istio} |"
 	echo "| Kube versions | \`${_md_kube}\` |"
 	echo "| istiod replicas | \`${_md_repl}\` |"

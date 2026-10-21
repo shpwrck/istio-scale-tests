@@ -36,6 +36,8 @@ source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fortio.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # REACH_EXIT_CODE, reach_validate
@@ -110,6 +112,7 @@ Environment:
   DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
   The sweep checks every numeric one of them, and the flags that set them, before the
   first setup, --dry-run included.
+$(platform_help_lines all)
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
   step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
@@ -246,6 +249,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
+
 # The probe window 002 gets as flags; from the environment or --config these reach 002
 # unchecked, and a bad one fails every probe.
 is_pos_int "$DURATION" || die "--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '$DURATION'"
@@ -272,6 +277,9 @@ else
 	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
@@ -315,10 +323,8 @@ TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 KUBECTL=()
 if ((! DRY_RUN)); then
-	if command -v oc >/dev/null 2>&1; then
-		KUBECTL=(oc)
-	elif command -v kubectl >/dev/null 2>&1; then
-		KUBECTL=(kubectl)
+	if command -v kubectl >/dev/null 2>&1 || command -v oc >/dev/null 2>&1; then
+		resolve_kubectl KUBECTL
 	fi
 fi
 # The Istio version every member runs, read once before the first setup and
@@ -336,6 +342,12 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
+# The platform record of every member, read once here; each 002 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the placeholders write it
+# (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$OUTPUT_DIR"
+platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (one qps=0, class=na row; counted in
@@ -364,6 +376,7 @@ emit_dataplane_placeholder() {
 		echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 		echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# 17-col header (matches 002-run-latency-probe.sh).
 		printf 'run_id\tmesh_size\tsource_ctx\ttarget_ctx\tqps_target\tqps_actual\tconnections\tduration_s\tp50_ms\tp90_ms\tp99_ms\tp999_ms\tmax_ms\tstatus\tpct_200\tistiod_restarted\ttarget_class\n'
@@ -525,6 +538,8 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete."
 	exit 0
 fi
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$OUTPUT_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "  Sweep finished"

@@ -5,6 +5,10 @@ istioNamespace: istio-system
 # (it holds other cluster monitoring settings); edit it instead.
 enableUserWorkloadMonitoring: false
 
+# Extra labels on the ServiceMonitor and the PrometheusRule, for a Prometheus that selects them
+# by label (kube-prometheus-stack: release: <its release name>).
+extraLabels: {}
+
 serviceMonitor:
   enabled: true
   interval: 30s

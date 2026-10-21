@@ -19,6 +19,8 @@ config_preload churn-dataplane "$@"
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM)
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -76,6 +78,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 is_pos_int "$TIMEOUT_SEC" || die "--timeout must be a positive integer"
 is_pos_int "$FAST_DRAIN_GRACE_SEC" || die "--grace-period must be a positive integer (0 would SIGKILL)"
 

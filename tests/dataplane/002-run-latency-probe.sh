@@ -51,6 +51,8 @@ source "${ROOT}/tests/lib/timestamp.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/metrics.sh"  # extract_gauge (used by fanout_restart_status)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/fanout.sh"
@@ -258,6 +260,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 # The flag or its default (the environment, --config): checked once, before any cluster read.
 is_pos_int "$DURATION" || die "--duration (or DATAPLANE_DURATION_SEC) must be a positive integer; got '$DURATION'"
@@ -277,6 +280,9 @@ REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
+# The source and its remotes, each under a name of its own in the platform record
+# (platform_members_check): refused here, before any cluster call, in a --dry-run too.
+platform_members_check "$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"}
 
 QPS_ARR=()
 split_csv "$QPS_LEVELS" QPS_ARR
@@ -324,6 +330,8 @@ KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${ALL_CTXS[*]}")" "${KU
 # The Istio version the members run, before any load (inherited when 003 runs this
 # probe; read here when it runs alone). ISTIO_VERSION_CHECK=fail stops on a mismatch.
 istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
+# The platform record (tests/lib/platform.sh), before any load: inherited from 003, else read here.
+platform_probe "$(IFS=,; echo "${ALL_CTXS[*]}")"
 
 # server_replicas_csv: "<ctx>=<ready>/<spec>,..." for the dataplane-server
 # Deployment on every context, read live and concurrently (PL39) before any load.
@@ -413,6 +421,7 @@ trap cleanup_all EXIT
 	echo "# REACH_RETRY_SEC=${REACH_RETRY_SEC:-10}"
 	echo "# ON_UNREACHABLE=${ON_UNREACHABLE}"
 	config_preamble_lines
+	platform_preamble_lines "$(IFS=,; echo "${ALL_CTXS[*]}")"
 } > "$TSV_FILE"
 # New TSV columns appended at the end of the old schema:
 #   pct_200, istiod_restarted, target_class
@@ -541,6 +550,7 @@ write_run_md() {
 		echo "| Date | $(date -u -Iseconds) |"
 		echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 		echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+		platform_md_row "$(IFS=,; echo "${ALL_CTXS[*]}")"
 		echo "| Istio version | $(istio_version_label) |"
 		echo "| Fortio image | \`${FORTIO_IMAGE}\` |"
 		echo "| Source | ${SOURCE_CTX} |"

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Revert a profile applied by 001-apply-profile.sh: delete its resources and
 # merge-patch the Istio CR back to the saved values at every path the profile set.
-# Then check that those paths and resources match the pre-apply state. Before it changes
-# anything, it compares the members' Istio CR and IstioRevision generations with the ones
-# 001 recorded once its apply settled: one that moved means something else edited the
-# Istio CR during the pass (warned, and written to istio-edited-during-pass in the state
-# dir, which 003-run-tuning-sweep.sh reports as a problem); the revert still runs. A member
-# whose generations could not be read, now or then, is not compared: warned, and written to
+# Then check that those paths and resources match the pre-apply state, and only then delete
+# the profile's marker ConfigMap on each member (a failed revert keeps it, so every platform
+# record and the next tuning run see the profile still applied). Before it changes anything,
+# it compares the members' Istio CR and IstioRevision generations with the ones 001 recorded
+# once its apply settled: one that moved means something else edited the Istio CR during the
+# pass (warned, and written to istio-edited-during-pass in the state dir, which
+# 003-run-tuning-sweep.sh reports as a problem); the revert still runs. A member whose
+# generations could not be read, now or then, is not compared: warned, and written to
 # istio-generations-unchecked, which 003 notes. It writes revert-started in the state dir
 # before its first change: a re-run (after a revert that stopped partway) skips that
-# comparison, since its own first run may have patched the Istio CR already, and keeps
-# what that run found.
+# comparison, since its own first run may have patched the Istio CR already, and keeps what
+# that run found.
 #
 # Usage:
 #   ./tests/tuning/002-revert-profile.sh --state-dir DIR [--contexts CSV] [options]
@@ -30,7 +32,7 @@ source "${ROOT}/tests/tuning/lib/tuning.sh"
 HELPER="${ROOT}/tests/tuning/lib/tuning.py"
 STATE_DIR=""
 CONTEXTS_CSV=""
-ROLLOUT_TIMEOUT=300
+ROLLOUT_TIMEOUT="${TUNING_ROLLOUT_TIMEOUT:-300}"
 DRY_RUN=0
 NS_PROBE="${TUNING_REVERT_HEALTHCHECK_NS_PROBE:-0}"
 NS_PROBE_TIMEOUT="${TUNING_REVERT_HEALTHCHECK_TIMEOUT:-60}"
@@ -39,14 +41,17 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --state-dir DIR [options]
 
-Undo a profile applied by 001-apply-profile.sh and check the result.
+Undo a profile applied by 001-apply-profile.sh and check the result. Only when the
+check passes does it delete the profile's marker ConfigMap on each member, so a failed
+revert stays visible to every platform record and blocks the next tuning run.
 
 Options:
   --state-dir DIR        State directory written by 001-apply-profile.sh (required).
   --contexts CSV         Contexts to revert (default: the contexts recorded at apply).
   --rollout-timeout N    Seconds to wait for the operator and istiod rollout
-                         (default: ${ROLLOUT_TIMEOUT}).
-  --dry-run              Print the revert patches and resources; do not touch clusters.
+                         (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
+  --dry-run              Print the revert patches, resources and markers; do not touch
+                         clusters.
   -h, --help             Show this help.
 
 Environment:
@@ -91,7 +96,7 @@ done
 
 [[ -n "$STATE_DIR" ]] || die "--state-dir is required"
 [[ -d "$STATE_DIR" ]] || die "state directory not found: $STATE_DIR"
-is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout must be a positive integer"
+is_pos_int "$ROLLOUT_TIMEOUT" || die "--rollout-timeout (or TUNING_ROLLOUT_TIMEOUT) must be a positive integer; got '${ROLLOUT_TIMEOUT}'"
 if [[ -z "$CONTEXTS_CSV" && -f "${STATE_DIR}/contexts" ]]; then
 	CONTEXTS_CSV="$(<"${STATE_DIR}/contexts")"
 fi
@@ -119,6 +124,16 @@ if ((DRY_RUN)); then
 	done
 	echo "--- Resources to delete ---"
 	if ((HAS_RESOURCES)); then cat "$RESOURCES"; else echo "(none)"; fi
+	echo "--- Markers to delete once the check passes ---"
+	for ctx in "${CONTEXTS[@]}"; do
+		f="${STATE_DIR}/marker-$(ctx_key "$ctx").json"
+		if [[ -f "$f" ]]; then
+			read -r m_kind m_name m_ns < <(python3 -I "$HELPER" resources "$f")
+			echo "${ctx}: ${m_kind} ${m_ns}/${m_name}"
+		else
+			echo "${ctx}: (none recorded: applied before profiles had markers)"
+		fi
+	done
 	echo "--- Dry run: no cluster changes ---"
 	exit 0
 fi
@@ -216,8 +231,9 @@ for ctx in "${CONTEXTS[@]}"; do
 	fi
 done
 
+deadline=$(($(date +%s) + ROLLOUT_TIMEOUT))
 for ctx in ${PATCHED[@]+"${PATCHED[@]}"}; do
-	wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" || fail=1
+	wait_for_istiod "$ctx" "$ROLLOUT_TIMEOUT" "$deadline" || fail=1
 done
 
 echo "--- Post-revert check ---"
@@ -251,6 +267,22 @@ for ctx in "${CONTEXTS[@]}"; do
 		fi
 	fi
 done
+
+# The markers last, once everything else is back (a state dir from before the markers has none).
+if ((fail == 0)); then
+	for ctx in "${CONTEXTS[@]}"; do
+		marker="${STATE_DIR}/marker-$(ctx_key "$ctx").json"
+		[[ -f "$marker" ]] || continue
+		left=""
+		if "${KUBECTL[@]}" --context="$ctx" delete --ignore-not-found -f "$marker" >/dev/null &&
+			left="$("${KUBECTL[@]}" --context="$ctx" get --ignore-not-found -f "$marker" -o name 2>&1)" && [[ -z "$left" ]]; then
+			echo "  PASS  ${ctx}: profile marker removed"
+		else
+			echo "  FAIL  ${ctx}: profile marker still present: ${left:-the delete failed}"
+			fail=1
+		fi
+	done
+fi
 
 if ((fail)); then
 	echo "=== Revert of ${PROFILE_NAME} FAILED the check; the mesh may still carry profile changes ===" >&2

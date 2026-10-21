@@ -101,6 +101,26 @@ rows ran on: inputs whose `HARNESS_SHA` differs but that share one key differ on
 (a commit or tag that left the harness files as they were), so stderr gives a note instead of the
 warning. Timestamps are UTC.
 
+It also records `KUBE_VERSIONS` and the platform record
+([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
+platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
+istiod's settings, the nodes' provider and any tuning profile objects (`PLATFORM_BY_CONTEXT`,
+`MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`,
+`NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env
+without `CLUSTER_ID`; `TUNING_OBJECTS_BY_CONTEXT`: `none` outside a tuning run), read before the
+first churn event (a sweep reads it once for all its combos and hands it to them in
+`platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
+setting, tuning lever, tuning profile object, Kubernetes version or member's count of Running
+istiod pods (`ISTIOD_REPLICAS`, recorded at a probe's start) that changed in between is written
+to `platform-drift.txt` there, as is what that read could not compare). An image carries
+the digest its pods run (`@unknown` when none has started: not read, never another build); `none`
+means no such pod. `004` prints them in every format (text, csv, md, charts; it has no json), per
+member as `<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ
+(`KUBE_VERSIONS`: different Kubernetes versions), a value could not be read in some of them, the
+sweep's record changed or a tuning profile's objects were in place; an operator that differs only in
+its state (`Available`, `Unavailable`) is not mixed. A file without them predates the record (the
+suite supported only OpenShift with OSSM then); its values read `unknown`.
+
 Every source or remote istiod status other than `0` also saves the restart evidence to
 `istiod-diag-<RUN_ID>/` next to the TSV, tag `iter<N>`, after the row is written; a failed
 capture never adds a `SETUP_FAILED` row. A pod replaced between iterations (scale-down,
@@ -115,7 +135,7 @@ It grows with connected proxies, so compare it across mesh sizes, not against 1.
 ## Quick start
 
 Needs `kubectl` or `oc`, `helm`, `jq`, `curl`, the deployed mesh (see the root README)
-and kube contexts for the mesh members (not the ACM hub).
+and kube contexts for the mesh members (not the hub).
 
 ```bash
 # 1. Deploy churn targets and a watcher on each mesh member
@@ -190,8 +210,9 @@ rules: [Run config](../../README.md#run-config---config-file)).
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys `CHURN_*`, `FANOUT_*`,
-  `ISTIOD_DIAG_*` (restart evidence) and `METRICS_SCRAPE_TIMEOUT`. `CHURN_TEST_NAMESPACE`
-  stays environment only.
+  `ISTIOD_DIAG_*` (restart evidence), `TEST_PLATFORM` (the members' platform),
+  `PLATFORM_READ_TIMEOUT` (each read of the platform record), `PLATFORM_READ_PARALLEL` (members
+  read at once) and `METRICS_SCRAPE_TIMEOUT`. `CHURN_TEST_NAMESPACE` stays environment only.
 - **One value or a list:** `001` and `002` read `CHURN_DEPLOYMENT_COUNT`; the sweep reads the
   CSV `CHURN_INTENSITIES` (`--churn-intensities`; empty: `CHURN_DEPLOYMENT_COUNT`) and
   `CHURN_MESH_SIZES` (`--mesh-sizes`; empty: 1 to the number of contexts). A list key exported

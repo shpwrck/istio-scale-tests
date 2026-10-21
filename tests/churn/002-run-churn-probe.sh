@@ -39,6 +39,8 @@ source "${ROOT}/tests/lib/fanout.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # istio_version_resolve and the rest of the TSV preamble
 # shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines (the platform record)
+# shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (used by istiod-diag.sh)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/istiod-diag.sh"  # istiod_diag_capture (restart evidence)
@@ -197,6 +199,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 [[ -n "$SOURCE_CTX" ]] || die "--source-context is required"
 is_pos_int "$DEPLOYMENT_COUNT" || die "--deployment-count must be a positive integer"
 is_nonneg_int "$BASE_REPLICAS" || die "CHURN_BASE_REPLICAS must be a non-negative integer"
@@ -218,6 +221,9 @@ REMOTES=()
 if [[ -n "$REMOTE_CONTEXTS_CSV" ]]; then
 	split_contexts "$REMOTE_CONTEXTS_CSV" REMOTES --remote-contexts "$SOURCE_CTX"
 fi
+# The source and its remotes, each under a name of its own in the platform record
+# (platform_members_check): refused here, before any cluster call, in a --dry-run too.
+platform_members_check "$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"}
 
 [[ -z "$MESH_SIZE" ]] && MESH_SIZE=$(( 1 + ${#REMOTES[@]} ))
 
@@ -234,13 +240,16 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 # Preflight every context: require >= 1 Running istiod pod (all pods are scraped
-# via tests/lib/fanout.sh). The source replica count goes into the preamble.
+# via tests/lib/fanout.sh). Each member's count goes into the preamble, as
+# ISTIOD_REPLICAS=<ctx>=<n>,... (as propagation records it; a sweep reads it again at its end).
 echo "Preflighting istiod replicas..."
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
 echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"
+ISTIOD_REPLICAS_CSV="${SOURCE_CTX}=${SOURCE_REPLICAS}"
 for ctx in ${REMOTES[@]+"${REMOTES[@]}"}; do
 	r="$(fanout_preflight_istiod "$ctx" "${KUBECTL[@]}")"
 	echo "  [$ctx] Running istiod replicas: $r"
+	ISTIOD_REPLICAS_CSV+=",${ctx}=${r}"
 done
 
 # The Istio version the members run, before the first scale-up (inherited when 003
@@ -253,6 +262,11 @@ istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 # reports the run's harness and Istio version, not the report host's (the 003 placeholder
 # writes the same keys, PL36); this probe's own results do not count.
 harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
+# Every member's Kubernetes version and the platform record (inherited from 003, else read here),
+# before the first churn event.
+ALL_CTXS_CSV="$(IFS=,; echo "${ALL_CTXS[*]}")"
+KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
+platform_probe "$ALL_CTXS_CSV"
 cat > "$TSV_FILE" <<EOF
 # Churn convergence test — $(date -u -Iseconds)
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
@@ -260,12 +274,13 @@ cat > "$TSV_FILE" <<EOF
 # HARNESS_SHA=${HARNESS_SHA}
 # HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}
 $(istio_version_kv | sed 's/^/# /')
-# ISTIOD_REPLICAS=$SOURCE_REPLICAS
+# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}
+# ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}
 # CHURN_SCALE_SCOPE=source
 # TUNING_BASELINE=$TUNING_BASELINE
 # SIDECAR_EGRESS_HOSTS=$SIDECAR_EGRESS_HOSTS
 EOF
-config_preamble_lines >> "$TSV_FILE"
+{ config_preamble_lines; platform_preamble_lines "$ALL_CTXS_CSV"; } >> "$TSV_FILE"
 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 	run_id mesh_size churn_intensity base_replicas scale_to iteration t0_epoch_ns \
 	convergence_local_ms remote_endpoint_reachable_ms convergence_remote_eds_ms \
@@ -1234,6 +1249,8 @@ MD_FILE="${OUTPUT_DIR}/churn-${RUN_ID}.md"
 	echo "| Harness SHA | \`${HARNESS_SHA}\` |"
 	echo "| Istio version | $(istio_version_label) |"
 	echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA256:-none}\`) |"
+	platform_md_row "$ALL_CTXS_CSV"
+	echo "| Kube versions | \`${KUBE_VERSIONS_CSV}\` |"
 	echo "| Date (UTC) | $(date -u -Iseconds) |"
 	echo "| Source | ${SOURCE_CTX} |"
 	echo "| Remotes | ${REMOTES[*]:-none} |"

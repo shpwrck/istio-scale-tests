@@ -1,5 +1,9 @@
-# Namespace of the Argo CD instance (Applications live here).
-gitopsNamespace: openshift-gitops
+# kubernetes (upstream Argo CD and operator charts) or openshift (OpenShift GitOps, ACM
+# and OLM operators); passed to charts/gitops-hub-apps. Set by terraform/platform.
+platform: kubernetes
+
+# Namespace of the Argo CD instance (Applications live here; openshift: openshift-gitops).
+gitopsNamespace: argocd
 
 # Git repo the root and every child Application sync from (your fork/branch).
 repo:

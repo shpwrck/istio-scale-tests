@@ -35,6 +35,10 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/timestamp.sh"  # now_ms for the delete timings
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state, ns_lifecycle_*
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_validate; the platform record ns_lifecycle_init writes
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
 
 CONTEXTS_CSV=""
 DRY_RUN=0
@@ -161,6 +165,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
 KUBECTL=()
 resolve_kubectl KUBECTL
 
@@ -248,6 +253,8 @@ if ((DRY_RUN)); then
 fi
 
 if [[ -n "$LIFECYCLE_FILE" ]]; then
+	# A new file (a standalone run; a sweep creates it first): its preamble needs the record.
+	[[ -f "$LIFECYCLE_FILE" ]] || platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
 	ns_lifecycle_init "$LIFECYCLE_FILE" "standalone-005"
 fi
 
@@ -294,8 +301,10 @@ for ctx in "${CONTEXTS[@]}"; do
 			status=OK
 			# Explicit deletes first, so istiod processes them now rather than whenever the
 			# namespace controller gets to them (inside the next window). The probe has no
-			# pods; its OpenShift-created objects (service accounts, secrets, the
-			# istio-ca-root-cert ConfigMap) go with the namespace after it leaves discovery.
+			# pods; its auto-created objects (the default ServiceAccount, the
+			# istio-ca-root-cert ConfigMap and, on OpenShift, the ServiceAccounts' Secrets;
+			# Kubernetes 1.24+ creates no token Secrets) go with the namespace after it leaves
+			# discovery.
 			"${KUBECTL[@]}" --context="$ctx" -n "$PROBE_NAME" delete services,sidecars.networking.istio.io \
 				-l "$BASE_SELECTOR" --ignore-not-found=true --wait=true --timeout="${TERMINATION_TIMEOUT}s" >/dev/null || status=FAILED
 			"${KUBECTL[@]}" --context="$ctx" label namespace "$PROBE_NAME" istio-discovery- istio.io/rev- >/dev/null 2>&1 || true

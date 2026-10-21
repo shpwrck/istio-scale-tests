@@ -1,11 +1,25 @@
-# Namespace of the Argo CD instance; the child Applications are created here.
-gitopsNamespace: openshift-gitops
+# kubernetes: upstream Argo CD, the mesh members from the Argo CD cluster Secrets and the
+# upstream cert-manager, External Secrets and Sail operator Helm charts. openshift: OpenShift
+# GitOps, the mesh members from the ACM Placement and the Red Hat operators (OLM). Set by the
+# root Application (charts/gitops-hub-app-of-apps) from terraform/platform var.platform.
+platform: kubernetes
+
+# Namespace of the Argo CD instance; the child Applications are created here
+# (openshift: openshift-gitops).
+gitopsNamespace: argocd
 
 # Git repo and revision every child Application (and the ApplicationSets they
 # render) syncs from. Set by the root Application (charts/gitops-hub-app-of-apps).
 repo:
   url: ""
   revision: main
+
+# platform kubernetes: the upstream cert-manager chart (hub-cert-manager-operator). Version
+# pin; apps.hub-cert-manager-operator.source overrides these keys (e.g. a chart mirror).
+certManager:
+  repoURL: https://charts.jetstack.io
+  chart: cert-manager
+  version: v1.21.2
 
 # One entry per child Application. enabled: false skips it (e.g. the operator is
 # already installed); values: becomes the Application's helm.valuesObject.

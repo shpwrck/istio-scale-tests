@@ -178,10 +178,12 @@ every member's rows of the cell were already written (the sweep ended in its dia
 cleanup): that cell is done. An attempt is one run of the sweep (the first, or a resume): each
 resume that finds rows in the TSV writes a `# RESUMED_AT=<time>` comment line into it where its
 rows start (then, as `KEY=value` on that line: `TSV_LINES`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`,
-`ISTIO_NOTREADY_AT_RESUME`, `ISTIO_GENERATIONS`, `ISTIO_PROXY_VERSIONS`, and `KUBE_VERSIONS` last),
-and every resume a line to `resumes.txt`, so a TSV copied without `resumes.txt` still separates its
-attempts and names each one's harness, Istio state and Kubernetes versions (a resume that finds no
-row writes the TSV's preamble itself: `TSV_LINES` 0 in `resumes.txt`). When the harness files
+`ISTIO_NOTREADY_AT_RESUME`, `ISTIO_GENERATIONS`, `ISTIO_PROXY_VERSIONS`, the platform record the
+resume read, from `PLATFORM` to `TUNING_OBJECTS_BY_CONTEXT` as the preamble has them, and
+`KUBE_VERSIONS` last), and every resume a line to `resumes.txt`, so a TSV copied without
+`resumes.txt` still separates its attempts and names each one's harness, Istio state, builds and
+Kubernetes versions (a resume that finds no row writes the TSV's preamble itself: `TSV_LINES` 0
+in `resumes.txt`). When the harness files
 change during a run (`HARNESS_CONTENT_KEY` differs from the TSV's last record), `002` writes
 `# HARNESS_CHANGED_AT=<UTC Z> HARNESS_SHA=<sha> HARNESS_CONTENT_KEY=<key>` before that window's rows
 (it checks before each step), so the rows after it are credited to the harness that measured them;
@@ -245,6 +247,33 @@ OSSM operator upgrade or a change of the cluster's TLS security profile). A swee
 settled, or an istiod rollout in progress) can never be resumed, and `--resume` says so before it
 reads the mesh; when a member cannot be read now, fix access to it and run the same `--resume`
 again.
+
+The preamble also keeps what the sweep started on (the platform record), so `--resume` reads it
+again first, before it changes anything (the leftover check, the outcome record and the pages come
+after it, so a refused resume stops in seconds and leaves the sweep dir as it was), prints one
+`Platform record: comparing ...` line and compares: on every member `PLATFORM_BY_CONTEXT`,
+`MESH_OPERATOR_BY_CONTEXT` (without its state: `Available` and `Unavailable` are the same build),
+`ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`,
+`TUNING_OBJECTS_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT` and `KUBE_VERSIONS`; on the member the TSV
+read them on, `TUNING_BASELINE`, `SIDECAR_EGRESS_HOSTS`, `ISTIOD_CPU_LIMIT_M` and
+`ISTIOD_MEM_LIMIT_MI` (what `004` divides istiod's CPU and RSS peaks by). A value that differs
+stops the run, naming the key, both values and the members (members that changed the same way
+share one line, five named, then how many more): an upgrade, a gateway restarted onto a new build,
+a tuning profile left applied, new istiod limits or clusters rebuilt under the same context names
+on another Kubernetes version would otherwise be credited to the old record. Start a new sweep then
+(the sweep's own command without `--resume`; the message names its `run-config-<RUN_ID>.env`
+snapshot when it ran with `--config`), or put the members back. Only warnings: a value not read on
+either side (the warning says which: the TSV records `unknown` or predates the key, or the member
+cannot be read now), an image whose digest reads `@unknown` (no pod had started), a member on one
+side only, a TSV from before the record, another `TEST_PLATFORM`, and what the report only shows:
+`NODE_ALLOC_CPU_M` and `NODE_ALLOC_MEM_MI` (a cluster autoscaler moves them), `ISTIOD_REQ_*`,
+`ISTIOD_LIM_*`, `ISTIOD_REPLICAS_BY_CONTEXT` (an HPA moves it) and `NETWORK_TOPOLOGY`.
+`METRICS_API` is not compared: the resumed run's preflight checks the metrics API. Each resume's
+`# RESUMED_AT=` line keeps the record it read, and a later `--resume` compares with it too, so a
+value the sweep could not read at its start but an earlier resume did is compared with that one;
+the reports merge it with the preamble's record, member by member (the start's `unknown` next to a
+resume's value reads `mixed:unknown;<value>`, with a warning: the first run's rows cannot be tied
+to a build).
 
 Nor can a sweep whose `sweep-outcome.txt` (or `sweep-outcome.prev.txt`) records a `PROBLEM` about
 Istio: the Istio version, active revision or Istio CR generation changed under the sweep, or the
@@ -329,17 +358,18 @@ every resume whose `HARNESS_SHA` is `unknown`, every harness change (with the ti
 the rows are that harness's), and every resume that read other Kubernetes server versions than the
 last known ones (the preamble's `KUBE_VERSIONS`, then each resume's, members `unreachable` or
 `unknown` left out; grouped by old and new version; a later resume that could not read one of those
-members ends the span); a resume that runs another `HARNESS_SHA` than the last known one before it,
-or `unknown`, or reads other Kubernetes server versions, also warns (another harness: another
-`HARNESS_CONTENT_KEY`; when only `git describe` differs, an `INFO` instead). `HARNESS_SHA` is `git
-describe --always --abbrev=7`, and a harness with uncommitted changes (a file under `tests/`,
-`config/`, `charts/` or `terraform/`, tracked or untracked, not ignored) reads
-`<describe>-dirty.<8hex>`, a hash of that content (not a diff, so the operator's git
-config does not change it): two different uncommitted trees on one commit record two
-values, so the check tells them apart. Ignored files never count: editor and Finder
-files (`.DS_Store`, `*.swp`, `*.swo`, `*~`), the `results/` dirs, the sweep's own output
-dir, and whatever the operator's global `core.excludesFile` ignores (or git's default
-`~/.config/git/ignore` when that key is unset); nor do files outside those four dirs (a
+members ends the span; a version that differs from the preamble's stops the resume first, as above,
+so these are members whose version the sweep's start could not read); a resume that runs another
+`HARNESS_SHA` than the last known one before it, or `unknown`, or reads other Kubernetes server
+versions, also warns (another harness: another `HARNESS_CONTENT_KEY`; when only `git describe`
+differs, an `INFO` instead). `HARNESS_SHA` is `git describe --always --abbrev=7`, and a harness
+with uncommitted changes (a file under `tests/`, `config/`, `charts/` or `terraform/`, tracked or
+untracked, not ignored) reads `<describe>-dirty.<8hex>`, a hash of that content (not a diff, so the
+operator's git config does not change it): two different uncommitted trees on one commit record two
+values, so the check tells them apart. Ignored files never count: editor and Finder files
+(`.DS_Store`, `*.swp`, `*.swo`, `*~`), the `results/` dirs, the sweep's own output dir, and whatever
+the operator's global `core.excludesFile` ignores (or git's default `~/.config/git/ignore` when that
+key is unset); nor do files outside those four dirs (a
 campaign note under `docs/`) or the submodules (the bats checkouts, moved or not checked out). A
 tree git cannot hash reads `-dirty.unknown` when its tracked files differ from the commit. The sweep
 reads the harness again before its steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default)
@@ -437,10 +467,12 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 ```
 
 - **Keys:** `SETUP_CONTEXTS` and the `config/options.env` keys that start with
-  `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`. A step ignores the keys it
-  does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005` deletes it),
-  `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per run),
-  `CONTROLPLANE_EXTEND_PLAN` (so does `--extend-plan`'s), `ISTIO_VERSION_CHECK`,
+  `CONTROLPLANE_`, `SCALE_`, `METRICS_`, `FANOUT_` or `CAP_`, plus `ISTIOD_DIAG_*`,
+  `TEST_PLATFORM` (the members' platform), `PLATFORM_READ_TIMEOUT` (each read of the platform
+  record) and `PLATFORM_READ_PARALLEL` (members read at once), which every suite takes. A step
+  ignores the keys it does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005`
+  deletes it), `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per
+  run), `CONTROLPLANE_EXTEND_PLAN` (so does `--extend-plan`'s), `ISTIO_VERSION_CHECK`,
   `ISTIO_VERSION_READY_WAIT_SEC` / `_POLL_SEC`, `ISTIO_PROXY_READ_PARALLEL`, the sweep's
   `HARNESS_SHA_CHECK_SEC` and `SWEEP_STOP_GRACE_SEC` (every suite's, see the top-level README)
   and the version pins. Any other key, or any bad line, rejects the whole file before anything
@@ -485,6 +517,41 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   harnesses print a `WARNING` (stderr and every format), read `mixed:<a>,<b>` and turn a `PASS`
   verdict into `CAUTION`; `HARNESS_SHA` values that differ only in git describe (one
   `HARNESS_CONTENT_KEY`) are a note instead.
+- **Platform record:** the preamble also carries `PLATFORM`, `TEST_PLATFORM` and, per member,
+  the platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west)
+  builds, istiod's settings, the nodes' provider and any tuning profile objects
+  (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
+  `PROXY_IMAGE_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`,
+  `TUNING_OBJECTS_BY_CONTEXT`; [`tests/lib/platform.sh`](../lib/platform.sh)), read before the
+  first window (a sweep reads it once and hands it to its combos in `platform-record.txt` in the
+  sweep dir, and reads it again after its last combo: a build, istiod setting, limit or replica
+  count, tuning lever, tuning profile object or Kubernetes version that changed in between is in
+  `platform-drift.txt` there, as is what that read could not compare; `002 --phase final` reuses
+  the baseline phase's). An image carries the digest its pods run; `@unknown` when none has started
+  (an operator scaled to 0, a Pending replica), which every comparison takes as not read (a
+  warning), never as another build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT`
+  is a 12-hex digest of istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
+  `spec.values.pilot.env` or a hand edit changes it. `TUNING_OBJECTS_BY_CONTEXT` names the objects a
+  tuning profile created and its marker ConfigMap (labelled `istio-scale-tests/tuning-profile`),
+  `none` outside a tuning run. The growth mode's `ns-lifecycle-<RUN_ID>.tsv` and
+  `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates the
+  lifecycle file). `004` prints it in every format, with a warning in the report itself (members
+  counted, not named; `metadata.data_warnings` in JSON) when its inputs differ, a value could not be
+  read in some of them, the sweep's record changed or a tuning profile's objects were in place (an
+  operator that differs only in its state is not a difference). On kind nodes it also warns that the
+  capacity figures overstate the headroom, and the SLA verdict leaves the node figures out: it is
+  `CAUTION` with that reason even when istiod's figures pass. A member whose node provider was not
+  read does the same (`node provider not read on N member(s)`): it may be on kind. k3d (`k3s://`)
+  and minikube clusters that share one host are not detected, so their node figures are the host's
+  too. The scale envelope prints every data warning above its tables and a `Platform / mesh build`
+  row. A file without the record predates it (the suite supported only OpenShift with OSSM then);
+  its values read `unknown`.
+- **Tuning levers:** `TUNING_BASELINE` reads the four levers live on the first member:
+  `sidecar` (the root Sidecar `default` in `istio-system`), `discoverySelectors` (on the Istio CR
+  `default`), `telemetryFiltering` and `accessLogFiltering` (the Telemetry resources
+  `tuning-metrics` and `tuning-access-log`). Each is `on`, `off` (the resource is absent) or
+  `unknown` (not read, a kind the member does not serve, or no Istio CR named `default`).
+  `SIDECAR_EGRESS_HOSTS` holds the root Sidecar's egress hosts (`none` without one).
 
 ## Traffic management (VS/DR)
 
@@ -790,7 +857,11 @@ Each row is a per-window delta over `--interval` seconds.
 - Services are spread evenly across namespaces; real meshes are skewed.
 - Utilization-% columns need the metrics API (`kubectl top`); without it they are `N/A`.
   Node columns count worker nodes, including control-plane nodes that also carry the
-  worker role (single-node and compact clusters).
+  worker role (OpenShift single-node and compact clusters) or have no NoSchedule or
+  NoExecute taint (single-node kind, kubeadm and k3s). On kind every node reports the
+  whole host, which all the clusters on it share, so node allocatable, `node_*_pct` and
+  the coverage fraction overstate the headroom; the report warns when the platform record
+  says the nodes are kind.
 - Raise `METRICS_SCRAPE_TIMEOUT` (default 30 s) if `/metrics` scrapes time out at scale.
 - `sidecar_pods` is read a few seconds after the `pilot_xds` scrape, from the same 5 s pod
   list as `pods_scheduled`. Pods starting or stopping in between, or proxies not yet

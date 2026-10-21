@@ -36,6 +36,10 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/preamble.sh"  # tuning_baseline_state
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/propagation.sh"  # PROP_TSV_HEADER, prop_placeholder_row (PL36)
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/platform.sh"  # platform_probe, platform_preamble_lines
+# shellcheck disable=SC1091
+source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
 
 CONTEXTS_CSV=""
 MESH_SIZES_CSV="${PROPAGATION_MESH_SIZES:-}"
@@ -89,6 +93,7 @@ Environment:
   PROPAGATION_WAIT_TIMEOUT_SEC (read by 001), PROPAGATION_POLL_INTERVAL_MS and
   PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
   setup, --dry-run included.
+$(platform_help_lines all)
   HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
   step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
   processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
@@ -195,6 +200,8 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
+platform_validate
+
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then
 	split_contexts "$CONTEXTS_CSV" CONTEXTS --contexts
@@ -202,6 +209,9 @@ else
 	split_contexts "$SETUP_CONTEXTS" CONTEXTS SETUP_CONTEXTS
 fi
 ((${#CONTEXTS[@]})) || die "no contexts resolved"
+# Each member under a name of its own in the platform record (platform_members_check): refused
+# here, before any cluster call, in a --dry-run too.
+platform_members_check "${CONTEXTS[@]}"
 
 MESH_SIZES=()
 if [[ -n "$MESH_SIZES_CSV" ]]; then
@@ -246,10 +256,8 @@ TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
 KUBECTL=()
 if ((! DRY_RUN)); then
-	if command -v oc >/dev/null 2>&1; then
-		KUBECTL=(oc)
-	elif command -v kubectl >/dev/null 2>&1; then
-		KUBECTL=(kubectl)
+	if command -v kubectl >/dev/null 2>&1 || command -v oc >/dev/null 2>&1; then
+		resolve_kubectl KUBECTL
 	fi
 fi
 # The Istio version every member runs, read once before the first setup and
@@ -267,6 +275,12 @@ if ((! DRY_RUN)); then
 		done < <(tuning_baseline_state "${CONTEXTS[0]}" "${KUBECTL[@]}")
 	fi
 fi
+# The platform record of every member, read once here; each 002 reads it from
+# platform-record.txt in the sweep dir (platform_probe_share) and the placeholders write it
+# (tests/lib/platform.sh). --dry-run reads nothing (unknown) and writes no file.
+platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
+platform_probe_share "$SWEEP_DIR"
+platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 # Placeholder TSV for a mesh size whose setup/probe failed before writing any row,
 # so the size still shows in the report (counted in n_total, excluded from n_valid).
@@ -292,6 +306,7 @@ emit_propagation_placeholder() {
 		echo "# TUNING_BASELINE=${TUNING_BASELINE}"
 		echo "# SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS}"
 		config_preamble_lines
+		platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]:0:$ms}")"
 		echo "# NOTE=${status}: setup or probe exited non-zero; counted in n_total, excluded from n_valid"
 		# The schema 002 writes (PL36: one header, tests/lib/propagation.sh).
 		printf '%s\n' "$PROP_TSV_HEADER"
@@ -457,6 +472,8 @@ for ms in "${MESH_SIZES[@]}"; do
 
 	echo ""
 done
+# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
+platform_drift_check "$SWEEP_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "  Sweep finished"

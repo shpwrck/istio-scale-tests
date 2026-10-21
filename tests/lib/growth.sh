@@ -43,8 +43,9 @@
 #                                          the istio-remote-secret-<cluster> name), sorted
 #   growth_mesh_members <ctx> <kubectl_argv...>
 #                                       -> <ctx> plus every cluster its remote secrets name
-#                                          (one per line, sorted, unique); exit 1 when the
-#                                          secrets cannot be listed
+#                                          (one per line, sorted, unique; still a member that
+#                                          left the mesh, until its remote secret is
+#                                          deleted); exit 1 when the secrets cannot be listed
 #   growth_test_ns_counts <ctx> <kubectl_argv...>
 #                                       -> "total=<n|N/A> discovered=<n|N/A>": every
 #                                          controlplane-test namespace on <ctx> (any series,
@@ -158,15 +159,6 @@ growth_gateway_pods() {
 		| growth_parse_gateway_pods
 }
 
-# _growth_kv <key> <"k=v k=v" line>: the value of key, or unknown.
-_growth_kv() {
-	local tok
-	for tok in $2; do
-		[[ "$tok" == "${1}="* ]] && { echo "${tok#"${1}="}"; return 0; }
-	done
-	echo unknown
-}
-
 # shellcheck disable=SC2329
 growth_gateway_summary() {
 	local ctx="$1"
@@ -176,9 +168,9 @@ growth_gateway_summary() {
 		[[ -n "$pod" ]] || continue
 		n=$((n + 1))
 		kv="$(growth_envoy_stats "$ctx" istio-system "$pod" "$@")"
-		mem="$(_growth_kv mem_mi "$kv")"
-		cl="$(_growth_kv clusters "$kv")"
-		phy="$(_growth_kv physical_mi "$kv")"
+		mem="$(kv_value mem_mi "$kv")"
+		cl="$(kv_value clusters "$kv")"
+		phy="$(kv_value physical_mi "$kv")"
 		if [[ "$mem" =~ ^[0-9]+$ ]] && { [[ -z "$mem_max" ]] || (( mem > mem_max )); }; then mem_max="$mem"; fi
 		if [[ "$cl" =~ ^[0-9]+$ ]] && { [[ -z "$cl_max" ]] || (( cl > cl_max )); }; then cl_max="$cl"; fi
 		if [[ "$phy" =~ ^[0-9]+$ ]] && { [[ -z "$phy_max" ]] || (( phy > phy_max )); }; then phy_max="$phy"; fi

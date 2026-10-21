@@ -859,6 +859,9 @@ MD_ROW='echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA2
 	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'PROP_TSV_HEADER'
 	# reach-<RUN_ID>.tsv (dataplane and churn-dataplane 002) through its one writer.
 	in_block "${ROOT}/tests/lib/reach.sh" 'echo "# Remote reachability check' 'printf .run_id'
+	# The controlplane growth mode's side TSVs: ns-lifecycle (its one writer) and the memory guard.
+	in_block "${ROOT}/tests/lib/preamble.sh" '^ns_lifecycle_init\(\)' '^\}$'
+	in_block "${ROOT}/tests/controlplane/003-run-sweep.sh" 'write_preamble "Memory stop guard' 'printf .timestamp.tseries'
 	# The check fires on a writer without it.
 	sed '/config_preamble_lines/d' "$DP/003-run-sweep.sh" > "${BATS_TEST_TMPDIR}/003.sh"
 	run in_block "${BATS_TEST_TMPDIR}/003.sh" '^emit_dataplane_placeholder\(\)' 'printf .run_id'
@@ -882,4 +885,60 @@ MD_ROW='echo "| Run config | \`${RUN_CONFIG:-none}\` (sha256 \`${RUN_CONFIG_SHA2
 	in_block "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh" 'MD_FILE=.*/controlplane-' '\} > "\$MD_FILE"' "$MD_ROW"
 	run in_block "$CH/002-run-churn-probe.sh" '^MD_FILE=.*/churn-' '^\} > "\$MD_FILE"' 'no such row'
 	assert_failure
+}
+
+# platform_pairs_ok <file>: as many platform_preamble_lines calls as config_preamble_lines
+# calls, and a platform_md_row for every Run config row (comments and source lines left out).
+# Fails with a message on a mismatch, silently for a file that writes no preamble.
+platform_pairs_ok() {
+	local c p m r
+	_calls() { grep -v '^[[:space:]]*#' "$1" | grep -v 'source ' | grep -c -- "$2" || true; }
+	c="$(_calls "$1" config_preamble_lines)" p="$(_calls "$1" platform_preamble_lines)"
+	m="$(grep -c '| Run config |' "$1" || true)" r="$(_calls "$1" platform_md_row)"
+	[[ "$c" == "$p" && "$m" == "$r" ]] || {
+		echo "$(basename "$1"): config_preamble_lines x${c}, platform_preamble_lines x${p}; Run config rows x${m}, platform_md_row x${r}"
+		return 1
+	}
+	((c > 0))
+}
+
+@test "PL36: every writer of RUN_CONFIG writes the platform record too, and every Run config row has a Platform row" {
+	local f n=0
+	for f in "$ROOT"/tests/*/0*.sh "${ROOT}/tests/lib/reach.sh" "${ROOT}/tests/lib/preamble.sh"; do
+		run platform_pairs_ok "$f"
+		if ((status == 0)); then n=$((n + 1)); elif [[ -n "$output" ]]; then echo "$output"; false; fi
+	done
+	# Every TSV writer and placeholder of the suites (12 scripts), the reach TSV's and the
+	# ns-lifecycle TSV's.
+	[ "$n" -ge 14 ]
+	for f in "$CD/004-run-sweep.sh" "$CH/003-run-sweep.sh" "$PR/006-run-sweep.sh" "$DP/003-run-sweep.sh" \
+		"${ROOT}/tests/controlplane/003-run-sweep.sh" "${ROOT}/tests/gateway-api/001-run-ingress-check.sh"; do
+		platform_pairs_ok "$f"
+	done
+	# The check fires on a writer without the record, and on a summary without the row.
+	sed '/platform_preamble_lines/d' "$CD/004-run-sweep.sh" > "${BATS_TEST_TMPDIR}/004.sh"
+	run platform_pairs_ok "${BATS_TEST_TMPDIR}/004.sh"
+	assert_failure
+	sed '/platform_md_row/d' "$PR/002-run-endpoint-probe.sh" > "${BATS_TEST_TMPDIR}/002.sh"
+	run platform_pairs_ok "${BATS_TEST_TMPDIR}/002.sh"
+	assert_failure
+	# The placeholders write it through the probes' emitter, in the same block.
+	in_block "$DP/003-run-sweep.sh" '^emit_dataplane_placeholder\(\)' 'printf .run_id' platform_preamble_lines
+	in_block "$CH/003-run-sweep.sh" '^emit_churn_placeholder\(\)' 'run_id mesh_size churn_intensity' platform_preamble_lines
+	in_block "$PR/006-run-sweep.sh" '^emit_propagation_placeholder\(\)' 'run_id.tmesh_size' platform_preamble_lines
+	in_block "${ROOT}/tests/lib/reach.sh" 'echo "# Remote reachability check' 'printf .run_id' platform_preamble_lines
+	in_block "${ROOT}/tests/lib/preamble.sh" '^ns_lifecycle_init\(\)' '^\}$' platform_preamble_lines
+	in_block "${ROOT}/tests/controlplane/003-run-sweep.sh" 'write_preamble "Memory stop guard' 'printf .timestamp.tseries' \
+		platform_preamble_lines
+	# Every caller of ns_lifecycle_init sources what it writes with (it refuses otherwise).
+	for f in $(grep -l 'ns_lifecycle_init "' "$ROOT"/tests/*/0*.sh); do
+		grep -q 'source "${ROOT}/tests/lib/config.sh"' "$f" || { echo "${f}: ns_lifecycle_init without config.sh"; false; }
+		grep -q 'source "${ROOT}/tests/lib/platform.sh"' "$f" || { echo "${f}: ns_lifecycle_init without platform.sh"; false; }
+	done
+	# Every report merges it over all its inputs (PL26).
+	local r
+	for r in "$DP/004-report-results.sh" "$CH/004-report-results.sh" "$CD/005-report-results.sh" "$PR/005-report-results.sh" \
+		"${ROOT}/tests/controlplane/004-report-results.sh" "${ROOT}/tests/tuning/004-compare-profiles.sh"; do
+		grep -q 'platform_report_values "' "$r"
+	done
 }

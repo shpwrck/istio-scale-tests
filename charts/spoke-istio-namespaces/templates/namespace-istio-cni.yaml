@@ -4,3 +4,6 @@ metadata:
   name: {{ .Values.namespaces.istioCni | quote }}
   labels:
     {{- include "spoke-istio-namespaces.labels" . | nindent 4 }}
+    {{- with .Values.istioCniLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}

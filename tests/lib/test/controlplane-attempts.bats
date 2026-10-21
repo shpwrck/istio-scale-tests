@@ -123,6 +123,7 @@ attempts_dir() {
 	run --separate-stderr "$REPORT" --results-dir "$ATT_DIR" --format charts
 	assert_output --partial "> **Note:** Each cell's latest attempt only: 11 row(s)"
 	# The scale envelope reads the report: its verdict and the note.
+	source "${ROOT}/tests/lib/platform.sh"
 	run --separate-stderr render_scale_envelope "$ATT_DIR" "$REPORT" "mesh-a,mesh-b" false
 	assert_success
 	assert_output --partial "Each cell's latest attempt only: 11 row(s) of earlier attempts of 1 cell(s)"
@@ -203,20 +204,25 @@ attempts_dir() {
 
 @test "a Kubernetes version note ends its span at a later --resume that could not read the member" {
 	local d tsv t1 t2
+	# The first run cannot read the version (no kver: unreachable in its preamble), so the
+	# resumes that read one go on (one that differs from a recorded version is refused).
 	cp_sweep --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	d="$(sweep_dir)"
 	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	sed -i.bak 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=v1.30.4/' "$tsv" && rm -f "${tsv}.bak"
+	grep -qx '# KUBE_VERSIONS=ci-a=unreachable' "$tsv"
+	echo v1.30.4 > "${BATS_TEST_TMPDIR}/kver"
+	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	assert_failure 4
 	echo v1.31.2 > "${BATS_TEST_TMPDIR}/kver"
 	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	# resumes.txt keeps the time as recorded; the notes print it with Z.
-	t1="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
+	t1="$(awk -F'\t' 'NR == 3 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
 	grep -qx "NOTE=the --resume at ${t1} read other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t1} on ran on them, up to a later change noted here" "$d/sweep-outcome.txt"
 	echo unreachable > "${BATS_TEST_TMPDIR}/kver"
 	cp_sweep --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	t2="$(awk -F'\t' 'NR == 3 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
+	t2="$(awk -F'\t' 'NR == 4 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
 	grep -qx "NOTE=the --resume at ${t1} read other Kubernetes server versions than the last known ones (ci-a: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t1} until ${t2} ran on them (the --resume at ${t2} could not read every member's version, so from there on they are not known), up to a later change noted here" "$d/sweep-outcome.txt"
 }
