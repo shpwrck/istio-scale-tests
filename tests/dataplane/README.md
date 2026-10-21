@@ -126,14 +126,13 @@ when and by which signal; the running step's process group gets SIGTERM, and SIG
 (`--on-unreachable fail`, see below; the reports are written); `4` it finished and wrote its
 reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio
 version, active revision or generation of the Istio CR or its active IstioRevision changed during
-the sweep (read again before the reports), or that check failed, or its harness (a file under
+the sweep (read again before the reports), or its harness (a file under
 `tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read at its
 start and its end). The last line on stderr says how many, by reason; `3` wins over `4`.
 `sweep-outcome.txt` in the sweep dir keeps the outcome (`STATUS=running` until the sweep ends, then
 `finished`, `stopped` or `interrupted`), and every report repeats it. When a sweep did not finish
 and no sweep runs any more, run the sweep again into a new dir; the rows already in the dir cover
-only the mesh sizes it finished. Proxies connected on another Istio version than their istiod at the start
-(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
+only the mesh sizes it finished.
 
 ## Run config (`--config FILE`)
 

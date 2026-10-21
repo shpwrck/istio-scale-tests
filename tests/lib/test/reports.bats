@@ -165,19 +165,19 @@ prow23() {
 	assert_output --partial '("- (N overflowed)" when every one did)'
 }
 
-@test "help: every sweep's exit 4 and every report's outcome paragraph name the generation change and a failed end-of-sweep check, with no internal tags" {
+@test "help: every sweep's exit 4 and every report's outcome paragraph name an Istio version, revision or Istio CR change, and the reports the version check's notes, with no internal tags" {
 	local s out flat
 	# flat: the help on one line (its text is wrapped).
 	for s in dataplane/003-run-sweep.sh churn/003-run-sweep.sh propagation/006-run-sweep.sh churn-dataplane/004-run-sweep.sh; do
 		out="$("${ROOT}/tests/${s}" --help)"
 		flat="$(tr -s ' \n' '  ' <<<"$out")"
-		[[ "$flat" == *"generation of the Istio CR or its active IstioRevision changed"* && "$flat" == *"end-of-sweep check failed"* ]] \
+		[[ "$flat" == *"the Istio version, the active revision or the generation of the Istio CR or its active IstioRevision changed during the sweep"* ]] \
 			|| { echo "${s}: ${out}"; false; }
 	done
 	for s in dataplane/004-report-results.sh churn/004-report-results.sh churn-dataplane/005-report-results.sh propagation/005-report-results.sh tuning/004-compare-profiles.sh; do
 		out="$("${ROOT}/tests/${s}" --help)"
 		flat="$(tr -s ' \n' '  ' <<<"$out")"
-		[[ "$flat" == *"generation of the Istio CR or its active IstioRevision"* && "$flat" == *"end-of-sweep check failed"* ]] \
+		[[ "$flat" == *"active revision"*"changed under the sweep"* && "$flat" == *"an Istio version check that warned at its start"* ]] \
 			|| { echo "${s}: ${out}"; false; }
 		# No review tag (PL17 ...) and no line over 100 columns.
 		! grep -E '\((I|B|A)[0-9]+\)|\bPL[0-9]+\b' <<<"$out" || { echo "${s}: a tag"; false; }

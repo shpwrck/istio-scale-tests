@@ -166,8 +166,8 @@ _gen_tsv() {
 	assert_line '# ISTIO_ACTIVE_REVISIONS=mixed:ci-a=rev-a,ci-a=rev-b'
 	[[ "$stderr" == *"warning: input TSVs disagree on ISTIO_ACTIVE_REVISIONS (ci-a=rev-a,ci-a=rev-b); the report mixes runs"* ]]
 	# A key no input records reads unknown (not recorded), without a warning.
-	assert_line '# ISTIO_PROXY_VERSIONS=unknown (not recorded)'
-	[[ "$stderr" != *"disagree on ISTIO_PROXY_VERSIONS"* ]]
+	assert_line '# ISTIO_GENERATIONS=unknown (not recorded)'
+	[[ "$stderr" != *"disagree on ISTIO_GENERATIONS"* ]]
 	# r3 on rev-a too: every first line reads rev-a (r2's second line is not read).
 	sed -i.bak 's/^# ISTIO_ACTIVE_REVISIONS=ci-a=rev-b$/# ISTIO_ACTIVE_REVISIONS=ci-a=rev-a/' "${d}/churn-r3.tsv" && rm -f "${d}/churn-r3.tsv.bak"
 	run --separate-stderr "${ROOT}/tests/churn/004-report-results.sh" --results-dir "$d" --allow-multi-run --format csv

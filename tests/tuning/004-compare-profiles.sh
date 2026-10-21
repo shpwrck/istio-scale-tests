@@ -180,15 +180,12 @@ Options:
 When the sweep dir holds sweep-outcome.txt (003 writes it: STATUS=running at its
 start, its outcome at its end), the comparison repeats it: a sweep that has not
 finished (it died, or still runs), was interrupted or stopped early, the failed
-passes by reason, its problems (the Istio version, the active revision or the
-generation of the Istio CR or its active IstioRevision changed under the sweep; the
-Istio CR changed other than by the sweep's own apply and revert: during a pass, after
-its apply settled and not by its profile, or between two of the sweep's checkpoints
-while it changed nothing (the suite setup, between passes, after the last revert); an
-incomplete revert, or such an edit, which no revert undoes (they restore only the
-profiles' keys): a member's Istio CR spec after the last revert differs from the
-sweep's start; the end-of-sweep check failed; or the harness changed) and notes
-(members not ready at its start or end).
+passes by reason, its problems (the Istio version or the active revision changed under
+the sweep; the Istio CR changed during a pass, after its apply settled and not by its
+profile; a member's Istio CR spec after the last revert differs from the sweep's start,
+an incomplete revert or an edit no revert undid; or the harness changed) and notes (an
+Istio version check that warned at its start, a member not ready or not confirmed at
+its end).
 
 Environment:
   FANOUT_MAX_SKEW_MS  propagation: the scrape-skew ceiling (ms) a row must be within to
@@ -231,8 +228,8 @@ command -v jq >/dev/null 2>&1 || die "jq not found on PATH: it reads each profil
 
 META="${RESULTS_DIR}/sweep-metadata.txt"
 meta_get() { [[ -f "$META" ]] && sed -n "s/^# $1=//p" "$META" | head -1; return 0; }
-# istio_start_kv <key>: a start-of-run readiness key (ISTIO_NOTREADY_AT_START,
-# ISTIO_READY_WAITED_SEC) from sweep-metadata.txt; unknown for a sweep from before these keys.
+# istio_start_kv <key>: a key of sweep-metadata.txt (HARNESS_SHA); unknown for a sweep from
+# before it.
 istio_start_kv() {
 	local v
 	v="$(meta_get "$1")"
@@ -661,11 +658,10 @@ fi
 BASE=""
 [[ " ${PASSES[*]} " == *" baseline "* ]] && BASE="baseline"
 
-# istio_merged_kv <key>: each member's active Istio revision
-# (ISTIO_ACTIVE_REVISIONS), its Istio CR / IstioRevision generations (ISTIO_GENERATIONS:
-# a CR edit between passes reads mixed, also at one version) and the proxy versions
-# connected to its istiod (ISTIO_PROXY_VERSIONS), over sweep-metadata.txt and every pass's
-# TSVs: one value, or mixed:a | b when they differ (PL26); a file without the key reads
+# istio_merged_kv <key>: each member's active Istio revision (ISTIO_ACTIVE_REVISIONS) and
+# its Istio CR / IstioRevision generations (ISTIO_GENERATIONS: a profile's apply raises
+# them, so the passes read mixed, also at one version), over sweep-metadata.txt and every
+# pass's TSVs: one value, or mixed:a | b when they differ (PL26); a file without the key reads
 # unknown (so a pass written before the key mixes in as unknown, never as the other
 # passes' value); unknown for a sweep from before them.
 META_INPUTS=()
@@ -678,7 +674,6 @@ istio_merged_kv() {
 }
 ISTIO_ACTIVE_REVISIONS_M="$(istio_merged_kv ISTIO_ACTIVE_REVISIONS)"
 ISTIO_GENERATIONS_M="$(istio_merged_kv ISTIO_GENERATIONS)"
-ISTIO_PROXY_VERSIONS_M="$(istio_merged_kv ISTIO_PROXY_VERSIONS)"
 
 # Rows: label, then one cell per pass.
 ROWS=()
@@ -1803,11 +1798,10 @@ frontmatter() {
 	local k v o
 	echo "---"
 	for k in suite run_id contexts passes istio_version istio_version_source istio_version_pin \
-		istio_version_by_context istio_notready_at_start istio_ready_waited_sec; do
+		istio_version_by_context; do
 		case "$k" in
 		suite) v="$SUITE" ;;
 		passes) v="$(IFS=,; echo "${PASSES[*]}")" ;;
-		istio_notready_at_start | istio_ready_waited_sec) v="$(istio_start_kv "${k^^}")" ;;
 		*) v="$(meta_get "${k^^}")"; v="${v:-unknown}" ;;
 		esac
 		yaml_str -v o "$v"
@@ -1815,7 +1809,6 @@ frontmatter() {
 	done
 	echo "istio_active_revisions: $(yaml_str "$ISTIO_ACTIVE_REVISIONS_M")"
 	echo "istio_generations: $(yaml_str "$ISTIO_GENERATIONS_M")"
-	echo "istio_proxy_versions: $(yaml_str "$ISTIO_PROXY_VERSIONS_M")"
 	echo "harness_sha: $(yaml_str "$(istio_start_kv HARNESS_SHA)")"
 	[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "settle_sec: $(yaml_str -n "$(meta_get SETTLE_SEC)")"
 	[[ -z "$(meta_get CHURN_RATE)" ]] || echo "churn_rate: $(yaml_str -n "$(meta_get CHURN_RATE)")"
@@ -1836,11 +1829,10 @@ render() {
 		[[ -n "$(meta_get RUN_ID)" ]] && echo "- Run: $(meta_get RUN_ID)"
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
-		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
 		echo "- HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
 		[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "- SETTLE_SEC=$(meta_get SETTLE_SEC) (each pass's wait after its apply, before its probe)"
 		[[ -z "$(meta_get CHURN_RATE)" ]] || echo "- CHURN_RATE=$(meta_get CHURN_RATE) (churn operations/s during each pass's probe)"
-		echo "- Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
+		echo "- Active revisions and Istio CR generations (the sweep's start and its passes): ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}"
 		echo "- TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "- **Warning:** ${WIDTH_WARNING}"
 		[[ -z "$HARNESS_WARNING" ]] || echo "- **Warning:** ${HARNESS_WARNING}"
@@ -1884,11 +1876,10 @@ render() {
 	else
 		echo "Tuning sweep comparison (suite: ${SUITE})"
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
-		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
 		echo "HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
 		[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "SETTLE_SEC=$(meta_get SETTLE_SEC) (each pass's wait after its apply, before its probe)"
 		[[ -z "$(meta_get CHURN_RATE)" ]] || echo "CHURN_RATE=$(meta_get CHURN_RATE) (churn operations/s during each pass's probe)"
-		echo "Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
+		echo "Active revisions and Istio CR generations (the sweep's start and its passes): ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}"
 		echo "TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "WARNING: ${WIDTH_WARNING}"
 		[[ -z "$HARNESS_WARNING" ]] || echo "WARNING: ${HARNESS_WARNING}"

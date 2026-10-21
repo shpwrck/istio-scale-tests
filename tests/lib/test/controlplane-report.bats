@@ -785,8 +785,8 @@ fit_of() {
 	refute_output --partial "mixed:mixed:"
 }
 
-@test "a re-generated report repeats the sweep's record (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT and the start-of-run readiness keys in every format" {
-	local d="${BATS_TEST_TMPDIR}/outcome" p="the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+@test "a re-generated report repeats the sweep's record (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT in every format, an older TSV's readiness keys in none" {
+	local d="${BATS_TEST_TMPDIR}/outcome" p="<mesh-a-ctx> ran v1.30.5 (revision default) at the start and v1.30.6 (revision default) at the end: its rows are not all from one Istio version" fmt
 	mkdir -p "$d"
 	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=v1.30.5\n# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5\n# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy\n# ISTIO_READY_WAITED_SEC=60|' \
 		"$FIXTURE" > "${d}/controlplane-r.tsv"
@@ -796,27 +796,25 @@ fit_of() {
 	assert_output --partial "# SWEEP OUTCOME (outcome): FINISHED, exit 4"
 	assert_output --partial "#   error: ${p}"
 	assert_output --partial "ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5"
-	assert_output --partial "ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy  ISTIO_READY_WAITED_SEC=60"
 	run --separate-stderr "$REPORT" --results-dir "$d" --format markdown
 	assert_output --partial "> - error: ${p}"
 	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
-	assert_output --partial 'istio_notready_at_start: "<mesh-a-ctx>=IstioCNINotHealthy"'
 	run --separate-stderr "$REPORT" --results-dir "$d" --format json
-	[ "$(jq -c '[.sweep_outcomes[0].exit, .sweep_outcomes[0].problems[0], .metadata.istio_version_by_context, .metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec]' <<<"$output")" = \
-		"$(jq -cn --arg p "$p" '[4, $p, "<mesh-a-ctx>=v1.30.5", "<mesh-a-ctx>=IstioCNINotHealthy", "60"]')" ]
+	[ "$(jq -c '[.sweep_outcomes[0].exit, .sweep_outcomes[0].problems[0], .metadata.istio_version_by_context]' <<<"$output")" = \
+		"$(jq -cn --arg p "$p" '[4, $p, "<mesh-a-ctx>=v1.30.5"]')" ]
 	run --separate-stderr "$REPORT" --results-dir "$d" --format charts
 	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
-	assert_output --partial 'istio_ready_waited_sec: "60"'
-	run --separate-stderr "$REPORT" --results-dir "$d" --format csv
-	assert_line "# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy"
-	assert_line "# ISTIO_READY_WAITED_SEC=60"
+	for fmt in text markdown json charts csv; do
+		run --separate-stderr "$REPORT" --results-dir "$d" --format "$fmt"
+		refute_output --regexp '[Nn][Oo][Tt][Rr][Ee][Aa][Dd][Yy]|[Rr][Ee][Aa][Dd][Yy]_[Ww][Aa][Ii][Tt][Ee][Dd]'
+	done
 	assert_line "# SWEEP_OUTCOME_EXIT=4"
 	assert_line "# SWEEP_OUTCOME_PROBLEM=${p}"
 	# Through a symlink to the results dir (no trailing slash), the same record.
 	ln -s "$d" "${BATS_TEST_TMPDIR}/latest"
 	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
 	assert_success
-	[ "$(jq -c '[.sweep_outcomes[0].exit, .metadata.istio_notready_at_start]' <<<"$output")" = '[4,"<mesh-a-ctx>=IstioCNINotHealthy"]' ]
+	[ "$(jq -c '[.sweep_outcomes[0].exit, .metadata.istio_version_by_context]' <<<"$output")" = '[4,"<mesh-a-ctx>=v1.30.5"]' ]
 	rm "${d}/sweep-outcome.txt"
 	run --separate-stderr "$REPORT" --results-dir "$d" --format json
 	[ "$(jq -c '.sweep_outcomes' <<<"$output")" = '[]' ]

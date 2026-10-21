@@ -159,11 +159,11 @@ Usage: $(basename "$0") [options]
   -h, --help           Show this help.
 
 Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
+  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
+  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
+  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
+  wait for members not ready may take.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -175,7 +175,6 @@ Environment:
   (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
   over its istiod pods) and its Running sidecar pods differ by more than
   max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
-  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
 
 Requires GNU timeout for a live run (it bounds each config-dump and Envoy-stats exec;
 on macOS: brew install coreutils, which installs gtimeout). Without it a live run

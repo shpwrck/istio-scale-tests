@@ -120,12 +120,11 @@ client pod that is not being deleted, and stops when there is none: run 001, or 
 until the new pod is Ready.
 
 Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
+  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
+  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
+  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
+  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
+  wait for members not ready may take.
   COEXEC_MIN_PCT_200, COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
   COEXEC_SETTLE_SEC, COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS
   (expected pin; warns on mismatch), COEXEC_RESULTS_DIR (--output-dir; relative to the

@@ -111,11 +111,8 @@ sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has some
 to say): a sweep that has not finished (it died, or still runs), was interrupted or
 stopped early, its failed cells by reason, its problems (the Istio version, the active
 revision or the generation of the Istio CR or its active IstioRevision changed under
-the sweep, the end-of-sweep check failed, or the harness changed) and notes (members
-not ready at its start or end, proxies on another version).
-
-The preamble list includes ISTIO_PROXY_VERSIONS (the proxy versions connected to each
-member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
+the sweep, or the harness changed) and notes (an Istio version check that warned at
+its start, a member not ready or not confirmed at its end).
 
 HARNESS_SHA (in the preamble list): the harness that measured the rows (git describe,
 -dirty with local changes); mixed:<a>,<b> with a warning when the inputs ran on more

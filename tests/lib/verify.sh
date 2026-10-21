@@ -234,30 +234,17 @@ EXTRACTED_PATTERNS=(
 	'function prop_p3_sample('
 	# the Istio version the mesh runs, read at the start and the end (preamble.sh)
 	'istio_live_version() {'
-	'_istio_version_read_all() {'
-	'_istio_version_repro() {'
-	'_istio_version_marker() {'
+	'_istio_read() {'
+	'_istio_read_all() {'
+	'_istio_read_one() {'
+	'_istio_wait_one() {'
 	'istio_version_resolve() {'
-	'_istio_notready_notes() {'
 	'istio_version_recheck() {'
+	'istio_generations_read() {'
+	'istio_generations_diff() {'
 	'istio_version_kv() {'
 	'istio_version_label() {'
-	# the version check runs apart and fails closed; kubectl's why without klog
-	'_istio_version_isolated() {'
-	'_istio_version_resolve_live() {'
-	'_istio_version_recheck_emit() {'
-	'_istio_version_recheck_live() {'
-	'_istio_version_errline() {'
-	'_istio_version_hostkey() {'
-	# masked errors, generations, proxy versions (preamble.sh); proxy summary
-	# (envelope.sh); multi-run refusal (config.sh)
-	'_istio_version_mask() {'
-	'_istio_live_version_read() {'
-	'istio_proxy_versions() {'
-	'_istio_proxy_versions_one() {'
-	'_istio_proxy_versions_off() {'
-	'_istio_proxy_versions_warn() {'
-	'env_proxy_versions_summary() {'
+	# multi-run refusal (config.sh)
 	'_config_run_key() {'
 	'_config_run_ids() {'
 	'_config_sq() {'
@@ -283,8 +270,7 @@ EXTRACTED_PATTERNS=(
 	'function md_cell('
 	'yaml_str() {'
 	'file_min_bytes() {'
-	# a controlplane cell's states (common.sh CP_CELL_AWK); the Istio CR generations a
-	# sweep reads again (preamble.sh)
+	# a controlplane cell's states (common.sh CP_CELL_AWK)
 	'function cp_header('
 	'function cp_isrow('
 	'function cp_key('
@@ -295,12 +281,6 @@ EXTRACTED_PATTERNS=(
 	'function cp_comment('
 	'function cp_end('
 	'function cp_mxo('
-	'istio_generation_causes() {'
-	'istio_generations_read() {'
-	'istio_generations_diff() {'
-	'istio_version_refresh() {'
-	'_istio_proxy_versions_run() {'
-	'_istio_proxy_versions_cleanup() {'
 	# the one JSON string escaper (common.sh)
 	'JSON_STR_AWK='
 	'function js('

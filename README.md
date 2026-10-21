@@ -164,8 +164,8 @@ reports into its own `results/sweep-<RUN_ID>/`. A sweep whose setup or probe fai
 cells still writes its report, then ends with `N of M cells failed` (by reason) and exit code
 4, as it does when the mesh changed under it (the Istio version or active revision changed
 during the sweep, or the generation of a member's Istio CR or active IstioRevision went up: an
-edit with the same version, an OSSM operator upgrade, a TLS profile change; or that end-of-sweep
-check failed) and when its harness changed under it (below). `sweep-outcome.txt` in the sweep
+edit with the same version, an OSSM operator upgrade, a TLS profile change) and when its harness
+changed under it (below). `sweep-outcome.txt` in the sweep
 dir keeps the outcome. While a sweep runs, its dir holds a lock (`.sweep.lock`, its PID):
 another run into that dir is refused while that PID runs, and the lock of a run that died is
 taken over. Each suite README lists its exit codes. Every script has `--help`, and scripts that
@@ -197,49 +197,22 @@ version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSIO
 Before its first change, every suite reads the version each member runs: the IstioRevision its
 `istios.sailoperator.io default` CR names as active (`.status.activeRevisionName`), and that
 revision's `.spec.version`, which must be an exact version (an alias such as `v1.30-latest` is
-not). A CR or IstioRevision that is not reconciled yet (generation, `Reconciled` condition), has
-no active revision, or is migrating between revisions reads as unknown. A CR whose only issue is
-readiness (its state is not Healthy because istiod or IstioCNI is not ready) still gives its
-version: the suite reads it again every `ISTIO_VERSION_READY_POLL_SEC` (5) for up to
-`ISTIO_VERSION_READY_WAIT_SEC` (60) seconds, then records the version with a warning on stderr. An
-istiod rollout in progress (its Deployment has fewer updated pods than pods, a generation not
-observed yet, or pods still terminating, also while the CR already reads Healthy) is waited for
-the same way, and reads as unknown if it outlasts the wait: old and new istiod pods both serve. A
-pod stuck in Terminating (on a lost node, for example) reads this way until it is force-deleted;
-the message then says "istiod pods still terminating" and shows how to list them. A rollout that
-ends on the last read before the deadline is read once more, one poll later. A member stays in the
-wait until the deadline or until it is ready, so a CR that is briefly not settled meanwhile does
-not stop the run early; its answer at the deadline counts. The suite records the result as
-`ISTIO_VERSION`, next to the pin (`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`; `pin` in a
-`--dry-run`, which reads nothing), `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in
-`ISTIO_ACTIVE_REVISIONS` (`<ctx>=<revision>,...`, `<ctx>=` for a member whose Istio CR could not
-be read; `unchecked` in a `--dry-run`, `unknown` after a version check that stopped unexpectedly
-and, in a report, for a TSV written before the key existed), `ISTIO_GENERATIONS` (`<ctx>=<Istio
-CR generation>/<active IstioRevision generation>`: a sweep compares them at its end, so a spec
-edited and changed back during the sweep is a problem too), `ISTIO_PROXY_VERSIONS`
-(`<ctx>=<version>:<count>+...`: the proxies
-connected to each member's istiod by Istio version, from istiod's `pilot_xds` gauge, read through
-the API server's pod proxy, `ISTIO_PROXY_READ_PARALLEL` (20) members at once and one pod of a
-member at a time, a pod being deleted left out with a note (the counts are approximate: a proxy can
-move to another pod during the read); `none` or `unknown` per member; proxies on another version
-than their istiod, such as sidecars not restarted after an upgrade, are a warning and a note of the
-sweep outcome, never a stop), and the members still not ready after the wait in
-`ISTIO_NOTREADY_AT_START` (the wait in `ISTIO_READY_WAITED_SEC`), which a sweep's outcome repeats as
-a note. `ISTIO_NOTREADY_AT_START` reads `none` (every member was ready), `<ctx>=<state>,...` (the
-Istio CR's state, such as `IstiodNotReady`), `<ctx>=rolling` (an istiod rollout still in progress),
-`<ctx>=unreadable` (a rollout at the first read, then every re-read failed), `unchecked` (a
-`--dry-run`, or a version check that stopped unexpectedly) or, in a report, `unknown` (a TSV written
-before the key existed). With `ISTIO_VERSION_CHECK=fail` (the default) a member on another
-version than the pin,
-members on different versions, or a member that cannot be read stop every suite but gateway-api (a
-read-only check that only records it) before it changes anything; `ISTIO_VERSION_CHECK=warn` goes on
-and records what the mesh runs (`mixed:<a>/<b>` or `unknown` when they differ or cannot be read). A
-version check that stops unexpectedly counts as unknown: `fail` stops the run, `warn` records
-`unknown`, and at the end of a sweep it is a problem (exit 4). A sweep reads it again at the end and
-exits 4 when the version, the active revision or the generation of the Istio CR or its active
-IstioRevision changed (also when the Istio CR is not settled at the end, or its istiod Deployment
-cannot be read, but its active revision reads another version); istiod or IstioCNI not ready at the
-end, on the same version, is a warning. From its start a sweep's `sweep-outcome.txt` says
+not). A member is ready when its CR is Healthy and reconciled, at most one revision is in use and
+its istiod Deployment is rolled out; members that are not get one `kubectl wait` for their CR's
+Ready condition (up to `ISTIO_VERSION_READY_WAIT_SEC`, 60 s) and one more read. With
+`ISTIO_VERSION_CHECK=fail` (the default) a version that cannot be read, members on different
+versions, a version other than the pin, or a member still not ready stop every suite but
+gateway-api (a read-only check that only warns) before it changes anything;
+`ISTIO_VERSION_CHECK=warn` goes on, records what the mesh runs (`mixed:<a>/<b>` or `unknown`) and
+adds a note to the sweep's outcome. The suite records the result as `ISTIO_VERSION`, next to the
+pin (`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`; `pin` in a `--dry-run`, which reads
+nothing), `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in `ISTIO_ACTIVE_REVISIONS`
+and its Istio CR and IstioRevision generations in `ISTIO_GENERATIONS` (`<ctx>=<cr>/<revision>`;
+`unchecked` in a `--dry-run`, and in a report `unknown` for a TSV written before the key existed).
+A sweep reads every member again at its end: another version or active revision, or a generation
+that moved (an edit of the Istio CR, or Sail rendering it again), is a problem (exit 4); a member
+not ready or not read at the end is a note. A read that fails prints kubectl's error on the
+console only, never into a record or a report. From its start a sweep's `sweep-outcome.txt` says
 `STATUS=running`; at its end, before its reports, the sweep writes its outcome there
 (`STATUS=finished`, or `stopped` with its reason), and every report of that dir repeats it (json
 `sweep_outcomes`). One interrupted (Ctrl-C, SIGTERM, or SIGHUP when its terminal closes) records
@@ -250,10 +223,9 @@ a lost host) keeps `STATUS=running`, and its reports say it has not finished. On
 sends SIGTERM to the running step's process group (the step and every process it started), SIGKILL
 to what still runs `SWEEP_STOP_GRACE_SEC` (30) seconds later, and only then releases its lock. A
 results dir without `sweep-outcome.txt` is from a sweep that stopped before its start (nothing ran)
-or from an older harness. A kubectl error quoted in a record or a report names the API server as
-`<api-host>` or `<ip>`, never its address.
-`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL` and
-`SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
+or from an older harness.
+`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC` and `SWEEP_STOP_GRACE_SEC` are set in the
+environment, never in a `--config` file.
 
 Every TSV, run summary and report also records what each member ran on: Kubernetes or OpenShift,
 the mesh operator build, the istiod and proxy images, istiod's env and the nodes' provider
@@ -327,9 +299,8 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   bad line or a key outside the suite's list rejects the whole file before anything runs, with
   `file:line` and the reason.
 - **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
-  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK`,
-  `ISTIO_VERSION_READY_*` and
-  `ISTIO_PROXY_READ_PARALLEL` (the version check above), `SWEEP_STOP_GRACE_SEC` (every sweep,
+  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK` and
+  `ISTIO_VERSION_READY_WAIT_SEC` (the version check above), `SWEEP_STOP_GRACE_SEC` (every sweep,
   above) and the version pins in `config/versions.env`.
 - **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and
   what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).

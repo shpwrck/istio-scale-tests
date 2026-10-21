@@ -224,12 +224,15 @@ second_sweep() {
 	[ -z "$stderr" ]
 }
 
-@test "005: a TSV written before the live-version keys pooled with a live one reads mixed for them, never live" {
+@test "005: a TSV written before the live-version keys pooled with a live one reads mixed for them, never live; an older TSV's readiness keys are not shown" {
+	local fmt
 	mkdir -p "${RES}/sweep-old" "${RES}/sweep-new"
 	{
 		echo "# SWEEP_RUN_ID=sold"
 		echo "# RUN_ID=rold"
 		echo "# ISTIO_VERSION=v1.30.5"
+		echo "# ISTIO_NOTREADY_AT_START=rmt=IstiodNotReady"
+		echo "# ISTIO_READY_WAITED_SEC=60"
 		echo "$HDR"
 		prow 2 1 1000 100
 	} > "${RES}/sweep-old/endpoint-rold.tsv"
@@ -240,8 +243,6 @@ second_sweep() {
 		echo "# ISTIO_VERSION_PIN=v1.30.5"
 		echo "# ISTIO_VERSION_SOURCE=live"
 		echo "# ISTIO_VERSION_BY_CONTEXT=src=v1.30.5,rmt=v1.30.5"
-		echo "# ISTIO_NOTREADY_AT_START=rmt=IstiodNotReady"
-		echo "# ISTIO_READY_WAITED_SEC=60"
 		echo "$HDR"
 		prow 2 1 1000 100
 	} > "${RES}/sweep-new/endpoint-rnew.tsv"
@@ -250,30 +251,22 @@ second_sweep() {
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "mixed:live,unknown" ]
 	[ "$(jq -r '.metadata.ISTIO_VERSION_PIN' <<<"$output")" = "mixed:v1.30.5,unknown" ]
 	[[ "$stderr" == *"input TSVs disagree on sweep-level ISTIO_VERSION_SOURCE (live,unknown)"* ]]
-	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "mixed:rmt=IstiodNotReady,unknown" ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format markdown
 	assert_output --partial "mixed:live,unknown"
-	# The new run alone reads live, and carries the readiness keys in every format.
+	for fmt in text csv markdown charts json; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
+		refute_output --regexp '[Nn][Oo][Tt][Rr][Ee][Aa][Dd][Yy]|[Rr][Ee][Aa][Dd][Yy]_[Ww][Aa][Ii][Tt][Ee][Dd]'
+	done
+	# The new run alone reads live; the old one, never checked, unknown.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "live" ]
-	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC]' <<<"$output")" = '["rmt=IstiodNotReady","60"]' ]
-	for fmt in text csv markdown; do
-		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format "$fmt"
-		assert_output --partial "ISTIO_NOTREADY_AT_START"
-		assert_output --partial "rmt=IstiodNotReady"
-	done
-	# The old run alone was never checked: unknown in every format, not absent.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format json
-	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC, .ISTIO_VERSION_SOURCE]' <<<"$output")" = '["unknown","unknown","unknown"]' ]
-	for fmt in text csv markdown; do
-		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format "$fmt"
-		assert_output --regexp 'ISTIO_NOTREADY_AT_START[^A-Za-z0-9]*unknown'
-	done
+	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "unknown" ]
 	# --results-dir through a symlink (results/latest -> sweep-new), no trailing slash.
 	ln -s "${RES}/sweep-new" "${BATS_TEST_TMPDIR}/latest"
 	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
 	assert_success
-	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "rmt=IstiodNotReady" ]
+	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "live" ]
 }
 
 # p1rows <run_id> <mesh> <iterations> <remotes...>: an OK row per (iteration, remote); P1

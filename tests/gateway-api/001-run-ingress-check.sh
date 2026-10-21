@@ -211,11 +211,9 @@ Environment:
   TEST_PLATFORM (${TEST_PLATFORM:-auto}): the hub's platform, for its Argo CD namespace (auto asks
   the hub; kubernetes or openshift is taken as given). The platform record asks each member what
   it serves either way, and warns when that is not TEST_PLATFORM.
-  Environment only (the Istio version read; this read-only check warns and never stops on it):
-  ISTIO_VERSION_READY_WAIT_SEC (how long a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out, is read again, ${ISTIO_VERSION_READY_WAIT_SEC} s; a rollout still running then reads as
-  unknown), ISTIO_VERSION_READY_POLL_SEC (every ${ISTIO_VERSION_READY_POLL_SEC} s), ISTIO_PROXY_READ_PARALLEL
-  (members whose proxy versions are read at once, ${ISTIO_PROXY_READ_PARALLEL}).
+  Environment only: ISTIO_VERSION_READY_WAIT_SEC (${ISTIO_VERSION_READY_WAIT_SEC} s), how long
+  the Istio version read waits once for members not ready. This read-only check warns about
+  a version that is unknown, mixed or not the pin, or a member not ready, and never stops on it.
 $(platform_help_lines reads)
 
 Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
@@ -668,8 +666,8 @@ for i in "${!CONTEXTS[@]}"; do
 done
 
 # The Istio version the members run (PL36): the suites' one reader, the active
-# IstioRevision's version on every member (unknown when unreadable or the Istio CR is not
-# settled), never the Istio CR's requested .spec.version (ISTIO_CR_VERSION[ctx] keeps that
+# IstioRevision's version on every member (unknown when it cannot be read), never the Istio
+# CR's requested .spec.version (ISTIO_CR_VERSION[ctx] keeps that
 # for reference) nor an absent CR. A read-only check records it and never stops on it
 # (--no-stop warns instead); ISTIO_VERSION_PIN keeps config/versions.env's value.
 istio_version_resolve --no-stop "$CONTEXTS_CSV" 0 "${KUBECTL[@]}"

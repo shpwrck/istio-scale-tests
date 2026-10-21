@@ -544,7 +544,7 @@ formats_show() {
 	cmp "$f" "$d"/run-config-*.env
 	grep -qx '# RUN_CONFIG=churn.env' "$d"/churn-zzfail-*.tsv
 	# No Istio CR answered: ISTIO_VERSION_CHECK=warn records that, never the pin.
-	[[ "$stderr" == *"warning: cannot read the running Istio version on 1 of 1 members:"*"  ci-a: "*"reproduce: "* ]]
+	[[ "$stderr" == *"ci-a: the version it runs is unknown"* ]]
 	grep -qx '# ISTIO_VERSION=unknown' "$d"/churn-zzfail-*.tsv
 	grep -qx "# ISTIO_VERSION_PIN=$(bash -c 'source "$1"; echo "$ISTIO_VERSION"' _ "${ROOT}/config/versions.env")" "$d"/churn-zzfail-*.tsv
 	grep -qx '# ISTIO_VERSION_SOURCE=live' "$d"/churn-zzfail-*.tsv

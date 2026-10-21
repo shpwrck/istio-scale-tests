@@ -162,7 +162,7 @@ reject() {
 	# Every suite reads it; a file never turns the Istio version check off.
 	reject 1 'ISTIO_VERSION_CHECK is not settable from --config (env only: running on a mesh whose Istio version is not the pin' 'ISTIO_VERSION_CHECK=warn'
 	# The other shared keys every sweep or version check reads say why too.
-	reject 1 'ISTIO_PROXY_READ_PARALLEL is not settable from --config (env only: ' 'ISTIO_PROXY_READ_PARALLEL=5'
+	reject 1 'ISTIO_VERSION_READY_WAIT_SEC is not settable from --config (env only: the version check' 'ISTIO_VERSION_READY_WAIT_SEC=5'
 	reject 1 'SWEEP_STOP_GRACE_SEC is not settable from --config (env only: a setting of every sweep' 'SWEEP_STOP_GRACE_SEC=1'
 }
 
@@ -700,28 +700,12 @@ with_run_config() {
 	assert_output --partial "error: 2 of 2 cells failed: PROBE_FAILED x2."
 }
 
-@test "pooled ISTIO_PROXY_VERSIONS compare by version set: the same versions with other proxy counts are one value (shown without counts), other versions are mixed" {
-	source "${ROOT}/tests/lib/capacity.sh"
-	source "${ROOT}/tests/lib/envelope.sh"
-	local d="${BATS_TEST_TMPDIR}/pv-pooled"
+@test "config_merged_preamble leaves out the keys older TSVs carry that no run writes any more, so a pooled report never shows their value as every input's" {
+	local d="${BATS_TEST_TMPDIR}/old-keys"
 	mkdir -p "$d"
-	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30+1.30.4:2,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/a.tsv"
-	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.30.4:1+1.30.5:31,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/b.tsv"
-	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30+1.30.4:2,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/c.tsv"
-	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.31.0:30,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/d.tsv"
-	run config_merged_preamble "$d/a.tsv" "$d/b.tsv"
-	assert_line "ISTIO_PROXY_VERSIONS=ci-a=1.30.4+1.30.5,ci-b=1.30.5"
-	run env_proxy_versions_summary "ci-a=1.30.4+1.30.5,ci-b=1.30.5"
-	assert_output "1.30.4, 1.30.5 (2 members; proxy counts differ between the pooled runs)"
-	# The same counts: the value as it is.
-	run config_merged_preamble "$d/a.tsv" "$d/c.tsv"
-	assert_line "ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30+1.30.4:2,ci-b=1.30.5:34"
-	# Another version: mixed.
-	run config_merged_preamble "$d/a.tsv" "$d/b.tsv" "$d/d.tsv"
-	assert_line "ISTIO_PROXY_VERSIONS=mixed:ci-a=1.30.4+1.30.5,ci-b=1.30.5 | ci-a=1.31.0:30,ci-b=1.30.5:34"
-	# A member that could not be read stays unknown, not a version.
-	run env_proxy_versions_summary "ci-a=1.30.5:120+1.30.4:3,ci-b=1.30.5:5,ci-c=none,ci-d=unknown"
-	assert_output "1.30.5: 125, 1.30.4: 3 (4 members; 1 with none; 1 unknown)"
-	run env_proxy_versions_summary "ci-a=1.30.5+1.30.4,ci-b=1.30.5,ci-c=unknown"
-	assert_output "1.30.5, 1.30.4 (3 members; 1 unknown; proxy counts differ between the pooled runs)"
+	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30\n# ISTIO_NOTREADY_AT_START=none\n# ISTIO_READY_WAITED_SEC=0\n# ISTIO_GENERATIONS=ci-a=2/2\ntimestamp\tx\n' > "$d/old.tsv"
+	printf '# RUN_ID=r2\n# ISTIO_GENERATIONS=ci-a=2/2\ntimestamp\tx\n' > "$d/new.tsv"
+	run config_merged_preamble "$d/old.tsv" "$d/new.tsv"
+	assert_success
+	assert_output "$(printf '%s\n' RUN_ID=mixed:r1,r2 ISTIO_GENERATIONS=ci-a=2/2)"
 }

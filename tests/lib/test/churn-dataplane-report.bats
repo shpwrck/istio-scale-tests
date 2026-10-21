@@ -283,7 +283,8 @@ two_pairs() {
 	[[ "$stderr" != *"mkdir"* && "$stderr" != *"run-${id1}/run-"* ]]
 }
 
-@test "005: the start-of-run readiness keys and the recorded outcome are in every format" {
+@test "005: the recorded outcome is in every format; an older TSV's readiness keys are not shown" {
+	local note="Istio version check at the start: c2: not ready (Istio CR state is IstioCNINotHealthy) after a wait of up to 60s" fmt
 	{
 		echo "# RUN_ID=r1"
 		echo "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
@@ -292,23 +293,17 @@ two_pairs() {
 		crow c1 0 baseline 50 2 5 OK N/A N/A
 		crow c1 1 churn 48 4 9 OK 30 99
 	} > "${RES}/churn-dataplane-r1.tsv"
-	printf '%s\n' STATUS=finished 'RUN_ID=r1' 'EXIT=0' TOTAL=1 FAILED=0 'NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)' > "${RES}/sweep-outcome.txt"
+	printf '%s\n' STATUS=finished 'RUN_ID=r1' 'EXIT=0' TOTAL=1 FAILED=0 "NOTE=${note}" > "${RES}/sweep-outcome.txt"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
-	assert_line "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
-	assert_line "# ISTIO_READY_WAITED_SEC=60"
 	assert_line "# SWEEP_OUTCOME_RUN_ID=r1"
-	assert_line "# SWEEP_OUTCOME_NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)"
+	assert_line "# SWEEP_OUTCOME_NOTE=${note}"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	[ "$(jq -c '[.metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec, .sweep_outcomes[0].notes[0]]' <<<"$output")" = \
-		'["c2=IstioCNINotHealthy","60","not ready at the start: IstioCNINotHealthy on 1 member (c2)"]' ]
+	[ "$(jq -r '.sweep_outcomes[0].notes[0]' <<<"$output")" = "$note" ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
-	assert_output --partial '| ISTIO_NOTREADY_AT_START | `c2=IstioCNINotHealthy` |'
-	assert_output --partial '> - warning: not ready at the start: IstioCNINotHealthy on 1 member (c2)'
-	run --separate-stderr "$REPORT" --results-dir "$RES"
-	assert_output --partial "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
-	# charts: YAML frontmatter keys, lowercase as in the json metadata.
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
-	assert_line 'istio_notready_at_start: "c2=IstioCNINotHealthy"'
-	assert_line 'istio_ready_waited_sec: "60"'
+	assert_output --partial "> - warning: ${note}"
+	for fmt in text csv json md charts; do
+		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		refute_output --regexp '[Nn][Oo][Tt][Rr][Ee][Aa][Dd][Yy]_|[Rr][Ee][Aa][Dd][Yy]_[Ww][Aa][Ii][Tt][Ee][Dd]'
+	done
 }

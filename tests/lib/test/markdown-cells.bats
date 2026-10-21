@@ -160,15 +160,15 @@ _mixed_tsv() {
 
 @test "a merged value whose parts hold commas (mixed:a | b) stays in one markdown table cell in controlplane 004 and the scale envelope" {
 	local f="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv" rep="${ROOT}/tests/controlplane/004-report-results.sh"
-	# Two TSVs of one run whose members connected other proxy versions.
-	awk '{ print } /^# ISTIO_VERSION=/ { print "# ISTIO_PROXY_VERSIONS=mesh-a=1.30.5:3,mesh-b=1.30.5:4" }' "$f" > "${RES}/controlplane-fixture-t2.tsv"
-	awk '{ print } /^# ISTIO_VERSION=/ { print "# ISTIO_PROXY_VERSIONS=mesh-a=1.31.0:7,mesh-b=1.31.0:9" }' "$f" > "${RES}/controlplane-fixture-t2-b.tsv"
+	# Two TSVs of one run whose members ran other istiod replica counts and Istio versions.
+	awk '{ print } /^# ISTIO_VERSION=/ { print "# ISTIO_VERSION_BY_CONTEXT=mesh-a=1.30.5,mesh-b=1.30.5"; print "# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,mesh-b=3" }' "$f" > "${RES}/controlplane-fixture-t2.tsv"
+	awk '{ print } /^# ISTIO_VERSION=/ { print "# ISTIO_VERSION_BY_CONTEXT=mesh-a=1.31.0,mesh-b=1.31.0"; print "# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=2,mesh-b=3" }' "$f" > "${RES}/controlplane-fixture-t2-b.tsv"
 	run --separate-stderr "$rep" --results-dir "$RES" --format markdown
 	assert_success
-	assert_line --regexp '^\| proxy versions at start \(connected to istiod, summed over the members\) \| mixed:mesh-a=1\.3[01]\.[05]:[0-9],mesh-b=1\.3[01]\.[05]:[0-9] \\\| mesh-a=1\.3[01]\.[05]:[0-9],mesh-b=1\.3[01]\.[05]:[0-9] \|$'
+	assert_line --regexp '^\| istiod replicas by context \| mixed:mesh-a=[23],mesh-b=3 \\\| mesh-a=[23],mesh-b=3 \|$'
 	source "${ROOT}/tests/lib/envelope.sh"
 	source "${ROOT}/tests/lib/platform.sh"
 	run --separate-stderr render_scale_envelope "$RES" "$rep" mesh-a,mesh-b false
 	assert_success
-	assert_line --regexp '^\| Proxy \(Envoy\) versions at the start \| mixed:mesh-a=[^|]* \\\| mesh-a=[^|]* \| '
+	assert_line --regexp '^\| Istio version \| .*by member mixed:mesh-a=[^|]* \\\| mesh-a=[^|]*\) \| '
 }

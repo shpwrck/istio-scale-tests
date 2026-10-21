@@ -127,7 +127,7 @@ which wins over the upstream docs there when they disagree.
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `SWEEP_STOP_GRACE_SEC` |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC`, `SWEEP_STOP_GRACE_SEC` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check) |

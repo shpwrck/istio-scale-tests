@@ -53,9 +53,6 @@
 #                                                  -> display form: `3 per cluster`,
 #       `1-3 per cluster (varies by cluster)`, `3 (first context only)` for a TSV
 #       written before every context was read.
-#   env_proxy_versions_summary <ISTIO_PROXY_VERSIONS>
-#                                                  -> the proxy versions summed over the
-#       members, no context names: `1.30.5: 2400, 1.30.4: 3 (20 members; 1 unknown)`.
 #
 # Exposes (thin kubectl wrappers — each takes <ctx> <kubectl_argv...>):
 #   env_istiod_resources <ctx> <argv...>
@@ -242,46 +239,6 @@ env_sla_verdict() {
 			else reason = reason "; also " cl[i]
 		}
 		printf "%s|%s\n", verdict, reason
-	}'
-}
-
-# env_proxy_versions_summary <ISTIO_PROXY_VERSIONS>: The proxies connected to istiod
-# at the start, by Istio version, summed over the members and without their names (the
-# envelope is pasted into campaign docs; one line for 20 members), most first:
-# "1.30.5: 2400, 1.30.4: 3 (20 members; 1 unknown)". A member with no proxy counts as
-# "with none", one whose read failed as unknown; a value that is not per member (unknown,
-# unchecked, a pooled mixed:a,b) is printed as it is. A pooled value whose runs
-# connected the same versions with different counts carries no counts
-# (config_merged_preamble): its versions are listed without them, "1.30.5, 1.30.4 (20
-# members; proxy counts differ between the pooled runs)". Pure.
-# shellcheck disable=SC2329
-env_proxy_versions_summary() {
-	awk -v v="${1:-}" 'BEGIN {
-		if (v == "" || v == "unknown" || v == "unchecked" || v ~ /^mixed:/) { print (v == "" ? "unknown" : v); exit }
-		n = split(v, p, ",")
-		for (i = 1; i <= n; i++) {
-			if (!match(p[i], /=[^=]*$/)) { unk++; nm++; continue }
-			nm++
-			l = substr(p[i], RSTART + 1)
-			if (l == "none") { none++; continue }
-			if (l == "unknown" || l !~ /^[^:+]+(:[0-9]+)?(\+[^:+]+(:[0-9]+)?)*$/) { unk++; continue }
-			m = split(l, e, "+")
-			for (j = 1; j <= m; j++) {
-				k = e[j]
-				if (k ~ /:[0-9]+$/) { c = substr(k, match(k, /:[0-9]+$/) + 1); sub(/:[0-9]+$/, "", k) } else { c = 0; nocount = 1 }
-				if (!(k in s)) o[++no] = k
-				s[k] += c
-			}
-		}
-		if (!nocount) for (i = 2; i <= no; i++) { x = o[i]; for (j = i - 1; j >= 1 && (s[o[j]] < s[x] || (s[o[j]] == s[x] && o[j] > x)); j--) o[j + 1] = o[j]; o[j + 1] = x }
-		out = ""
-		for (i = 1; i <= no; i++) out = out (i > 1 ? ", " : "") o[i] (nocount ? "" : ": " s[o[i]])
-		if (out == "") out = (unk ? "unknown" : "no proxy connected")
-		t = nm " member" (nm == 1 ? "" : "s")
-		if (none) t = t "; " none " with none"
-		if (unk) t = t "; " unk " unknown"
-		if (nocount) t = t "; proxy counts differ between the pooled runs"
-		print out " (" t ")"
 	}'
 }
 
@@ -553,9 +510,6 @@ render_scale_envelope() {
 	# list below does: paste a redacted copy (redact-results.sh maps them).
 	local dw_lines=""
 	dw_lines="$(printf '%s' "$json" | jq -r '(.metadata.data_warnings // [])[] | "> **Data warning:** " + (split("\n") | join(" "))' 2>/dev/null || true)"
-	# The proxy versions at the start, summed over the members (no context names).
-	local proxy_versions
-	proxy_versions="$(env_proxy_versions_summary "$(jq_get '.metadata.istio_proxy_versions')")"
 	# The sweep's outcome (sweep-outcome.txt), as the markdown report prints it: a campaign
 	# record pasted from the envelope must show a failed or unfinished sweep.
 	local outcome_lines
@@ -686,7 +640,7 @@ render_scale_envelope() {
 	# Table cells: a pooled or per-member value can hold " | " (a merged preamble value,
 	# config_merged_preamble), which would split the cell (md_cell, PL19).
 	local _cell
-	for _cell in proxy_versions istio_version istio_version_src replicas_label proxy_check \
+	for _cell in istio_version istio_version_src replicas_label proxy_check \
 		topology peak_scope peak_traffic peak_mesh peak_svc peak_ns reps_label total_svc total_eps; do
 		md_cell -v "$_cell" "${!_cell}"
 	done
@@ -725,7 +679,6 @@ ${outcome_lines}
 | Network topology | ${topology} | istiod network env or \`istio-system\` \`topology.istio.io/network\` label, across contexts |
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Traffic management | ${peak_traffic} | sweep peak \`traffic_config\` (none preferred when a vsdr cell ties at the peak mesh size) |
-| Proxy (Envoy) versions at the start | ${proxy_versions} | sweep header \`ISTIO_PROXY_VERSIONS\` (istiod \`pilot_xds\` by \`version\`, summed over the members; a sidecar keeps its version until its pod restarts) |
 | Istio version | ${istio_version}, source ${istio_version_src} | sweep header \`ISTIO_VERSION\` (\`ISTIO_VERSION_SOURCE\` live: each member's active IstioRevision \`.spec.version\` at the start; the end-of-sweep read is under "Sweep outcome" above when it found a change) |
 | Platform / mesh build | ${_env_platform_row} | report \`platform\` and the \`*_by_context\` keys of the TSVs' platform record (gateway proxy: the ingress and east-west gateways' build; tuning objects: a tuning profile's labelled objects and marker, none outside a tuning run; digests shortened) |
 

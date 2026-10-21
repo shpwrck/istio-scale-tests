@@ -233,14 +233,11 @@ Exit codes:
      cut short while its rows were written; stderr ends with "N of M cells failed" by
      reason), or the Istio version or active revision changed during the sweep (read
      again at its end), or the generation of a member's Istio CR or active
-     IstioRevision went up at the same version (an edit of the Istio CR; or, the
-     IstioRevision alone, an OSSM operator upgrade or a TLS security profile change),
-     or that end-of-sweep version check failed, or the harness (a file under tests/,
-     config/, charts/ or terraform/) changed during the sweep (HARNESS_SHA read at its
-     start and its end), or the cells could not be counted (TOTAL=unknown). A cell
-     counts once, by its last row: a status row fails it, with that reason; a
-     measurement does not. Proxies on another Istio version than their istiod at the
-     start (ISTIO_PROXY_VERSIONS) are a note, never a failure. M covers every cell of
+     IstioRevision moved at the same version (an edit of the Istio CR, or Sail rendering
+     it again), or the harness (a file under tests/, config/, charts/ or terraform/)
+     changed during the sweep (HARNESS_SHA read at its start and its end), or the cells
+     could not be counted (TOTAL=unknown). A cell counts once, by its last row: a
+     status row fails it, with that reason; a measurement does not. M covers every cell of
      the matrix; one without a row fails as NOT_RUN. Cells the memory guard skipped
      (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart, on stdout, and do
      not make it 4. The outcome is also in sweep-outcome.txt, the markdown report and
@@ -256,11 +253,11 @@ Exit codes:
      (.sweep.lock, its PID).
 
 Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
+  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
+  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
+  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
+  wait for members not ready may take.
   SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
   CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
   CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
@@ -303,8 +300,7 @@ Environment:
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
 $(platform_help_lines all)
   SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
-  before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read
-  at once. Environment only (config/options.env).
+  before SIGKILL. Environment only (config/options.env).
 
 Requires GNU timeout for a live run (002's config-dump samples, the memory guard's
 Envoy-stats reads; on macOS: brew install coreutils, which installs gtimeout). Without
@@ -2350,9 +2346,9 @@ else
 fi
 echo "=========================================="
 echo ""
-# The Istio version again, after the last window and before the reports (read-only).
-IV_END=()
-istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
+# The Istio version again, after the last window and before the reports (read-only): a
+# change is a problem of the outcome, a member it cannot confirm a note.
+istio_version_recheck ${KUBECTL[@]+"${KUBECTL[@]}"}
 # Every cell without a measurement has the status row emit_failed_row wrote (its
 # context column is the status); count them by reason, the memory guard's SKIPPED_* apart
 # (skipped on purpose, not failed: C2), before the reports (they read sweep-outcome.txt).
@@ -2464,7 +2460,7 @@ else
 fi
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
-sweep_finish ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --where "$_cells_where" \
+sweep_finish ${stop_args[@]+"${stop_args[@]}"} --where "$_cells_where" \
 	"$CELLS_TOTAL" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 ((_cells_counted)) || echo "The sweep dir: ${OUTPUT_DIR} (count its cells with: ${SCRIPT_DIR}/004-report-results.sh --results-dir ${OUTPUT_DIR})" >&2
 

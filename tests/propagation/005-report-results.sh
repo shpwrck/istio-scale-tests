@@ -28,11 +28,9 @@
 #
 # Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA,
 # ISTIO_VERSION and its ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE /
-# ISTIO_VERSION_BY_CONTEXT, the start-of-run readiness ISTIO_NOTREADY_AT_START /
-# ISTIO_READY_WAITED_SEC, each member's active revision ISTIO_ACTIVE_REVISIONS, its
-# Istio CR / IstioRevision generations ISTIO_GENERATIONS and connected proxy versions
-# ISTIO_PROXY_VERSIONS (unknown for a TSV written before them; mixed when pooled inputs
-# differ), KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
+# ISTIO_VERSION_BY_CONTEXT, each member's active revision ISTIO_ACTIVE_REVISIONS and its
+# Istio CR / IstioRevision generations ISTIO_GENERATIONS (unknown for a TSV written before
+# them; mixed when pooled inputs differ), KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
 # report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
 # and the platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh)
 # over all input TSVs.
@@ -177,8 +175,8 @@ sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has some
 to say): a sweep that has not finished (it died, or still runs), was interrupted or
 stopped early, its failed cells by reason, its problems (the Istio version, the active
 revision or the generation of the Istio CR or its active IstioRevision changed under
-the sweep, the end-of-sweep check failed, or the harness changed) and notes (members
-not ready at its start or end).
+the sweep, or the harness changed) and notes (an Istio version check that warned at
+its start, a member not ready or not confirmed at its end).
 
 Environment:
   FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the skew filters above: fields 21 and
@@ -250,7 +248,7 @@ fi
 # PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
 # over every input (config_merged_preamble): one value, or mixed:a,b with a warning; the
 # platform record's keys (PLATFORM_KEYS) by platform_report_values instead, below.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256
 	"${PLATFORM_KEYS[@]}")
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup

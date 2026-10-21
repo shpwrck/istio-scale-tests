@@ -173,7 +173,7 @@ From its start (after its preflights, before the first cell), every run's `sweep
 report of the dir repeats it. A record that still says `running` is from a sweep that died (or
 still runs): clean up and run it again, as above.
 
-The TSV preamble keeps the run's `ISTIO_NOTREADY_AT_START` and `HARNESS_SHA`: `git describe
+The TSV preamble keeps the run's `HARNESS_SHA`: `git describe
 --always --abbrev=7`, plus `-dirty` when a file under `tests/`, `config/`, `charts/` or
 `terraform/` has an uncommitted change (tracked, or untracked and not ignored; the sweep's own
 output dir never counts). The sweep reads it at its start and at its end: a different value is a
@@ -200,10 +200,10 @@ wrote its reports, but some cells failed (a status row instead of a measurement:
 `PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`, `INTERRUPTED`; `INCOMPLETE`: rows for fewer members
 than the mesh size, or a member with fewer rows than its window wrote; or `NOT_RUN`: planned, but no
 row), or the Istio version, active revision or the generation of the Istio CR or its active
-IstioRevision changed during the sweep (read again before the reports), or that end-of-sweep version
-check failed, or its harness (a file under `tests/`, `config/`, `charts/` or `terraform/`,
-`HARNESS_SHA`) changed during the sweep (read at its start and its end), or the cells could not be
-counted (`TOTAL=unknown`; the rows are intact: `004` counts them from the sweep dir). An
+IstioRevision changed during the sweep (read again before the reports), or its harness (a file
+under `tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep
+(read at its start and its end), or the cells could not be counted (`TOTAL=unknown`; the rows are
+intact: `004` counts them from the sweep dir). An
 `INCOMPLETE` cell, and a sweep outcome that is not `finished`, names a failed cell (`NOT_RUN`
 among them) or records a `PROBLEM` (the record of each sweep dir the report's inputs come from,
 pooled or not; the verdict names each), also turns the report's SLA verdict from `PASS` to
@@ -216,9 +216,7 @@ outcome names up to five `NOT_RUN` cells, to run again into a new dir), and how 
 failed partway. A cell counts once, by its last row: a status row fails it, with that reason (also
 after some contexts' rows: a cell that failed partway); a measurement does not. `1` wins over `4`.
 Cells the memory guard skipped (`SKIPPED_MEM_GUARD`, and `SKIPPED_SERIES_STOPPED` after it) are
-counted apart, as skipped on purpose, and do not make it `4`. Proxies connected on another Istio
-version than their istiod at the start (`ISTIO_PROXY_VERSIONS`: a sidecar keeps the version it was
-injected with until its pod restarts) are a note, never a failure. `sweep-outcome.txt` in the
+counted apart, as skipped on purpose, and do not make it `4`. `sweep-outcome.txt` in the
 sweep dir keeps the outcome; the reports and the scale envelope repeat it.
 
 **More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
@@ -250,11 +248,9 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   record) and `PLATFORM_READ_PARALLEL` (members read at once), which every suite takes. A step
   ignores the keys it does not use. Environment only: `CONTROLPLANE_TEST_NAMESPACE` (`005`
   deletes it), `CONTROLPLANE_MAX_MATRIX` (the `--force-large-matrix` acknowledgment stays per
-  run), `ISTIO_VERSION_CHECK`,
-  `ISTIO_VERSION_READY_WAIT_SEC` / `_POLL_SEC`, `ISTIO_PROXY_READ_PARALLEL`, the sweep's
-  `SWEEP_STOP_GRACE_SEC` (every suite's, see the top-level README)
-  and the version pins. Any other key, or any bad line, rejects the whole file before anything
-  runs, with `file:line` and the reason.
+  run), `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC`, the sweep's `SWEEP_STOP_GRACE_SEC`
+  (every suite's, see the top-level README) and the version pins. Any other key, or any bad line,
+  rejects the whole file before anything runs, with `file:line` and the reason.
 - **Precedence:** flag > `--config` > environment > default. The file loads before
   `options.env`, so the defaults derived there follow it: a config
   `CONTROLPLANE_NS_DELETE_TIMEOUT_SEC` also sets `001`'s namespace wait unless
@@ -544,10 +540,9 @@ Results go to `tests/controlplane/results/` (a sweep uses `results/sweep-<RUN_ID
   pods that run over the per-replica limit times their number, so a Pending or evicted replica
   counts in neither; an `INCOMPLETE` cell, a sweep outcome that is not clean (not `finished`, a
   failed cell such as `NOT_RUN`, or a `PROBLEM`), inputs of more than one Istio version, or a cell
-  on fewer istiod pods than wanted turns `PASS` into `CAUTION`). It also sums `ISTIO_PROXY_VERSIONS`
-  over the members (`Proxy (Envoy)
-  versions at the start`, no context names). Its header repeats each of `004`'s data warnings
-  (`> **Data warning:**` lines); they can name members, so paste from a redacted copy.
+  on fewer istiod pods than wanted turns `PASS` into `CAUTION`). Its header repeats each of
+  `004`'s data warnings (`> **Data warning:**` lines); they can name members, so paste from a
+  redacted copy.
 - `sweep-outcome.txt` (sweep): the outcome, which the reports and the envelope repeat. Its keys:
   `STATUS` (`running` from the sweep's start until its end, then `finished`, `stopped` or
   `interrupted`), `RUN_ID`, `HARNESS_SHA`, `STARTED_AT` (UTC with `Z`, as every time of the

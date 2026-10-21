@@ -105,14 +105,13 @@ when and by which signal; the running step's process group gets SIGTERM, and SIG
 `SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `4` it finished and wrote its
 reports, but some mesh sizes failed (setup or probe exited non-zero, a `SETUP_FAILED` /
 `PROBE_FAILED` placeholder row), or the Istio version, active revision or generation of the Istio
-CR or its active IstioRevision changed during the sweep (read again before the reports), or that
-check failed, or its harness (a file under `tests/`, `config/`, `charts/` or `terraform/`,
+CR or its active IstioRevision changed during the sweep (read again before the reports), or its
+harness (a file under `tests/`, `config/`, `charts/` or `terraform/`,
 `HARNESS_SHA`) changed during the sweep (read at its start and its end). The last line on stderr
 says how many, by reason. `sweep-outcome.txt` keeps the outcome (`STATUS=running` until the sweep
 ends, then `finished`, `stopped` or `interrupted`), and every report repeats it. When a sweep did
 not finish and no sweep runs any more, run `007-cleanup.sh` on its contexts, then the sweep again
-into a new dir. Proxies connected on another Istio version than their istiod at the start
-(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
+into a new dir.
 Rows a probe wrote with a non-OK status are measurements, not failures: the report counts them in
 `n_total`. Its `n_attempted` column is what the probes were configured to run (each TSV's
 `ITERATIONS`: iterations for P1, times its remotes for P2 and P3, and what a failed mesh size's

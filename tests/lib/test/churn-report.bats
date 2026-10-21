@@ -40,7 +40,7 @@ tsv() {
 
 # --- 004: run provenance -------------------------------------------------------
 
-@test "004: harness_sha, istio_version, the start-of-run readiness keys and the platform record come from the TSV preamble, in every format" {
+@test "004: harness_sha, istio_version and the platform record come from the TSV preamble, in every format; an older TSV's readiness keys are not shown" {
 	tsv "${RES}/churn-a.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" \
 		"ISTIO_NOTREADY_AT_START=ctx-b=IstiodNotReady" "ISTIO_READY_WAITED_SEC=60" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
@@ -52,24 +52,24 @@ tsv() {
 	assert_line 'platform: "kubernetes"'
 	assert_line 'node_provider_by_context: "ctx-a=kind,ctx-b=kind"'
 	assert_line 'kube_versions: "ctx-a=v1.34.1,ctx-b=v1.34.1"'
-	assert_output --partial 'istio_notready_at_start: "ctx-b=IstiodNotReady"'
+	refute_output --partial 'notready'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
 	assert_output --partial 'harness_sha: "feed123-test"'
 	assert_output --partial 'istio_version: "1.99.0"'
 	assert_line 'mesh_operator_by_context: "ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"'
-	assert_output --partial 'istio_ready_waited_sec: "60"'
+	refute_output --partial 'waited'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# HARNESS_SHA=feed123-test"
 	assert_line "# ISTIO_VERSION=1.99.0"
 	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5"
 	assert_line "# KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1"
-	assert_line "# ISTIO_NOTREADY_AT_START=ctx-b=IstiodNotReady"
+	refute_output --partial 'NOTREADY'
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_output --partial "# harness_sha (recorded by 002): feed123-test"
 	assert_output --partial "# istio_version (recorded by 002): 1.99.0"
 	assert_line "# platform: kubernetes"
 	assert_line "# proxy_image_by_context: ctx-a=proxyv2:1.30.5,ctx-b=proxyv2:1.30.5"
-	assert_output --partial "# istio_notready_at_start: ctx-b=IstiodNotReady  istio_ready_waited_sec: 60"
+	refute_output --partial 'notready'
 	[ -z "$stderr" ]
 }
 
@@ -318,9 +318,8 @@ STUB
 	grep -qx "# ISTIO_VERSION=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_SOURCE=live" "$f"
-	# Every member was ready at the start (the stub answers Healthy).
-	grep -qx "# ISTIO_NOTREADY_AT_START=none" "$f"
-	grep -qx "# ISTIO_READY_WAITED_SEC=0" "$f"
+	grep -qx "# ISTIO_ACTIVE_REVISIONS=ctx-a=default" "$f"
+	grep -qx "# ISTIO_GENERATIONS=ctx-a=2/2" "$f"
 	head -1 "$f" | grep -Eq '(\+00:00|Z)$'
 	grep -Eq '^\| Date \(UTC\) \| .*(\+00:00|Z) \|$' "$RES"/churn-*.md
 	grep -q '^| Harness SHA | ' "$RES"/churn-*.md
@@ -388,21 +387,14 @@ STUB
 		--source-context ctx-a --remote-contexts ctx-b --iterations 1 --timeout 2 --settle 0 \
 		--deployment-count 1 --output-dir "$RES"
 	assert_failure 1
-	[[ "$stderr" == *"the mesh runs Istio v1.29.0 (ctx-a=v1.29.0,ctx-b=v1.29.0), but ISTIO_VERSION is ${ISTIO_VERSION}"* ]]
-	[[ "$stderr" == *"Nothing was changed"* ]]
+	[[ "$stderr" == *"the Istio version check failed"*"v1.29.0"* ]]
 	run grep -c ' scale ' "$STUB_LOG"
 	assert_output 0
 	[ -z "$(ls "$RES"/churn-*.tsv 2>/dev/null)" ]
-	# A member whose Istio CR cannot be read stops it too.
-	STUB_ISTIO_VERSION=fail CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
-		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
-	assert_failure 1
-	[[ "$stderr" == *"cannot read the running Istio version on 1 of 1 members:"*"ctx-a: error: You must be logged in to the server (Unauthorized)"*"reproduce: "*"--context ctx-a get istios.sailoperator.io default -o yaml"* ]]
 	# warn: the run goes on and records what the mesh runs, next to the pin.
 	ISTIO_VERSION_CHECK=warn CHURN_POLL_INTERVAL_MS=50 PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
 		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
 	assert_success
-	[[ "$stderr" == *"warning: the mesh runs Istio v1.29.0"*"Going on (ISTIO_VERSION_CHECK=warn): the results record ISTIO_VERSION=v1.29.0 (ISTIO_VERSION_PIN=${ISTIO_VERSION})"* ]]
 	f="$(ls "$RES"/churn-*.tsv)"
 	grep -qx "# ISTIO_VERSION=v1.29.0" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"
@@ -412,11 +404,6 @@ STUB
 	assert_output --partial 'istio_version: "v1.29.0"'
 	assert_output --partial 'istio_version_source: "live"'
 	assert_output --partial "istio_version_pin: \"${ISTIO_VERSION}\""
-	# A bad policy value is refused, not read as fail or warn.
-	ISTIO_VERSION_CHECK=yes PATH="${BIN}:${PATH}" run --separate-stderr "$PROBE" \
-		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES"
-	assert_failure 1
-	[[ "$stderr" == *"ISTIO_VERSION_CHECK must be fail or warn (got: yes)"* ]]
 }
 
 @test "004: two sweeps in one dir stop the report; --allow-multi-run says so in every format and shows a varying key as mixed" {

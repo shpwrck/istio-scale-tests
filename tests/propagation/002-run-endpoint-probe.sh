@@ -169,11 +169,11 @@ summary says how many iterations drained late. One definition decides for both:
 tests/lib/propagation.sh.
 
 Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
+  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
+  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
+  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
+  wait for members not ready may take.
   SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
   PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS, PROPAGATION_SETTLE_SEC,
   PROPAGATION_DRAIN_TIMEOUT_SEC (drain wait per iteration, default 20s),
@@ -182,7 +182,6 @@ Environment:
   FANOUT_CTX_STRIDE (ports per context, default 20),
   FANOUT_MAX_SKEW_MS (baseline scrape-skew ceiling, default 1000),
   PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root).
-  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
 EOF
 }
 

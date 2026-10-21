@@ -252,18 +252,13 @@ results will go, and:
      `TEST_PLATFORM` looks found none); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`,
      which can be an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each
      active IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
-     `unknown` for a member that cannot be read or whose Istio CR is not settled), with
-     `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in `ISTIO_ACTIVE_REVISIONS`, the
-     generations of its Istio CR and active IstioRevision in `ISTIO_GENERATIONS`
-     (`<ctx>=<cr>/<revision>`), the proxy versions connected to its istiod in
-     `ISTIO_PROXY_VERSIONS`, and the `config/versions.env` pin in `ISTIO_VERSION_PIN`: this
-     read-only check warns on a difference and never stops on it. A member whose istiod or IstioCNI
-     is not ready (or whose istiod is rolling out) is read again every
-     `ISTIO_VERSION_READY_POLL_SEC` (5) for up to `ISTIO_VERSION_READY_WAIT_SEC` (60) seconds, both
-     set in the environment only, as is `ISTIO_PROXY_READ_PARALLEL` (20), the members whose proxy
-     versions are read at once; the members still not ready then are in `ISTIO_NOTREADY_AT_START`
-     (`none` when every member was ready), with the wait in `ISTIO_READY_WAITED_SEC`; and the tuning
-     baseline;
+     `unknown` for a member whose version cannot be read), with `ISTIO_VERSION_BY_CONTEXT`, each
+     member's active revision in `ISTIO_ACTIVE_REVISIONS`, the generations of its Istio CR and
+     active IstioRevision in `ISTIO_GENERATIONS` (`<ctx>=<cr>/<revision>`), and the
+     `config/versions.env` pin in `ISTIO_VERSION_PIN`. A member not ready (or whose istiod is
+     rolling out) is waited for once, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s, environment
+     only), and read again; this read-only check then warns about a version that is unknown, mixed
+     or not the pin, or a member still not ready, and never stops on it; and the tuning baseline;
    - the platform record every suite writes (`tests/lib/platform.sh`): `PLATFORM`,
      `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
      `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways'

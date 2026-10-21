@@ -1882,8 +1882,8 @@ EOF
 	[[ "$stderr" == *"warn: probe for baseline exited "*"; marking PROBE_FAILED"* ]]
 	# In the tuning's own words: passes, marker files, Pass status.
 	[[ "$stderr" == *"error: 2 of 2 passes failed: PROBE_FAILED x1, SETUP_FAILED x1. Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it; exit 4."* ]]
-	# No Istio CR answered: the generation checks it could not make are notes, after the error.
-	[[ "$stderr" == *"exit 4."$'\n'"note: the Istio CR generations of a member could not be compared between the sweep's read at the sweep's start and its read before the apply of pass 01-push-throttling (a read failed): ci-a (unknown/unknown -> unknown/unknown)"* ]]
+	# No Istio CR answered: the end's read could not confirm the version, a note after the error.
+	[[ "$stderr" == *"exit 4."$'\n'*"note: could not confirm that ci-a ran one Istio version during the sweep: it was unknown at the start"* ]]
 	assert_output --partial "=== Sweep "
 	d="$(find "$out" -maxdepth 1 -name 'sweep-*' -type d)"
 	[ -f "${d}/baseline/PROBE_FAILED" ]
@@ -1895,14 +1895,9 @@ EOF
 	grep -qx '# ISTIO_VERSION_SOURCE=live' "${d}/sweep-metadata.txt"
 	grep -q '^# ISTIO_VERSION_PIN=.' "${d}/sweep-metadata.txt"
 	grep -qx '# ISTIO_VERSION_BY_CONTEXT=ci-a=unknown' "${d}/sweep-metadata.txt"
-	# Nothing was not ready (it could not be read at all), so nobody was waited for.
-	grep -qx '# ISTIO_NOTREADY_AT_START=none' "${d}/sweep-metadata.txt"
-	grep -qx '# ISTIO_READY_WAITED_SEC=0' "${d}/sweep-metadata.txt"
-	grep -qx -- '- Start-of-run readiness: ISTIO_NOTREADY_AT_START=none, ISTIO_READY_WAITED_SEC=0' "${d}/sweep-comparison.md"
-	# The probe inherited the sweep's reading: the Istio CR is read at the start, before the
-	# profile's apply and after its failed apply (the sweep's checkpoints) and at the end, each
-	# a read and its one retry; never by the probe.
-	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 8 ]
+	# The probe inherited the sweep's reading: the Istio CR is read at the start (a read, and
+	# one more after the readiness wait) and at the end; never by the probe.
+	[ "$(grep -c 'get istios.sailoperator.io default' "$STUB_LOG")" -eq 3 ]
 	# The outcome stays with the results, naming the harness the metadata names.
 	grep -qx 'EXIT=4' "${d}/sweep-outcome.txt"
 	[ "$(sed -n 's/^HARNESS_SHA=//p' "${d}/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "${d}/sweep-metadata.txt")" ]

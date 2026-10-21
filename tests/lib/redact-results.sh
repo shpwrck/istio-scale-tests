@@ -12,8 +12,8 @@
 #      one mapping for the whole run, printed on stderr only, never into the copy.
 #      Names come from the files' own metadata: the per-member keys
 #      (ISTIO_VERSION_BY_CONTEXT and every *_BY_CONTEXT key, ISTIO_ACTIVE_REVISIONS,
-#      ISTIO_PROXY_VERSIONS, ISTIO_GENERATIONS, ISTIO_NOTREADY_AT_*, KUBE_VERSIONS,
-#      ISTIOD_REPLICAS and controlplane's WINDOW_ROWS lines (<ctx>=<rows>[/<replicas>],
+#      ISTIO_GENERATIONS, older TSVs' ISTIO_PROXY_VERSIONS and ISTIO_NOTREADY_AT_*,
+#      KUBE_VERSIONS, ISTIOD_REPLICAS and controlplane's WINDOW_ROWS lines (<ctx>=<rows>[/<replicas>],
 #      the suffix kept) and ISTIOD_NOT_READY[_AT_END] lines (<ctx>=<pod>) as ctx=value
 #      lists), the member lists (CONTEXTS, REMOTE_CONTEXTS,
 #      REMOTES, any *_CONTEXTS key), SOURCE_CTX, WORKLOAD_CONTEXT and any other *_CTX /
@@ -39,8 +39,7 @@
 #      lowercase hex digits, no letter, digit, _ or - before it and no letter, digit or _
 #      after it) -> <vpc-id>, <subnet-id>, <sg-id>, <instance-id>, <eni-id>, <volume-id>,
 #      <igw-id>, <nat-id>, <rtb-id>.
-#   6. IPv4 and IPv6 addresses -> <ip>; home dirs /home/<name> and /Users/<name> -> <home>
-#      (the vocabulary tests/lib/preamble.sh masks error text with).
+#   6. IPv4 and IPv6 addresses -> <ip>; home dirs /home/<name> and /Users/<name> -> <home>.
 # A TSV's header line is redacted like any other (its column names, read first, pick the
 # context columns the final scan checks).
 #
@@ -303,9 +302,10 @@ function lower(s) { return tolower(s) }
 # keyclass <lowercased key> -> kv (ctx=value list), list (member list), single, hub or "".
 function keyclass(k) {
 	if (k ~ /_by_context$/) return "kv"
-	if (k == "istio_active_revisions" || k == "istio_proxy_versions" || k == "istio_generations" \
-		|| k == "kube_versions" || k == "istiod_replicas" || k == "window_rows" || k ~ /^istiod_not_ready(_at_end)?$/ \
-		|| k ~ /^istio_notready_at_(start|end)$/) return "kv"
+	if (k == "istio_active_revisions" || k == "istio_generations" || k == "kube_versions" \
+		|| k == "istiod_replicas" || k == "window_rows" || k ~ /^istiod_not_ready(_at_end)?$/) return "kv"
+	# Keys of older TSVs that no run writes now: recorded results still carry them.
+	if (k == "istio_proxy_versions" || k ~ /^istio_notready_at_(start|end)$/) return "kv"
 	if (k == "contexts" || k == "remotes" || k ~ /_contexts$/) return "list"
 	if (k == "hub_context" || k == "hub_ctx") return "hub"
 	if (k == "context" || k == "ctx" || k ~ /_ctx$/ || k ~ /_context$/) return "single"

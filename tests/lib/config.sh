@@ -108,14 +108,19 @@ config_suite_prefixes() {
 # read at once (tests/lib/platform.sh). An unknown-key error names them after the suite's own list.
 CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_ TEST_PLATFORM PLATFORM_READ_TIMEOUT PLATFORM_READ_PARALLEL"
 # Keys every suite reads that no --config sets (_config_env_only_reason says why).
-CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_ ISTIO_PROXY_READ_PARALLEL SWEEP_STOP_GRACE_SEC"
+CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_ SWEEP_STOP_GRACE_SEC"
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
 # unknown for a file without them (written before the live-version keys: its
-# ISTIO_VERSION is the pin, unchecked; or before the start-of-run readiness keys,
-# ISTIO_ACTIVE_REVISIONS, ISTIO_GENERATIONS or ISTIO_PROXY_VERSIONS were added). They are
-# sweep-level (PL26): pooled inputs that differ read mixed, never one file's value.
+# ISTIO_VERSION is the pin, unchecked; or before ISTIO_ACTIVE_REVISIONS or
+# ISTIO_GENERATIONS were added). They are sweep-level (PL26): pooled inputs that differ
+# read mixed, never one file's value.
 # shellcheck disable=SC2034
-CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS"
+CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS"
+# CONFIG_MERGED_DROPPED: keys of older TSVs that no run writes any more (the Istio version
+# check's proxy-version and readiness records); config_merged_preamble leaves them out, so
+# a pooled report never shows the older files' value as every input's.
+# shellcheck disable=SC2034
+CONFIG_MERGED_DROPPED="ISTIO_PROXY_VERSIONS ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).
@@ -136,7 +141,6 @@ _config_env_only_reason() {
 	*_MAX_MATRIX) echo "the large-matrix acknowledgment stays per invocation (PL10)" ;;
 	ISTIO_VERSION_CHECK) echo "running on a mesh whose Istio version is not the pin is acknowledged per invocation, like the pins themselves" ;;
 	ISTIO_VERSION_READY_*) echo "the version check's readiness wait is set per invocation, with ISTIO_VERSION_CHECK" ;;
-	ISTIO_PROXY_READ_PARALLEL) echo "the version check's read concurrency is set per invocation, with ISTIO_VERSION_CHECK" ;;
 	SWEEP_STOP_GRACE_SEC) echo "a setting of every sweep (tests/lib/common.sh), not of one suite's run" ;;
 	esac
 }
@@ -348,30 +352,9 @@ config_snapshot() {
 # _CONFIG_VKEY_AWK: awk function vkey(k, v), the form of value v of preamble key k that
 # pooling compares: an ISTIO_VERSION* value without the v in front of a version, so
 # v1.30.5 and 1.30.5 (or ctx=v1.30.5 and ctx=1.30.5) are one value, shown in the form seen
-# first; an ISTIO_PROXY_VERSIONS value (ctx=<version>:<count>+...,...) as its
-# version set (each member's versions, without their counts, sorted), so runs whose
-# members connected the same versions are one value whatever their proxy counts; any other
-# value as it is. vshow(k, a, b): the value to show for two values with one vkey, a shown
-# so far and b: a, except two ISTIO_PROXY_VERSIONS values whose counts differ, which show
-# their version set (no count of one run stands for the others, PL26).
+# first; any other value as it is.
 _CONFIG_VKEY_AWK='
-	function vkey(k, v,    o, i, n, c, m, p, e, q, j, x, nv) {
-		if (k == "ISTIO_PROXY_VERSIONS") {
-			if (v !~ /=/) return v
-			o = ""
-			n = split(v, p, ",")
-			for (i = 1; i <= n; i++) {
-				if (!match(p[i], /=[^=]*$/)) { o = o (i > 1 ? "," : "") p[i]; continue }
-				c = substr(p[i], 1, RSTART - 1)
-				nv = split(substr(p[i], RSTART + 1), e, "+")
-				for (j = 1; j <= nv; j++) sub(/:[0-9]+$/, "", e[j])
-				for (j = 2; j <= nv; j++) { x = e[j]; for (q = j - 1; q >= 1 && e[q] > x; q--) e[q + 1] = e[q]; e[q + 1] = x }
-				m = ""
-				for (j = 1; j <= nv; j++) m = m (j > 1 ? "+" : "") e[j]
-				o = o (i > 1 ? "," : "") c "=" m
-			}
-			return o
-		}
+	function vkey(k, v,    o, i, n, c) {
 		if (k !~ /^ISTIO_VERSION/) return v
 		o = ""
 		n = length(v)
@@ -382,7 +365,6 @@ _CONFIG_VKEY_AWK='
 		}
 		return o
 	}
-	function vshow(k, a, b) { return (k == "ISTIO_PROXY_VERSIONS" && a != b) ? vkey(k, a) : a }
 '
 
 # _config_distinct <key> <missing> <tsv>...: the distinct `# <key>=` values of the files,
@@ -406,7 +388,7 @@ _config_distinct() {
 				close(ARGV[i])
 				if (!found) { if (missing == "") continue; v = missing }
 				kv = vkey(k, v)
-				if (!(kv in at)) { at[kv] = ++n; out[n] = v } else out[at[kv]] = vshow(k, out[at[kv]], v)
+				if (!(kv in at)) { at[kv] = ++n; out[n] = v }
 			}
 			for (i = 1; i <= n; i++) print out[i]
 			exit
@@ -432,7 +414,7 @@ _config_join_mixed() {
 				for (q = 1; q <= np; q++) if (!(vkey(key, part[q]) in vseen)) {
 					vseen[vkey(key, part[q])] = ++n; v[n] = part[q]
 					if (index(part[q], ",")) c = 1
-				} else v[vseen[vkey(key, part[q])]] = vshow(key, v[vseen[vkey(key, part[q])]], part[q])
+				}
 			}
 			if (n == 1) { print v[1]; exit }
 			out = "mixed:"
@@ -478,11 +460,12 @@ config_report_value() {
 # these never shows one file's value for a key that varies (PL26). Except the keys of
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: a file written before they existed counts as unknown
 # for them, so a pooled report says mixed, never "live", when some rows were not read live
-# (a key no input carries stays out, as any other).
+# (a key no input carries stays out, as any other). The keys of CONFIG_MERGED_DROPPED stay
+# out always.
 # shellcheck disable=SC2329
 config_merged_preamble() {
 	(($#)) || return 0
-	awk -v must="$CONFIG_MERGED_UNKNOWN_IF_MISSING" "${_CONFIG_VKEY_AWK}"'
+	awk -v must="$CONFIG_MERGED_UNKNOWN_IF_MISSING" -v drop="$CONFIG_MERGED_DROPPED" "${_CONFIG_VKEY_AWK}"'
 		function add(k, v,    kv) {
 			if (!(k in nv)) { order[++n] = k; nv[k] = 0 }
 			kv = vkey(k, v)
@@ -490,11 +473,11 @@ config_merged_preamble() {
 				seen[k, kv] = nv[k] + 1
 				val[k, ++nv[k]] = v
 				if (index(v, ",")) comma[k] = 1
-			} else val[k, seen[k, kv]] = vshow(k, val[k, seen[k, kv]], v)
+			}
 		}
 		# fin: the keys a file must carry and does not, as unknown.
 		function fin(    i) { for (i = 1; i <= nm; i++) if (!((fid, m[i]) in infile)) add(m[i], "unknown") }
-		BEGIN { nm = split(must, m, " ") }
+		BEGIN { nm = split(must, m, " "); nd = split(drop, dk, " "); for (i = 1; i <= nd; i++) dropped[dk[i]] = 1 }
 		FNR == 1 { if (fid) fin(); fid++; inpre = 1 }
 		!inpre { next }
 		/^# / {
@@ -502,7 +485,7 @@ config_merged_preamble() {
 			if (line !~ /^[A-Z][A-Z0-9_]*(\[[^]]+\])?=/) next
 			k = line
 			sub(/=.*/, "", k)
-			if ((fid, k) in infile) next
+			if ((k in dropped) || ((fid, k) in infile)) next
 			infile[fid, k] = 1
 			real[k] = 1
 			add(k, substr(line, length(k) + 2))
@@ -526,7 +509,6 @@ config_merged_preamble() {
 					if (!np) { np = 1; part[1] = val[k, j] }
 					for (q = 1; q <= np; q++) {
 						if (!(vkey(k, part[q]) in fseen)) { fseen[vkey(k, part[q])] = ++nf; fl[nf] = part[q] }
-						else fl[fseen[vkey(k, part[q])]] = vshow(k, fl[fseen[vkey(k, part[q])]], part[q])
 					}
 				}
 				if (nf == 1) { print k "=" fl[1]; continue }

@@ -95,9 +95,9 @@ at its start, its outcome at its end) gets that record repeated in every format 
 "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something to say): a sweep
 that has not finished (it died, or still runs), was interrupted or stopped early, its
 failed cells by reason, its problems (the Istio version, the active revision or the
-generation of the Istio CR or its active IstioRevision changed under the sweep, the
-end-of-sweep check failed, or the harness changed) and notes (members not ready at
-its start or end).
+generation of the Istio CR or its active IstioRevision changed under the sweep, or the
+harness changed) and notes (an Istio version check that warned at its start, a member
+not ready or not confirmed at its end).
 Histogram p99 columns (queue time, push time) show the worst bucket any valid row
 hit, or "overflow (N rows)" when N rows had their p99 above the highest finite bucket;
 csv adds worst_bucket and n_overflow columns.
@@ -244,16 +244,11 @@ ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
 ISTIO_VERSION_SOURCE_M="$(run_meta ISTIO_VERSION_SOURCE)"
 ISTIO_VERSION_PIN_M="$(run_meta ISTIO_VERSION_PIN)"
 ISTIO_VERSION_BY_CONTEXT_M="$(run_meta ISTIO_VERSION_BY_CONTEXT)"
-# The members still not ready after the start's readiness wait, and how long it took.
-ISTIO_NOTREADY_AT_START_M="$(run_meta ISTIO_NOTREADY_AT_START)"
-ISTIO_READY_WAITED_SEC_M="$(run_meta ISTIO_READY_WAITED_SEC)"
-# Each member's active Istio revision, its Istio CR / active IstioRevision
-# generations (an edit of either shows as mixed across pooled runs, also when the version
-# reads the same) and the proxy versions connected to its istiod at the start (ctx=...);
-# files written before them read "unknown (not recorded)".
+# Each member's active Istio revision and its Istio CR / active IstioRevision generations
+# (an edit of either shows as mixed across pooled runs, also when the version reads the
+# same); files written before them read "unknown (not recorded)".
 ISTIO_ACTIVE_REVISIONS_M="$(run_meta ISTIO_ACTIVE_REVISIONS)"
 ISTIO_GENERATIONS_M="$(run_meta ISTIO_GENERATIONS)"
-ISTIO_PROXY_VERSIONS_M="$(run_meta ISTIO_PROXY_VERSIONS)"
 
 # Which --config produced the inputs (PL2/PL19), over every input: `none` without one,
 # `unknown` for files written before the key existed, mixed:a,b with a warning (PL26).
@@ -301,10 +296,8 @@ report_text() {
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
-	echo "# istio_notready_at_start: ${ISTIO_NOTREADY_AT_START_M}  istio_ready_waited_sec: ${ISTIO_READY_WAITED_SEC_M}"
 	echo "# istio_active_revisions: ${ISTIO_ACTIVE_REVISIONS_M}"
 	echo "# istio_generations: ${ISTIO_GENERATIONS_M}"
-	echo "# istio_proxy_versions: ${ISTIO_PROXY_VERSIONS_M}"
 	echo "# tuning_baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "# sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# run_config: ${RUN_CONFIG_M}  run_config_sha256: ${RUN_CONFIG_SHA256_M}"
@@ -417,11 +410,8 @@ report_csv() {
 	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
 	echo "# ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
 	echo "# ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}"
-	echo "# ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}"
-	echo "# ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}"
 	echo "# ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}"
 	echo "# ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}"
-	echo "# ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 	echo "# TUNING_BASELINE=$(preamble_get TUNING_BASELINE)"
 	echo "# SIDECAR_EGRESS_HOSTS=$(preamble_get SIDECAR_EGRESS_HOSTS)"
 	echo "# RUN_CONFIG=${RUN_CONFIG_M}"
@@ -595,11 +585,8 @@ report_markdown() {
 	echo "istio_version_source: $(yaml_str "${ISTIO_VERSION_SOURCE_M}")"
 	echo "istio_version_pin: $(yaml_str "${ISTIO_VERSION_PIN_M}")"
 	echo "istio_version_by_context: $(yaml_str "${ISTIO_VERSION_BY_CONTEXT_M}")"
-	echo "istio_notready_at_start: $(yaml_str "${ISTIO_NOTREADY_AT_START_M}")"
-	echo "istio_ready_waited_sec: $(yaml_str "${ISTIO_READY_WAITED_SEC_M}")"
 	echo "istio_active_revisions: $(yaml_str "${ISTIO_ACTIVE_REVISIONS_M}")"
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
-	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${harness_sha}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: $(yaml_str "$(preamble_get TUNING_BASELINE)")"
@@ -737,11 +724,8 @@ report_charts() {
 	echo "istio_version_source: $(yaml_str "${ISTIO_VERSION_SOURCE_M}")"
 	echo "istio_version_pin: $(yaml_str "${ISTIO_VERSION_PIN_M}")"
 	echo "istio_version_by_context: $(yaml_str "${ISTIO_VERSION_BY_CONTEXT_M}")"
-	echo "istio_notready_at_start: $(yaml_str "${ISTIO_NOTREADY_AT_START_M}")"
-	echo "istio_ready_waited_sec: $(yaml_str "${ISTIO_READY_WAITED_SEC_M}")"
 	echo "istio_active_revisions: $(yaml_str "${ISTIO_ACTIVE_REVISIONS_M}")"
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
-	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"

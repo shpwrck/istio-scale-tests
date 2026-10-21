@@ -783,7 +783,8 @@ render_sha() {
 	grep -qx '# ISTIO_VERSION=v1.30.5' "$t"
 	grep -qx '# ISTIO_VERSION_SOURCE=live' "$t"
 	grep -qx '# ISTIO_VERSION_BY_CONTEXT=ctx-a=v1.30.5,ctx-b=v1.30.5' "$t"
-	grep -qx '# ISTIO_NOTREADY_AT_START=none' "$t"
+	grep -qx '# ISTIO_ACTIVE_REVISIONS=ctx-a=default,ctx-b=default' "$t"
+	grep -qx '# ISTIO_GENERATIONS=ctx-a=1/1,ctx-b=1/1' "$t"
 	grep -qx '# ISTIO_CR_VERSION\[ctx-a\]=v1.30-latest' "$t"
 	# The platform record (tests/lib/platform.sh), the same for every suite.
 	grep -qx '# PLATFORM=openshift' "$t"

@@ -82,11 +82,11 @@ Usage: $(basename "$0") [options]
   -h, --help             Show this help.
 
 Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
+  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
+  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
+  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
+  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
+  wait for members not ready may take.
   SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
   PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX. PROPAGATION_MESH_SIZES
   (--mesh-sizes), PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root),
@@ -95,8 +95,7 @@ Environment:
   setup, --dry-run included.
 $(platform_help_lines all)
   SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
-  before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read
-  at once. Environment only (config/options.env).
+  before SIGKILL. Environment only (config/options.env).
 
 Exit codes:
   0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
@@ -107,10 +106,10 @@ Exit codes:
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
      version, the active revision or the generation of the Istio CR or its active
-     IstioRevision changed during the sweep (read again at its end), or that
-     end-of-sweep check failed, or the harness (a file under tests/, config/, charts/
-     or terraform/) changed during the sweep (HARNESS_SHA read at its start and its
-     end); the outcome is also in sweep-outcome.txt and every report
+     IstioRevision changed during the sweep (read again at its end), or the harness
+     (a file under tests/, config/, charts/ or terraform/) changed during the sweep
+     (HARNESS_SHA read at its start and its end); the outcome is also in
+     sweep-outcome.txt and every report
   129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): the running step's process group
      gets SIGTERM, and SIGKILL SWEEP_STOP_GRACE_SEC later; sweep-outcome.txt records
      STATUS=interrupted with the signal and its time, then the sweep's exit runs
@@ -461,14 +460,14 @@ echo "=========================================="
 echo "  Sweep finished"
 echo "=========================================="
 echo ""
-# The Istio version again, after the last window and before the reports (read-only).
-IV_END=()
-istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
+# The Istio version again, after the last window and before the reports (read-only): a
+# change is a problem of the outcome, a member it cannot confirm a note.
+istio_version_recheck ${KUBECTL[@]+"${KUBECTL[@]}"}
 sweep_cleanup
 # The outcome before the reports (sweep-outcome.txt, which they read): how many cells
 # failed, and exit non-zero if any did (or the Istio version changed under the sweep).
 outcome_rc=0
-sweep_finish ${IV_END[@]+"${IV_END[@]}"} "${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
+sweep_finish "${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 echo ""
 echo "Generating aggregated report..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text

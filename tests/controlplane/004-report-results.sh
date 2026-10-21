@@ -138,7 +138,7 @@ say): a sweep that has not finished (it died, or still runs), was interrupted or
 early, its failed cells by reason (INCOMPLETE: a cell cut short while its member rows
 were written; INTERRUPTED: the sweep ended inside the cell), its problems (the Istio
 version, active revision or the generation of the Istio CR or its active IstioRevision
-changed under the sweep, the end-of-sweep check failed, or the harness changed) and its
+changed under the sweep, or the harness changed) and its
 notes. Any of these but a note turns a PASS verdict into CAUTION ("the sweep outcome is
 not clean").
 
@@ -591,21 +591,12 @@ ISTIO_VERSION_SOURCE_M="$(preamble_get ISTIO_VERSION_SOURCE)"
 # Which member ran which version (ctx=version,...), so a reader of the report alone sees
 # which member was unknown or on another version (PL19).
 ISTIO_VERSION_BY_CONTEXT_M="$(preamble_get ISTIO_VERSION_BY_CONTEXT)"
-# The members still not ready (ctx=state, rolling for an istiod rollout) after the
-# start's readiness wait, none, and how long that wait took; unknown in a file written
-# before these keys.
-ISTIO_NOTREADY_AT_START_M="$(preamble_get ISTIO_NOTREADY_AT_START)"
-ISTIO_READY_WAITED_SEC_M="$(preamble_get ISTIO_READY_WAITED_SEC)"
 # Each member's active Istio revision at the start (ctx=rev,...); unknown in a file
 # written before the key.
 ISTIO_ACTIVE_REVISIONS_M="$(preamble_get ISTIO_ACTIVE_REVISIONS)"
 # Each member's Istio CR and active IstioRevision generation at the start
-# (ctx=<cr>/<rev>,...); the proxy versions connected to each member's istiod at the
-# start (ctx=<version>:<count>+...,...; ISTIO_PROXY_VERSIONS_SUMMARY sums them over the
-# members, for a 20-member mesh). unknown before they existed, unchecked when not read live.
+# (ctx=<cr>/<rev>,...); unknown before the key existed, unchecked when not read live.
 ISTIO_GENERATIONS_M="$(preamble_get ISTIO_GENERATIONS)"
-ISTIO_PROXY_VERSIONS_M="$(preamble_get ISTIO_PROXY_VERSIONS)"
-ISTIO_PROXY_VERSIONS_SUMMARY="$(env_proxy_versions_summary "$ISTIO_PROXY_VERSIONS_M")"
 
 # istiod_replicas_label: ISTIOD_REPLICAS for people ("3 per cluster", "1-3 per cluster
 # (varies by cluster)", "3 (first context only)" for an INFRA_SCHEMA 1 file). The
@@ -2001,7 +1992,7 @@ report_text() {
 	aggregated=$(aggregate)
 	short="$(vsdr_ingest_short "$aggregated")"
 	echo "=== Control-Plane Resource Scaling ==="
-	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}  ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}  ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}  ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}  ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}  ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}  ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}  ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}  ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
+	echo "# RUN_ID=${RUN_ID_TAG}  ISTIO_VERSION=${ISTIO_VERSION_TAG}  HARNESS_SHA=${HARNESS_SHA_TAG}  files_consumed=${FILES_CONSUMED}  skipped_legacy=${FILES_SKIPPED}  run_config=${RUN_CONFIG_M}  run_config_sha256=${RUN_CONFIG_SHA256_M}  ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}  ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}  ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}  ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}  ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}"
 	echo "# runs: run_ids=${RUN_IDS_M}  istio_versions=${ISTIO_VERSIONS_M}  harness_shas=${HARNESS_SHAS_M}"
 	echo "# platform: ${PLATFORM_VALUES//$'\n'/  }"
 	[[ -z "$POOLED_NOTE" ]] || echo "# POOLED RUNS: ${POOLED_NOTE}"
@@ -2021,7 +2012,6 @@ report_text() {
 	echo "  istiod replicas:             $(istiod_replicas_label)"
 	echo "  istiod replicas by context:  $(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)"
 	echo "  network topology:            $(preamble_get NETWORK_TOPOLOGY)"
-	echo "  proxy versions (at start):   ${ISTIO_PROXY_VERSIONS_SUMMARY}  [proxies connected to istiod, by Istio version, summed over the members]"
 	echo "  metrics API (preflight):     $(preamble_get METRICS_API)"
 	echo "  tuning baseline (live mesh): $(preamble_get TUNING_BASELINE)"
 	echo "  sidecar egress hosts (live): $(preamble_get SIDECAR_EGRESS_HOSTS)"
@@ -2114,9 +2104,7 @@ report_csv() {
 	printf '# %s\n' "RUN_ID=${RUN_ID_TAG}" "ISTIO_VERSION=${ISTIO_VERSION_TAG}" "HARNESS_SHA=${HARNESS_SHA_TAG}" \
 		"files_consumed=${FILES_CONSUMED}" "skipped_legacy=${FILES_SKIPPED}" "ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}" \
 		"ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}" "ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_M}" \
-		"ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_M}" "ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_M}" \
-		"ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}" "ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}" \
-		"ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
+		"ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}" "ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}"
 	echo "# runs: run_ids=${RUN_IDS_M} istio_versions=${ISTIO_VERSIONS_M} harness_shas=${HARNESS_SHAS_M}"
 	config_multi_run_csv
 	sweep_outcome_lines csv "${TSV_FILES[@]}"
@@ -2230,11 +2218,8 @@ report_markdown() {
 	echo "istio_version_source: $(yaml_str "${ISTIO_VERSION_SOURCE_M}")"
 	echo "istio_version_pin: $(yaml_str "${ISTIO_VERSION_PIN_M}")"
 	echo "istio_version_by_context: $(yaml_str "${ISTIO_VERSION_BY_CONTEXT_M}")"
-	echo "istio_notready_at_start: $(yaml_str "${ISTIO_NOTREADY_AT_START_M}")"
-	echo "istio_ready_waited_sec: $(yaml_str "${ISTIO_READY_WAITED_SEC_M}")"
 	echo "istio_active_revisions: $(yaml_str "${ISTIO_ACTIVE_REVISIONS_M}")"
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
-	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_TAG}")"
 	echo "run_ids: $(json_list "$RUN_IDS_M")"
 	echo "istio_versions: $(json_list "$ISTIO_VERSIONS_M")"
@@ -2295,7 +2280,6 @@ report_markdown() {
 	echo "| istiod replicas | $(md_cell "$(istiod_replicas_label)") |"
 	echo "| istiod replicas by context | $(md_cell "$(preamble_get ISTIOD_REPLICAS_BY_CONTEXT)") |"
 	echo "| network topology | $(md_cell "$(preamble_get NETWORK_TOPOLOGY)") |"
-	echo "| proxy versions at start (connected to istiod, summed over the members) | $(md_cell "$ISTIO_PROXY_VERSIONS_SUMMARY") |"
 	echo "| connected_proxies per istiod replica (max) | $(as_get proxies) |"
 	echo "| connected_proxies per cluster (max) | $(pc_get proxies_cluster) |"
 	echo "| proxy check vs Running sidecar pods (tolerance $(md_cell "$PROXY_CHECK_TOL_M")%, min diff $(md_cell "$PROXY_CHECK_MIN_DIFF_M")) | $(md_cell "$PROXY_CHECK_TALLY") |"
@@ -2589,8 +2573,7 @@ report_json() {
 	_RI_LIST="$(json_list "$RUN_IDS_M")" _IV_LIST="$(json_list "$ISTIO_VERSIONS_M")" _HS_LIST="$(json_list "$HARNESS_SHAS_M")" \
 	_PROV_WARN="$PROVENANCE_WARNING" _DATA_WARN="$DATA_WARNINGS" \
 	_J_ri="$RUN_ID_TAG" _J_iv="$ISTIO_VERSION_TAG" _J_iv_src="$ISTIO_VERSION_SOURCE_M" _J_iv_pin="$ISTIO_VERSION_PIN_M" \
-	_J_iv_by="$ISTIO_VERSION_BY_CONTEXT_M" _J_iv_nr="$ISTIO_NOTREADY_AT_START_M" _J_iv_wait="$ISTIO_READY_WAITED_SEC_M" \
-	_J_iv_revs="$ISTIO_ACTIVE_REVISIONS_M" _J_iv_gens="$ISTIO_GENERATIONS_M" _J_iv_pv="$ISTIO_PROXY_VERSIONS_M" \
+	_J_iv_by="$ISTIO_VERSION_BY_CONTEXT_M" _J_iv_revs="$ISTIO_ACTIVE_REVISIONS_M" _J_iv_gens="$ISTIO_GENERATIONS_M" \
 	_J_hs="$HARNESS_SHA_TAG" _J_pooled="$(config_multi_run_json)" _J_rc_path="$RUN_CONFIG_M" \
 	_J_rc_sha="$RUN_CONFIG_SHA256_M" _J_sw_mesh="$SWEEP_MESH" _J_sw_svc="$SWEEP_SVC" _J_sw_rep="$SWEEP_REP" \
 	_J_sw_ns="$SWEEP_NS" _J_sw_scope="$SWEEP_SCOPE" _J_sw_traffic="$SWEEP_TRAFFIC" _J_tm_every="$VSDR_EVERY_M" \
@@ -2634,7 +2617,7 @@ report_json() {
 		nv = split(vs, vsl, "\n"); split("", vshort)
 		for (i = 1; i <= nv; i++) if ((t = index(vsl[i], "\t"))) vshort[substr(vsl[i], 1, t - 1)] = 1
 		# Every string field as a JSON string (js), from the environment (_J_<name>).
-		nj = split("ri iv iv_src iv_pin iv_by iv_nr iv_wait iv_revs iv_gens iv_pv hs rc_path rc_sha sw_mesh sw_svc sw_rep sw_ns sw_scope sw_traffic tm_every tm_subsets cap_ncpu cap_nmem cap_icpu cap_imem cap_tf cap_mode cap_metrics inf_rcpu inf_rmem inf_lcpu inf_lmem inf_rep inf_rep_by inf_net sla_v sla_h tb_levers tb_egress ach_prx ach_cprx ach_svc pc_tol pc_min pc_flagged ach_icpu ach_imem ach_icpu_peak leftover_start ach_irss ach_ncpu ach_nmem ach_psched ach_palloc gr_mode gr_stop gr_settle gr_spn gr_wm gr_wk cov metrics_note", jk, " ")
+		nj = split("ri iv iv_src iv_pin iv_by iv_revs iv_gens hs rc_path rc_sha sw_mesh sw_svc sw_rep sw_ns sw_scope sw_traffic tm_every tm_subsets cap_ncpu cap_nmem cap_icpu cap_imem cap_tf cap_mode cap_metrics inf_rcpu inf_rmem inf_lcpu inf_lmem inf_rep inf_rep_by inf_net sla_v sla_h tb_levers tb_egress ach_prx ach_cprx ach_svc pc_tol pc_min pc_flagged ach_icpu ach_imem ach_icpu_peak leftover_start ach_irss ach_ncpu ach_nmem ach_psched ach_palloc gr_mode gr_stop gr_settle gr_spn gr_wm gr_wk cov metrics_note", jk, " ")
 		for (i = 1; i <= nj; i++) J[jk[i]] = js(ENVIRON["_J_" jk[i]])
 		pooled = ENVIRON["_J_pooled"]
 		outcomes = ENVIRON["SWEEP_OUTCOMES_JSON"]
@@ -2642,7 +2625,7 @@ report_json() {
 		prov_warn = ENVIRON["_PROV_WARN"]
 		nw = split(ENVIRON["_DATA_WARN"], dws, "\n"); data_warn = ""
 		for (i = 1; i <= nw; i++) if (dws[i] != "") data_warn = data_warn (data_warn == "" ? "" : ",") js(dws[i])
-		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_notready_at_start\":%s,\"istio_ready_waited_sec\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"istio_proxy_versions\":%s,\"harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,%s\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"sweep_outcomes\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_nr"], J["iv_wait"], J["iv_revs"], J["iv_gens"], J["iv_pv"], J["hs"], ri_list, iv_list, hs_list, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], plat, fc, fs, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, outcomes }
+		printf "{\n  \"metadata\": {\"run_id\":%s,\"istio_version\":%s,\"istio_version_source\":%s,\"istio_version_pin\":%s,\"istio_version_by_context\":%s,\"istio_active_revisions\":%s,\"istio_generations\":%s,\"harness_sha\":%s,\"run_ids\":%s,\"istio_versions\":%s,\"harness_shas\":%s,\"provenance_warning\":%s,\"run_config\":%s,\"run_config_sha256\":%s,%s\"files_consumed\":%d,\"skipped_legacy\":%d,\"sweep\":{\"mesh_sizes\":%s,\"service_counts\":%s,\"replica_counts\":%s,\"namespace_counts\":%s,\"sidecar_scopings\":%s,\"traffic_configs\":%s},\"traffic_management\":{\"vsdr_every\":%s,\"vsdr_subsets\":%s},\"capacity\":{\"node_alloc_cpu_m\":%s,\"node_alloc_mem_mi\":%s,\"istiod_cpu_limit_m\":%s,\"istiod_mem_limit_mi\":%s,\"scale_target_fraction\":%s,\"scale_sizing_mode\":%s,\"metrics_api\":%s,\"istiod_limits_per_replica\":true},\"infra\":{\"istiod_req_cpu_m\":%s,\"istiod_req_mem_mi\":%s,\"istiod_lim_cpu_m\":%s,\"istiod_lim_mem_mi\":%s,\"istiod_replicas\":%s,\"istiod_replicas_by_context\":%s,\"network_topology\":%s},\"tuning_baseline\":{\"levers\":%s,\"sidecar_egress_hosts\":%s},\"achieved_scale\":{\"connected_proxies_max\":%s,\"connected_proxies_cluster_max\":%s,\"services_configured_max\":%s,\"istiod_cpu_peak_pct_of_limit_max\":%s,\"istiod_cpu_pct_of_limit_max\":%s,\"istiod_mem_pct_of_limit_max\":%s,\"istiod_rss_pct_of_limit_max\":%s,\"node_cpu_pct_max\":%s,\"node_mem_pct_max\":%s,\"pods_scheduled_max\":%s,\"pods_allocatable_max\":%s},\"proxy_check\":{\"tolerance_pct\":%s,\"min_diff\":%s,\"ok\":%d,\"low\":%d,\"high\":%d,\"na\":%d,\"excluded\":%d,\"flagged\":%s},\"coverage\":%s,\"sla\":{\"verdict\":%s,\"headline\":%s},\"metrics_note\":%s,\"growth\":{\"growth_mode\":%s,\"mem_stop_pct\":%s,\"probe_settle_sec\":%s,\"services_per_namespace\":%s,\"workload_modes\":%s,\"window_kinds\":%s,\"leftover_test_namespaces_at_start\":%s},\"data_warnings\":[%s]},\n  \"pooled_runs\": %s,\n  \"sweep_outcomes\": %s,\n  \"results\": [", J["ri"], J["iv"], J["iv_src"], J["iv_pin"], J["iv_by"], J["iv_revs"], J["iv_gens"], J["hs"], ri_list, iv_list, hs_list, (prov_warn == "" ? "null" : js(prov_warn)), J["rc_path"], J["rc_sha"], plat, fc, fs, J["sw_mesh"], J["sw_svc"], J["sw_rep"], J["sw_ns"], J["sw_scope"], J["sw_traffic"], J["tm_every"], J["tm_subsets"], J["cap_ncpu"], J["cap_nmem"], J["cap_icpu"], J["cap_imem"], J["cap_tf"], J["cap_mode"], J["cap_metrics"], J["inf_rcpu"], J["inf_rmem"], J["inf_lcpu"], J["inf_lmem"], J["inf_rep"], J["inf_rep_by"], J["inf_net"], J["tb_levers"], J["tb_egress"], J["ach_prx"], J["ach_cprx"], J["ach_svc"], J["ach_icpu_peak"], J["ach_icpu"], J["ach_imem"], J["ach_irss"], J["ach_ncpu"], J["ach_nmem"], J["ach_psched"], J["ach_palloc"], J["pc_tol"], J["pc_min"], pc_ok, pc_low, pc_high, pc_na, pc_excl, J["pc_flagged"], J["cov"], J["sla_v"], J["sla_h"], J["metrics_note"], J["gr_mode"], J["gr_stop"], J["gr_settle"], J["gr_spn"], J["gr_wm"], J["gr_wk"], J["leftover_start"], data_warn, pooled, outcomes }
 	NR == 1 { next }
 	{
 		if (printed++) printf ",\n    "; else printf "\n    "
@@ -2687,11 +2670,8 @@ report_charts() {
 	echo "istio_version_source: $(yaml_str "${ISTIO_VERSION_SOURCE_M}")"
 	echo "istio_version_pin: $(yaml_str "${ISTIO_VERSION_PIN_M}")"
 	echo "istio_version_by_context: $(yaml_str "${ISTIO_VERSION_BY_CONTEXT_M}")"
-	echo "istio_notready_at_start: $(yaml_str "${ISTIO_NOTREADY_AT_START_M}")"
-	echo "istio_ready_waited_sec: $(yaml_str "${ISTIO_READY_WAITED_SEC_M}")"
 	echo "istio_active_revisions: $(yaml_str "${ISTIO_ACTIVE_REVISIONS_M}")"
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
-	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_TAG}")"
 	echo "run_ids: $(json_list "$RUN_IDS_M")"
 	echo "istio_versions: $(json_list "$ISTIO_VERSIONS_M")"

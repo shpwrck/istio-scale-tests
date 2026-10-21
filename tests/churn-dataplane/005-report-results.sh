@@ -103,8 +103,8 @@ sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has some
 to say): a sweep that has not finished (it died, or still runs), was interrupted or
 stopped early, its failed cells by reason, its problems (the Istio version, the active
 revision or the generation of the Istio CR or its active IstioRevision changed under
-the sweep, the end-of-sweep check failed, or the harness changed) and notes (members
-not ready at its start or end).
+the sweep, or the harness changed) and notes (an Istio version check that warned at
+its start, a member not ready or not confirmed at its end).
 
 Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when the rule fired.
 
@@ -195,16 +195,11 @@ ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
 ISTIO_VERSION_SOURCE_STR="$(extract_preamble_kv ISTIO_VERSION_SOURCE)"
 ISTIO_VERSION_PIN_STR="$(extract_preamble_kv ISTIO_VERSION_PIN)"
 ISTIO_VERSION_BY_CONTEXT_STR="$(extract_preamble_kv ISTIO_VERSION_BY_CONTEXT)"
-# The members still not ready after the start's readiness wait, and how long it took.
-ISTIO_NOTREADY_AT_START_STR="$(extract_preamble_kv ISTIO_NOTREADY_AT_START)"
-ISTIO_READY_WAITED_SEC_STR="$(extract_preamble_kv ISTIO_READY_WAITED_SEC)"
-# Each member's active Istio revision, its Istio CR / active IstioRevision
-# generations (an edit of either between pooled runs reads mixed, also at one version)
-# and the proxy versions connected to its istiod at the start (ctx=...); unknown for a
+# Each member's active Istio revision and its Istio CR / active IstioRevision generations
+# (an edit of either between pooled runs reads mixed, also at one version); unknown for a
 # file written before them.
 ISTIO_ACTIVE_REVISIONS_STR="$(extract_preamble_kv ISTIO_ACTIVE_REVISIONS)"
 ISTIO_GENERATIONS_STR="$(extract_preamble_kv ISTIO_GENERATIONS)"
-ISTIO_PROXY_VERSIONS_STR="$(extract_preamble_kv ISTIO_PROXY_VERSIONS)"
 KUBE_VERSIONS_STR="$(extract_preamble_kv KUBE_VERSIONS)"
 # Tuning levers + sidecar egress hosts queried live when the sweep ran.
 TUNING_BASELINE_STR="$(extract_preamble_kv TUNING_BASELINE)"
@@ -397,11 +392,8 @@ metadata_kv() {
 		"ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_STR:-unknown}" \
 		"ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_STR:-unknown}" \
 		"ISTIO_VERSION_BY_CONTEXT=${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}" \
-		"ISTIO_NOTREADY_AT_START=${ISTIO_NOTREADY_AT_START_STR:-unknown}" \
-		"ISTIO_READY_WAITED_SEC=${ISTIO_READY_WAITED_SEC_STR:-unknown}" \
 		"ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_STR:-unknown}" \
 		"ISTIO_GENERATIONS=${ISTIO_GENERATIONS_STR:-unknown}" \
-		"ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_STR:-unknown}" \
 		"KUBE_VERSIONS=${KUBE_VERSIONS_STR:-unknown}" \
 		"TUNING_BASELINE=${TUNING_BASELINE_STR:-unknown}" \
 		"SIDECAR_EGRESS_HOSTS=${SIDECAR_EGRESS_HOSTS_STR:-unknown}" \
@@ -517,11 +509,8 @@ report_json() {
 		--arg istio_version_source "${ISTIO_VERSION_SOURCE_STR:-unknown}" \
 		--arg istio_version_pin "${ISTIO_VERSION_PIN_STR:-unknown}" \
 		--arg istio_version_by_context "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}" \
-		--arg istio_notready_at_start "${ISTIO_NOTREADY_AT_START_STR:-unknown}" \
-		--arg istio_ready_waited_sec "${ISTIO_READY_WAITED_SEC_STR:-unknown}" \
 		--arg istio_active_revisions "${ISTIO_ACTIVE_REVISIONS_STR:-unknown}" \
 		--arg istio_generations "${ISTIO_GENERATIONS_STR:-unknown}" \
-		--arg istio_proxy_versions "${ISTIO_PROXY_VERSIONS_STR:-unknown}" \
 		--arg kube_versions    "${KUBE_VERSIONS_STR:-unknown}" \
 		--arg tuning_baseline  "${TUNING_BASELINE_STR:-unknown}" \
 		--arg sidecar_egress_hosts "${SIDECAR_EGRESS_HOSTS_STR:-unknown}" \
@@ -557,7 +546,7 @@ report_json() {
 		one($platform; "platform") as $platform | one($warnings; "warnings") as $warnings
 		| one($remote_coverage; "remote_coverage") as $remote_coverage | one($istiod_diag; "istiod_diag") as $istiod_diag
 		| one($rows; "rows") as $rows
-		| {pooled_runs: $pooled_runs, sweep_outcomes: $sweep_outcomes, data_warnings: (if $harness_warning == "" then [] else [$harness_warning] end), metadata: ({run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_notready_at_start: $istio_notready_at_start, istio_ready_waited_sec: $istio_ready_waited_sec, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, istio_proxy_versions: $istio_proxy_versions, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256} + $platform), warnings: $warnings, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
+		| {pooled_runs: $pooled_runs, sweep_outcomes: $sweep_outcomes, data_warnings: (if $harness_warning == "" then [] else [$harness_warning] end), metadata: ({run_id: $run_id, harness_sha: $harness_sha, istio_version: $istio_version, istio_version_source: $istio_version_source, istio_version_pin: $istio_version_pin, istio_version_by_context: $istio_version_by_context, istio_active_revisions: $istio_active_revisions, istio_generations: $istio_generations, kube_versions: $kube_versions, tuning_baseline: $tuning_baseline, sidecar_egress_hosts: $sidecar_egress_hosts, istiod_replicas: $istiod_replicas, settle_sec: $settle_sec, baseline_duration_sec: $baseline_dur, churn_duration_sec: $churn_dur, qps: $qps, connections: $connections, namespace: $namespace, fanout_max_skew_ms: $fanout_max_skew, fanout_metrics_timeout: $fanout_metrics_timeout, min_pct_200: $min_pct_200, reach_requests: $reach_requests, reach_qps: $reach_qps, reach_http_timeout_sec: $reach_http_timeout_sec, reach_detail_timeout_sec: $reach_detail_timeout_sec, reach_attempts: $reach_attempts, reach_retry_sec: $reach_retry_sec, on_unreachable: $on_unreachable, run_config: $run_config, run_config_sha256: $run_config_sha256} + $platform), warnings: $warnings, summary: {remotes_not_reachable: $not_reachable}, remote_coverage: $remote_coverage.remote_coverage, istiod_diag: $istiod_diag, rows: $rows}'
 }
 
 # Metric glossary appended to the END of the markdown summary (#17). Definitions are
@@ -634,11 +623,8 @@ report_md() {
 	_md_kv ISTIO_VERSION_SOURCE "${ISTIO_VERSION_SOURCE_STR:-unknown}"
 	_md_kv ISTIO_VERSION_PIN "${ISTIO_VERSION_PIN_STR:-unknown}"
 	_md_kv ISTIO_VERSION_BY_CONTEXT "${ISTIO_VERSION_BY_CONTEXT_STR:-unknown}"
-	_md_kv ISTIO_NOTREADY_AT_START "${ISTIO_NOTREADY_AT_START_STR:-unknown}"
-	_md_kv ISTIO_READY_WAITED_SEC "${ISTIO_READY_WAITED_SEC_STR:-unknown}" plain
 	_md_kv ISTIO_ACTIVE_REVISIONS "${ISTIO_ACTIVE_REVISIONS_STR:-unknown}"
 	_md_kv ISTIO_GENERATIONS "${ISTIO_GENERATIONS_STR:-unknown}"
-	_md_kv ISTIO_PROXY_VERSIONS "${ISTIO_PROXY_VERSIONS_STR:-unknown}"
 	_md_kv KUBE_VERSIONS "${KUBE_VERSIONS_STR:-unknown}"
 	_md_kv TUNING_BASELINE "${TUNING_BASELINE_STR:-unknown}"
 	_md_kv SIDECAR_EGRESS_HOSTS "${SIDECAR_EGRESS_HOSTS_STR:-unknown}"
