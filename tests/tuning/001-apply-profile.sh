@@ -114,8 +114,6 @@ python3 -I -c 'import yaml' 2>/dev/null \
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 python3 -I "$HELPER" load "$PROFILE" "$WORK"
-# Under a sweep, a profile file changed for this read reaches its outcome (harness_read).
-harness_read _hs _hk
 HAS_PATCH=0
 [[ "$(<"$WORK/patch.json")" != "{}" ]] && HAS_PATCH=1
 HAS_RESOURCES=0

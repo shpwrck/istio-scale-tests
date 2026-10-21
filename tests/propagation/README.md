@@ -101,26 +101,18 @@ and `sweep-charts.md` from `005` (`--tsv` is still accepted and does nothing).
 Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, such as
 another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
 error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
-when and by which signal; a signal sent to the sweep's process alone stops the running step and
-every process under it first, `SWEEP_STOP_GRACE_SEC` (30 s) before SIGKILL; a `kill -INT` or
-`kill -HUP` skips the processes of a sweep in a terminal's foreground, so stop such a sweep from
-elsewhere with SIGTERM; without a `ps` that lists start times or Linux's `/proc`, only the step's
-own process is stopped; see the top-level README); `4` it finished and wrote its reports, but some
-mesh sizes failed (setup or probe exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder
-row), or the Istio version, active revision or generation of the Istio CR or its active
-IstioRevision changed during the sweep (read again before the reports), or that check failed, or its
-harness (a file under `tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during
-the sweep (read again before its steps, by each step and at its end). The last line on stderr says
-how many, by reason; `sweep-outcome.txt` and the end of `sweep-summary.md` keep the outcome. From
-the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a not-finished record
-(`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`, and what to do),
-so a report of a sweep that died, or still runs, or (with when and by which signal) was interrupted
-says "this sweep has not finished" in every format (json `sweep_outcome`: `"exit": null`,
-`"unfinished": true`; a finished one reads `"unfinished": false`; one that stopped on an error after
-its start records the stop and its reason instead, `STOPPED=1` and `CUT_SHORT=1`, see the top-level
-README): when no sweep runs any more, run `007-cleanup.sh` on its contexts, then the sweep again
-into a new dir (a propagation sweep has no `--resume`). Proxies connected on another Istio version
-than their istiod at the start (`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
+when and by which signal; the running step's process group gets SIGTERM, and SIGKILL
+`SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `4` it finished and wrote its
+reports, but some mesh sizes failed (setup or probe exited non-zero, a `SETUP_FAILED` /
+`PROBE_FAILED` placeholder row), or the Istio version, active revision or generation of the Istio
+CR or its active IstioRevision changed during the sweep (read again before the reports), or that
+check failed, or its harness (a file under `tests/`, `config/`, `charts/` or `terraform/`,
+`HARNESS_SHA`) changed during the sweep (read at its start and its end). The last line on stderr
+says how many, by reason. `sweep-outcome.txt` keeps the outcome (`STATUS=running` until the sweep
+ends, then `finished`, `stopped` or `interrupted`), and every report repeats it. When a sweep did
+not finish and no sweep runs any more, run `007-cleanup.sh` on its contexts, then the sweep again
+into a new dir. Proxies connected on another Istio version than their istiod at the start
+(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
 Rows a probe wrote with a non-OK status are measurements, not failures: the report counts them in
 `n_total`. Its `n_attempted` column is what the probes were configured to run (each TSV's
 `ITERATIONS`: iterations for P1, times its remotes for P2 and P3, and what a failed mesh size's
@@ -201,14 +193,9 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   rows left out by reason (a `remote_status`, a high remote skew), and the iterations whose
   P1 is left out (a `p1_status`, `p1_overflow`, a high source skew).
 - `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. The markdown ends with a
-  glossary of every column. `charts` needs two or more mesh sizes of at least 2 clusters. Next to
-  `HARNESS_SHA` (from the TSV preambles: the harness that measured the rows) every format records
-  `REPORT_HARNESS_SHA`, the harness the report itself ran on: a report made again later, or from
-  another checkout, may count rows by other rules. The results dir it reads never counts as a change
-  to that harness. `HARNESS_CONTENT_KEY` (also from the preambles; `unknown` for a TSV written
-  before it) is the content key of the harness files: inputs whose `HARNESS_SHA` differs but that
-share one key differ only in git describe (a commit or tag that left the harness files as they
-were), and stderr gives a note instead of the "disagree" warning. In text and markdown `n_attempted`
+  glossary of every column. `charts` needs two or more mesh sizes of at least 2 clusters.
+  `HARNESS_SHA` comes from the TSV preambles (the harness that measured the rows): `mixed:<a>,<b>`,
+  with a warning, when the inputs ran on more than one. In text and markdown `n_attempted`
 follows `n_total` and `n_valid` (csv keeps it last), and a phase with no valid sample reads
 `n_valid` 0 in every format.
 

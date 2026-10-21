@@ -1883,7 +1883,7 @@ EOF
 	# In the tuning's own words: passes, marker files, Pass status.
 	[[ "$stderr" == *"error: 2 of 2 passes failed: PROBE_FAILED x1, SETUP_FAILED x1. Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it; exit 4."* ]]
 	# No Istio CR answered: the generation checks it could not make are notes, after the error.
-	[[ "$stderr" == *"exit 4."$'\n'"warning: the Istio CR generations of a member could not be compared between the sweep's read at the sweep's start and its read before the apply of pass 01-push-throttling (a read failed): ci-a (unknown/unknown -> unknown/unknown)"* ]]
+	[[ "$stderr" == *"exit 4."$'\n'"note: the Istio CR generations of a member could not be compared between the sweep's read at the sweep's start and its read before the apply of pass 01-push-throttling (a read failed): ci-a (unknown/unknown -> unknown/unknown)"* ]]
 	assert_output --partial "=== Sweep "
 	d="$(find "$out" -maxdepth 1 -name 'sweep-*' -type d)"
 	[ -f "${d}/baseline/PROBE_FAILED" ]
@@ -1907,7 +1907,7 @@ EOF
 	grep -qx 'EXIT=4' "${d}/sweep-outcome.txt"
 	[ "$(sed -n 's/^HARNESS_SHA=//p' "${d}/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "${d}/sweep-metadata.txt")" ]
 	grep -qx 'UNIT=passes' "${d}/sweep-outcome.txt"
-	grep -qx '## Sweep outcome' "${d}/sweep-comparison.md"
+	grep -qF "> **Sweep outcome** (\`${d##*/}\`): **finished**, exit 4" "${d}/sweep-comparison.md"
 }
 
 @test "tuning 003 --suite controlplane without timeout or gtimeout: stops at startup, before any profile or kubectl call" {

@@ -189,8 +189,6 @@ helm template dataplane-test "$CHART_DIR" ${SOURCE_PLATFORM_ARGS[@]+"${SOURCE_PL
 	--set image.tag="$FORTIO_TAG" \
 	"${ALL_CN_SETS[@]}" \
 	| "${apply[@]}" --context="$SOURCE_CTX" -f -
-# Under a sweep, a chart file changed for these renders reaches its outcome (harness_read).
-harness_read _hs _hk
 
 if ((DRY_RUN)); then
 	echo "Dry-run complete."

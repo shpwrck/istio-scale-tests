@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # Markdown table cells: md_cell and MD_CELL_AWK escape | and turn a newline into a space;
 # churn-dataplane 005, reach_coverage_render, dataplane 004, churn 004, propagation 005
-# and tuning 004 keep every table's columns with a mixed value or a | in a cell. Names are
+# and tuning 004 keep every table's columns with a mixed value or a | in a cell, and
+# controlplane 004 and the scale envelope keep a merged value in one cell. Names are
 # placeholders (ci-a).
 
 bats_require_minimum_version 1.5.0
@@ -155,4 +156,19 @@ _mixed_tsv() {
 	assert_success
 	assert_line '| Metric | baseline | 01-a\|b |'
 	_md_tables_even <<<"$output"
+}
+
+@test "a merged value whose parts hold commas (mixed:a | b) stays in one markdown table cell in controlplane 004 and the scale envelope" {
+	local f="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv" rep="${ROOT}/tests/controlplane/004-report-results.sh"
+	# Two TSVs of one run whose members connected other proxy versions.
+	awk '{ print } /^# ISTIO_VERSION=/ { print "# ISTIO_PROXY_VERSIONS=mesh-a=1.30.5:3,mesh-b=1.30.5:4" }' "$f" > "${RES}/controlplane-fixture-t2.tsv"
+	awk '{ print } /^# ISTIO_VERSION=/ { print "# ISTIO_PROXY_VERSIONS=mesh-a=1.31.0:7,mesh-b=1.31.0:9" }' "$f" > "${RES}/controlplane-fixture-t2-b.tsv"
+	run --separate-stderr "$rep" --results-dir "$RES" --format markdown
+	assert_success
+	assert_line --regexp '^\| proxy versions at start \(connected to istiod, summed over the members\) \| mixed:mesh-a=1\.3[01]\.[05]:[0-9],mesh-b=1\.3[01]\.[05]:[0-9] \\\| mesh-a=1\.3[01]\.[05]:[0-9],mesh-b=1\.3[01]\.[05]:[0-9] \|$'
+	source "${ROOT}/tests/lib/envelope.sh"
+	source "${ROOT}/tests/lib/platform.sh"
+	run --separate-stderr render_scale_envelope "$RES" "$rep" mesh-a,mesh-b false
+	assert_success
+	assert_line --regexp '^\| Proxy \(Envoy\) versions at the start \| mixed:mesh-a=[^|]* \\\| mesh-a=[^|]* \| '
 }

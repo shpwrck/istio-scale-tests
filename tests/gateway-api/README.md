@@ -348,8 +348,8 @@ results will go, and:
    within ⌈members / 4⌉ × 2 × that limit reads `timeout`.
 5. **Argo CD health** (best effort; `--hub-context` only): each per-member Application's health,
    sync and synced git revision, and the health of its HTTPRoutes. The revision is the chart
-   content that was deployed (`CHART_REVISION`; `HARNESS_SHA` and `HARNESS_CONTENT_KEY`, both in the
-   preamble, only describe the script); when it is not the script's commit the run warns and records
+   content that was deployed (`CHART_REVISION`; `HARNESS_SHA`, in the preamble, only describes
+   the script); when it is not the script's commit the run warns and records
    `CHART_REVISION_VS_HARNESS=differs` (`same` when it is, `same-dirty` when it is but the script's
    tree has uncommitted changes).
 6. Rereads the route status (S4's status depends on istiod's push timing; a route that was not

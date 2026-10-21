@@ -163,7 +163,6 @@ reject() {
 	reject 1 'ISTIO_VERSION_CHECK is not settable from --config (env only: running on a mesh whose Istio version is not the pin' 'ISTIO_VERSION_CHECK=warn'
 	# The other shared keys every sweep or version check reads say why too.
 	reject 1 'ISTIO_PROXY_READ_PARALLEL is not settable from --config (env only: ' 'ISTIO_PROXY_READ_PARALLEL=5'
-	reject 1 'HARNESS_SHA_CHECK_SEC is not settable from --config (env only: a setting of every sweep' 'HARNESS_SHA_CHECK_SEC=0'
 	reject 1 'SWEEP_STOP_GRACE_SEC is not settable from --config (env only: a setting of every sweep' 'SWEEP_STOP_GRACE_SEC=1'
 }
 
@@ -631,7 +630,7 @@ with_run_config() {
 	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
 	assert_success
 	# At the top level, as in every suite's JSON.
-	[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"],"harness_content_key":["unknown"]}' ]
+	[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"]}' ]
 }
 
 @test "003 with --config, no cluster: snapshot, preamble and report provenance" {
@@ -654,11 +653,11 @@ with_run_config() {
 	grep -qx "run_config_sha256: \"${sum}\"" "$d"/sweep-*.md
 }
 
-@test "003: a count that fails is a problem, never all ran, and keeps local paths out of the record; a keys file it cannot read is that problem too; an interrupt while it counts leaves no keys file" {
+@test "003: a count that fails is a problem, never all ran, and keeps local paths out of the record; a keys file it cannot read is that problem too" {
 	local res="${BATS_TEST_TMPDIR}/res" d fakeawk="${BATS_TEST_TMPDIR}/fakeawk" realawk
 	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
 	# The count's awk fails (as when it could not start): a problem, exit 4, never
-	# "All 1 cells ran", and the record says TOTAL=unknown.
+	# "All 1 cells ran", and the record says TOTAL=unknown and FAILED=unknown.
 	realawk="$(command -v awk)"
 	mkdir -p "$fakeawk"
 	printf '#!/bin/sh\nfor a; do last="$a"; done\ncase "$*" in *"print \\"TOTAL\\\\t\\" ncell"*) echo "awk: simulated: argument list too long reading $last" >&2; exit 2 ;; esac\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
@@ -682,20 +681,8 @@ with_run_config() {
 	printf '#!/bin/sh\nn=$#; i=0; for a in "$@"; do i=$((i + 1)); case "$a" in keys=*) a="keys=/nonexistent/keys" ;; esac; set -- "$@" "$a"; done; shift "$n"\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
 	CONTROLPLANE_RESULTS_DIR="$res" PATH="${fakeawk}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	assert_output --partial "error: could not count the sweep's cells: awk: cannot read the plan cell keys file; the rows are intact"
+	assert_output --partial "error: could not count the sweep's cells: awk: cannot read the matrix cell keys file; the rows are intact"
 	refute_output --partial "cells ran"
-	# A sweep stopped while it counts (TERM, as an interrupt) leaves no keys file behind;
-	# its not-finished record stays (its outcome never came) and says by which signal the
-	# sweep was interrupted.
-	rm -rf "$res"
-	printf '#!/bin/sh\ncase "$*" in *"print \\"TOTAL\\\\t\\" ncell"*) kill -TERM "$PPID"; exit 0 ;; esac\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
-	mkdir -p "${BATS_TEST_TMPDIR}/tmp10"
-	TMPDIR="${BATS_TEST_TMPDIR}/tmp10" CONTROLPLANE_RESULTS_DIR="$res" PATH="${fakeawk}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 143
-	[ -z "$(find "${BATS_TEST_TMPDIR}/tmp10" -name keys -print -quit)" ]
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	grep -qx 'EXIT=unfinished' "$d/sweep-outcome.txt"
-	grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/sweep-outcome.txt"
 }
 
 @test "003: repeated axis values are refused; a run counts each of its cells" {
@@ -711,4 +698,30 @@ with_run_config() {
 	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5,6
 	assert_failure 4
 	assert_output --partial "error: 2 of 2 cells failed: PROBE_FAILED x2."
+}
+
+@test "pooled ISTIO_PROXY_VERSIONS compare by version set: the same versions with other proxy counts are one value (shown without counts), other versions are mixed" {
+	source "${ROOT}/tests/lib/capacity.sh"
+	source "${ROOT}/tests/lib/envelope.sh"
+	local d="${BATS_TEST_TMPDIR}/pv-pooled"
+	mkdir -p "$d"
+	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30+1.30.4:2,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/a.tsv"
+	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.30.4:1+1.30.5:31,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/b.tsv"
+	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30+1.30.4:2,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/c.tsv"
+	printf '# RUN_ID=r1\n# ISTIO_PROXY_VERSIONS=ci-a=1.31.0:30,ci-b=1.30.5:34\ntimestamp\tx\n' > "$d/d.tsv"
+	run config_merged_preamble "$d/a.tsv" "$d/b.tsv"
+	assert_line "ISTIO_PROXY_VERSIONS=ci-a=1.30.4+1.30.5,ci-b=1.30.5"
+	run env_proxy_versions_summary "ci-a=1.30.4+1.30.5,ci-b=1.30.5"
+	assert_output "1.30.4, 1.30.5 (2 members; proxy counts differ between the pooled runs)"
+	# The same counts: the value as it is.
+	run config_merged_preamble "$d/a.tsv" "$d/c.tsv"
+	assert_line "ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30+1.30.4:2,ci-b=1.30.5:34"
+	# Another version: mixed.
+	run config_merged_preamble "$d/a.tsv" "$d/b.tsv" "$d/d.tsv"
+	assert_line "ISTIO_PROXY_VERSIONS=mixed:ci-a=1.30.4+1.30.5,ci-b=1.30.5 | ci-a=1.31.0:30,ci-b=1.30.5:34"
+	# A member that could not be read stays unknown, not a version.
+	run env_proxy_versions_summary "ci-a=1.30.5:120+1.30.4:3,ci-b=1.30.5:5,ci-c=none,ci-d=unknown"
+	assert_output "1.30.5: 125, 1.30.4: 3 (4 members; 1 with none; 1 unknown)"
+	run env_proxy_versions_summary "ci-a=1.30.5+1.30.4,ci-b=1.30.5,ci-c=unknown"
+	assert_output "1.30.5, 1.30.4 (3 members; 1 unknown; proxy counts differ between the pooled runs)"
 }

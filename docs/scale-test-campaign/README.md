@@ -40,9 +40,9 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    when its harness (`HARNESS_SHA`: a file under `tests/`, `config/`, `charts/` or `terraform/`)
    changed during it. Every sweep ends by writing `sweep-outcome.txt` to its results dir (exit
    code, failed cells, the version recheck), and its reports repeat those errors and warnings.
-   Until then the file holds a not-finished record, which says when the sweep stopped on an
-   error (`STOPPED=1`, `STOP_REASON`) or was interrupted (`ENDED_AT`, `ENDED_SIGNAL`); one
-   killed outright leaves it as it was. A sweep dir without that file is from a sweep that
+   Until then the file says `STATUS=running`; a sweep that stops on an error records
+   `STATUS=stopped` with its reason, one interrupted `STATUS=interrupted` with the signal, and
+   one killed outright leaves `STATUS=running`. A sweep dir without that file is from a sweep that
    stopped before its start (nothing ran) or from an older harness. Do not edit, check out or
    pull the checkout a sweep runs from until it ends.
 

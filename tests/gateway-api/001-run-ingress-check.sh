@@ -1324,9 +1324,9 @@ fi
 
 # Argo CD syncs the chart from its own revision, which can move independently of this script
 # (PL39): say when it is not the commit the script runs from.
-harness_read HARNESS HARNESS_CONTENT_KEY --exclude "$RESULTS_DIR"
+HARNESS="$(harness_sha --exclude "$RESULTS_DIR")"
 CHART_REVISION_VS_HARNESS=unknown
-# A dirty tree reads <describe>-dirty.<8hex> (or -dirty.unknown); the commit is before it.
+# A dirty tree reads <describe>-dirty; the commit is before it.
 hc="${HARNESS%%-dirty*}"
 if [[ "$hc" =~ -g([0-9a-f]{7,})$ ]]; then
 	hc="${BASH_REMATCH[1]}"
@@ -1720,7 +1720,6 @@ emit_preamble() {
 	echo "# GWAPI_SCHEMA=${GWAPI_SCHEMA}"
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# HARNESS_SHA=${HARNESS}"
-	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 	istio_version_kv | sed 's/^/# /'
 	config_preamble_lines
 	platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]}")"

@@ -304,10 +304,9 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-# harness_read (tests/lib/common.sh): HARNESS_SHA (a harness with uncommitted changes reads
-# <describe>-dirty.<8hex>) and HARNESS_CONTENT_KEY from one read; this probe's own results
-# do not count.
-harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
+# harness_sha (tests/lib/common.sh): a harness with uncommitted changes reads
+# <describe>-dirty; this probe's own results do not count.
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 
 if ((DRY_RUN)); then
@@ -395,7 +394,6 @@ trap cleanup_all EXIT
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# DATE=$(date -u -Iseconds)"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
-	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 	istio_version_kv | sed 's/^/# /'
 	echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 	echo "# FORTIO_IMAGE=${FORTIO_IMAGE}"
@@ -507,7 +505,7 @@ for rctx in "${ALL_CTXS[@]}"; do REACH_STATUS["$rctx"]=UNCHECKED; REACH_PCT["$rc
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every target (${REACH_REQUESTS} requests each; details on stderr)..."
 	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
-		"HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=dataplane" \
+		"SUITE=dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$RUN_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then

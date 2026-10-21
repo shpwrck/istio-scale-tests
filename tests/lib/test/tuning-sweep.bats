@@ -32,7 +32,9 @@ _need_yaml() {
 # (res), a delete removes them; the members hold no other tuning profile objects (label
 # istio-scale-tests/tuning-profile: an empty list). One istiod pod (istiod-a) whose
 # /metrics names TUN_PROXY_VERSION (default 1.30.5) for 3 proxies. Every call is logged to
-# KLOG; a `sleep` on PATH logs `SLEEP <sec>` there and returns at once (the settle).
+# KLOG, and each istiod pod list the ISTIO_GENERATIONS and ISTIO_PROXY_VERSIONS its caller
+# was handed (gens-seen); a `sleep` on PATH logs `SLEEP <sec>` there and returns at once (the
+# settle).
 # TUN_FOREIGN_WHEN: someone else edits the Istio CR once (gen + 1): `baseline` at an istiod
 # pod list during the baseline pass (its dir exists, no profile's state dir yet), `applied`
 # at one while a profile is applied, else at the first call that matches that glob. Any
@@ -45,6 +47,7 @@ _tun_stub() {
 #!/bin/sh
 d="$TD"
 printf '%s\n' "$*" >> "$KLOG"
+case "$*" in *" get pods -l app=istiod"*) echo "${ISTIO_GENERATIONS:-none} ${ISTIO_PROXY_VERSIONS:-none}" >> "$d/gens-seen" ;; esac
 [ -f "$d/gen" ] || echo 2 > "$d/gen"
 [ -f "$d/cr.json" ] || echo '{"spec":{"version":"v1.30-latest","values":{}}}' > "$d/cr.json"
 if [ -n "${TUN_FOREIGN_WHEN:-}" ] && [ ! -e "$d/foreign-done" ]; then
@@ -136,6 +139,15 @@ _proxy_settle_order() {
 	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt" || false
 	[[ "$stderr" != *"changed while the sweep changed nothing"* ]]
 	[ "$(_proxy_settle_order)" = PSPSP ]
+	# The sweep's own apply and revert are no problem, and each pass's probes got the
+	# generations they ran on: the baseline's 2, the profile's 3 (after its apply), which the
+	# apply recorded; the revert left no edit marker, and the spec at the start and after the
+	# last revert, kept for the record, are the same.
+	grep -q '^ci-a=2/2 ' "${TD}/gens-seen"
+	grep -q '^ci-a=3/3 ' "${TD}/gens-seen"
+	[ "$(<"${TDIR}/01-push-throttling/state/istio-generations-applied")" = ci-a=3/3 ]
+	[ ! -e "${TDIR}/01-push-throttling/state/istio-edited-during-pass" ]
+	cmp "${TDIR}/istio-spec/start-ci-a.json" "${TDIR}/istio-spec/end-ci-a.json"
 }
 
 @test "a profile that leaves the Istio CR alone (istio_cr_patch {}): its apply and revert are no problem; an edit by something else during its apply, its pass or its revert is one, once" {

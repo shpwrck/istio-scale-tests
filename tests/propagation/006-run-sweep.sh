@@ -22,7 +22,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # Loud ERR trap for unexpected aborts; per-step failures are handled below.
 # sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
-# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+# aborts after its start records (the EXIT trap sweep_start sets).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
@@ -94,39 +94,27 @@ Environment:
   PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
   setup, --dry-run included.
 $(platform_help_lines all)
-  HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
-  step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
-  processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
-  are read at once. Environment only (config/options.env).
+  SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
+  before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read
+  at once. Environment only (config/options.env).
 
 Exit codes:
   0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
      counted in the report's n_total and left out of n_valid
   1  the sweep stopped: a bad flag or precondition (or another live run holds the
      sweep dir: .sweep.lock names its PID), or an unexpected error; after its start,
-     sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
-     CUT_SHORT=1)
+     sweep-outcome.txt records the stop and its reason (STATUS=stopped, STOP_REASON)
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
      version, the active revision or the generation of the Istio CR or its active
      IstioRevision changed during the sweep (read again at its end), or that
      end-of-sweep check failed, or the harness (a file under tests/, config/, charts/
-     or terraform/) changed during the sweep (HARNESS_SHA read again before its steps,
-     by each step and at its end); the outcome is also in sweep-outcome.txt and
-     sweep-summary.md
-  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
-     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A signal
-     sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches the step
-     that runs (001, 002, 004, 007) and every process under it at once; any still running
-     SWEEP_STOP_GRACE_SEC later get SIGKILL, and the lock is released after them. For a
-     sweep in a terminal's foreground, a kill -INT or -HUP skips the processes in that
-     foreground (a Ctrl-C reaches them itself): they get SIGKILL with no cleanup, so
-     stop such a sweep from elsewhere with SIGTERM. The sweep's own commands between
-     steps (a settle wait, the Istio version and proxy reads, the end-of-sweep recheck)
-     finish first, each bounded. Stopping the step's tree needs a ps that lists start
-     times (procps, or macOS's), or Linux's /proc in its place: without either, the
-     sweep warns at its start (a --dry-run too), and a stop reaches only the step's own
-     process.
+     or terraform/) changed during the sweep (HARNESS_SHA read at its start and its
+     end); the outcome is also in sweep-outcome.txt and every report
+  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): the running step's process group
+     gets SIGTERM, and SIGKILL SWEEP_STOP_GRACE_SEC later; sweep-outcome.txt records
+     STATUS=interrupted with the signal and its time, then the sweep's exit runs
+     007-cleanup.sh on every member
 EOF
 }
 
@@ -245,10 +233,13 @@ fi
 SCRIPT_DIR="${ROOT}/tests/propagation"
 SWEEP_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${SWEEP_RUN_ID}"
-# The harness at the sweep's start; its results under the output dir do not count
-# (harness_sha_for_sweep exports that dir, so each step records the harness it runs). A
-# harness that changes during the sweep is a problem in its outcome (exit 4).
-harness_sha_for_sweep "$OUTPUT_DIR"
+# The harness at the sweep's start; its results under the output dir do not count, for
+# its steps either (HARNESS_SHA_EXCLUDE). sweep_finish reads it again: a harness that
+# changed during the sweep is a problem in its outcome (exit 4).
+HARNESS_SHA_EXCLUDE="$OUTPUT_DIR"
+[[ "$HARNESS_SHA_EXCLUDE" == /* ]] || HARNESS_SHA_EXCLUDE="${PWD%/}/${HARNESS_SHA_EXCLUDE}"
+export HARNESS_SHA_EXCLUDE
+HARNESS_SHA="$(harness_sha)"
 
 # Live tuning-baseline provenance, queried once on the source context and passed
 # to 002 and the placeholder writer. Skipped in --dry-run (stays "unknown").
@@ -295,8 +286,6 @@ emit_propagation_placeholder() {
 		echo "# SWEEP_RUN_ID=${SWEEP_RUN_ID}"
 		echo "# RUN_ID=${SWEEP_RUN_ID}-failms${ms}"
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
-		# The sweep start's content key (harness_sha_for_sweep), as 002 writes its own.
-		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY:-unknown}"
 		istio_version_kv | sed 's/^/# /'
 		echo "# SOURCE_CTX=${sctx}"
 		echo "# MESH_SIZE=${ms}"
@@ -385,22 +374,15 @@ sweep_cleanup() {
 	echo "--- Final cleanup: all contexts ---"
 	sweep_step "$SCRIPT_DIR/007-cleanup.sh" --contexts "$(IFS=,; echo "${CONTEXTS[*]}")" || true
 }
-# A sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) adds when and
-# how it ended to that record first (--mark-end: 007 over every member takes minutes, and
-# a second Ctrl-C during it ends the trap), then runs the cleanup, then records the rest:
-# stopped with its reason, or interrupted. Set before sweep_outcome_start, whose signal
-# traps then run it (sweep_trap_signals).
-_sweep_rc=0 # the trap's own $?, kept before its first step changes it
-trap '_sweep_rc=$?; sweep_outcome_on_exit --mark-end "$_sweep_rc" || true; sweep_cleanup || true; sweep_outcome_on_exit "$_sweep_rc" || true' EXIT
-
 mkdir -p "$SWEEP_DIR"
 config_snapshot "$SWEEP_DIR" "$SWEEP_RUN_ID"
-# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
-# so the reports of a sweep that died say so.
-sweep_outcome_start "$SWEEP_DIR" "$SWEEP_RUN_ID" --next "if it died, run 007-cleanup.sh on its contexts, then the sweep again into a new dir (a propagation sweep has no --resume); the rows in this dir cover only the mesh sizes it finished"
-# The cleanup a step cut short by SIGKILL left undone (console only: _sweep_kill_hint), such
-# as 002's exit-time removal of the t0 label; the sweep's own exit runs it too (sweep_cleanup).
-SWEEP_CLEANUP_CMD="./tests/propagation/007-cleanup.sh --contexts $(IFS=,; echo "${CONTEXTS[*]}"); the sweep's own exit runs it too"
+# The cleanup the console names when the sweep ends before its end (its exit runs it too,
+# sweep_cleanup; again by hand when that failed, or a second Ctrl-C cut it short).
+SWEEP_CLEANUP_CMD="./tests/propagation/007-cleanup.sh --contexts $(IFS=,; echo "${CONTEXTS[*]}")"
+# sweep-outcome.txt says the sweep runs until sweep_finish writes its outcome; one that ends
+# before (die, an unexpected abort, Ctrl-C) records how, then runs sweep_cleanup
+# (tests/lib/common.sh).
+sweep_start "$SWEEP_DIR" "$SWEEP_RUN_ID" --cleanup sweep_cleanup
 
 
 echo "=========================================="
@@ -482,9 +464,12 @@ echo ""
 # The Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
-# The outcome is written after the reports: they say so (the markdown gets a line
-# that sweep_outcome --md replaces).
-export _SWEEP_OUTCOME_PENDING=1
+sweep_cleanup
+# The outcome before the reports (sweep-outcome.txt, which they read): how many cells
+# failed, and exit non-zero if any did (or the Istio version changed under the sweep).
+outcome_rc=0
+sweep_finish ${IV_END[@]+"${IV_END[@]}"} "${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
+echo ""
 echo "Generating aggregated report..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format text
 echo ""
@@ -496,14 +481,4 @@ echo "Combined report: $COMBINED"
 CHARTS_FILE="${SWEEP_DIR}/sweep-charts.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
-
-# Final cleanup now, so the outcome below is the last thing the sweep prints (the EXIT
-# trap keeps only the stop record, for a stop between here and the outcome).
-trap 'sweep_outcome_on_exit "$?" || true' EXIT
-sweep_cleanup
-
-# The reports are written; now say how many cells failed and exit non-zero if any
-# did (or the Istio version changed under the sweep), also in sweep-outcome.txt and the
-# summary.
-sweep_outcome ${IV_END[@]+"${IV_END[@]}"} --run-id "$SWEEP_RUN_ID" --record "$SWEEP_DIR" --md "$COMBINED" \
-	"${#MESH_SIZES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || exit "$SWEEP_FAILED_EXIT"
+exit "$outcome_rc"

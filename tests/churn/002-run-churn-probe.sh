@@ -258,10 +258,10 @@ done
 ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
-# HARNESS_SHA, HARNESS_CONTENT_KEY and the Istio version keys are recorded here so 004
-# reports the run's harness and Istio version, not the report host's (the 003 placeholder
-# writes the same keys, PL36); this probe's own results do not count.
-harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
+# HARNESS_SHA and the Istio version keys are recorded here so 004 reports the run's harness
+# and Istio version, not the report host's (the 003 placeholder writes the same keys, PL36);
+# this probe's own results do not count.
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 # Every member's Kubernetes version and the platform record (inherited from 003, else read here),
 # before the first churn event.
 ALL_CTXS_CSV="$(IFS=,; echo "${ALL_CTXS[*]}")"
@@ -272,7 +272,6 @@ cat > "$TSV_FILE" <<EOF
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # HARNESS_SHA=${HARNESS_SHA}
-# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}
 $(istio_version_kv | sed 's/^/# /')
 # KUBE_VERSIONS=${KUBE_VERSIONS_CSV}
 # ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}

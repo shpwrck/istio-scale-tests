@@ -213,7 +213,7 @@ second_sweep() {
 		assert_output --partial "mixed:3,5"
 		[[ "$stderr" == *"input TSVs disagree on sweep-level ITERATIONS (3,5)"* ]]
 		if [[ "$fmt" == json ]]; then
-			[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["sweep-a","sweep-b"],"harness_sha":["ha","hb"],"istio_version":["1.30.5"],"harness_content_key":["unknown"]}' ]
+			[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["sweep-a","sweep-b"],"harness_sha":["ha","hb"],"istio_version":["1.30.5"]}' ]
 		else
 			assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: ha, hb. ISTIO_VERSION: 1.30.5."
 		fi

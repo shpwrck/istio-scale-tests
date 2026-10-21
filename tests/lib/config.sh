@@ -65,14 +65,12 @@
 #                                     or a run id outside one; PL6/PL26); more than one dies
 #                                     unless <allow> is 1 (--allow-multi-run). Sets
 #                                     MULTI_RUN_N, MULTI_RUN_IDS, MULTI_RUN_HARNESS_SHAS,
-#                                     MULTI_RUN_HARNESS_CONTENT_KEYS,
 #                                     MULTI_RUN_ISTIO_VERSIONS
 #   config_multi_run_note          -> the sentence a pooled report prints in every format
 #                                     (nothing for one run)
 #   config_multi_run_csv           -> `# POOLED_*=` lines for a csv (nothing for one run)
 #   config_multi_run_json          -> {"runs":N,"run_ids":[..],"harness_sha":[..],
-#                                     "istio_version":[..],"harness_content_key":[..]} (also
-#                                     for one run)
+#                                     "istio_version":[..]} (also for one run)
 #
 # Provenance, exported so the steps a config-driven sweep runs inherit it:
 #   RUN_CONFIG         the file's path relative to the repo root, or its basename outside the
@@ -110,15 +108,14 @@ config_suite_prefixes() {
 # read at once (tests/lib/platform.sh). An unknown-key error names them after the suite's own list.
 CONFIG_SHARED_PREFIXES="ISTIOD_DIAG_ TEST_PLATFORM PLATFORM_READ_TIMEOUT PLATFORM_READ_PARALLEL"
 # Keys every suite reads that no --config sets (_config_env_only_reason says why).
-CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_ ISTIO_PROXY_READ_PARALLEL HARNESS_SHA_CHECK_SEC SWEEP_STOP_GRACE_SEC"
+CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_ ISTIO_PROXY_READ_PARALLEL SWEEP_STOP_GRACE_SEC"
 # CONFIG_MERGED_UNKNOWN_IF_MISSING: preamble keys that config_merged_preamble merges as
 # unknown for a file without them (written before the live-version keys: its
-# ISTIO_VERSION is the pin, unchecked; before the start-of-run readiness keys,
-# ISTIO_ACTIVE_REVISIONS, ISTIO_GENERATIONS or ISTIO_PROXY_VERSIONS; or before
-# HARNESS_CONTENT_KEY were added). They are sweep-level (PL26): pooled inputs that differ
-# read mixed, never one file's value.
+# ISTIO_VERSION is the pin, unchecked; or before the start-of-run readiness keys,
+# ISTIO_ACTIVE_REVISIONS, ISTIO_GENERATIONS or ISTIO_PROXY_VERSIONS were added). They are
+# sweep-level (PL26): pooled inputs that differ read mixed, never one file's value.
 # shellcheck disable=SC2034
-CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS HARNESS_CONTENT_KEY"
+CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).
@@ -140,7 +137,7 @@ _config_env_only_reason() {
 	ISTIO_VERSION_CHECK) echo "running on a mesh whose Istio version is not the pin is acknowledged per invocation, like the pins themselves" ;;
 	ISTIO_VERSION_READY_*) echo "the version check's readiness wait is set per invocation, with ISTIO_VERSION_CHECK" ;;
 	ISTIO_PROXY_READ_PARALLEL) echo "the version check's read concurrency is set per invocation, with ISTIO_VERSION_CHECK" ;;
-	HARNESS_SHA_CHECK_SEC | SWEEP_STOP_GRACE_SEC) echo "a setting of every sweep (tests/lib/common.sh), not of one suite's run" ;;
+	SWEEP_STOP_GRACE_SEC) echo "a setting of every sweep (tests/lib/common.sh), not of one suite's run" ;;
 	esac
 }
 
@@ -613,7 +610,7 @@ _config_run_ids() {
 # and a trailing slash still resolve, and a symlink named sweep-Y keeps its sweep key; a
 # symlink such as latest -> sweep-X takes its target's (_config_canon_dir). Sets
 # MULTI_RUN_N, MULTI_RUN_IDS (sorted, comma-separated) and MULTI_RUN_HARNESS_SHAS /
-# MULTI_RUN_HARNESS_CONTENT_KEYS / MULTI_RUN_ISTIO_VERSIONS (distinct preamble values in
+# MULTI_RUN_ISTIO_VERSIONS (distinct preamble values in
 # file order; unknown for a file without the line). More than one run with <allow> 0 dies,
 # listing the five newest runs (by the timestamp their ids start with) with the commands
 # that report each alone. A run outside a sweep-* dir that shares its directory with
@@ -666,7 +663,6 @@ config_check_multi_run() {
 	MULTI_RUN_N="${#run_dir[@]}"
 	MULTI_RUN_IDS="$(awk 'NF { printf "%s%s", (n++ ? "," : ""), $0 }' <<<"$runs")"
 	MULTI_RUN_HARNESS_SHAS="$(_config_distinct HARNESS_SHA unknown "$@" | awk '{ printf "%s%s", (NR > 1 ? "," : ""), ($0 == "" ? "unknown" : $0) }')"
-	MULTI_RUN_HARNESS_CONTENT_KEYS="$(_config_distinct HARNESS_CONTENT_KEY unknown "$@" | awk '{ printf "%s%s", (NR > 1 ? "," : ""), ($0 == "" ? "unknown" : $0) }')"
 	MULTI_RUN_ISTIO_VERSIONS="$(_config_distinct ISTIO_VERSION unknown "$@" | awk '{ printf "%s%s", (NR > 1 ? "," : ""), ($0 == "" ? "unknown" : $0) }')"
 	((MULTI_RUN_N > 1)) || return 0
 	if ((allow)); then
@@ -732,20 +728,12 @@ config_check_multi_run() {
 }
 
 # config_multi_run_note: the sentence every format of a pooled report carries, after
-# config_check_multi_run. Nothing for a report of one run. HARNESS_SHA values that differ
-# while every run recorded one HARNESS_CONTENT_KEY ran the same harness files (a docs
-# commit or a tag between them): a note, not "these differ".
+# config_check_multi_run. Nothing for a report of one run.
 # shellcheck disable=SC2329
 config_multi_run_note() {
 	((${MULTI_RUN_N:-1} > 1)) || return 0
-	local differ="" what="" keys="${MULTI_RUN_HARNESS_CONTENT_KEYS:-unknown}"
-	if [[ "${MULTI_RUN_HARNESS_SHAS}" == *,* ]]; then
-		if [[ "$keys" != *,* && "$keys" =~ ^[0-9a-f]+$ ]]; then
-			differ=" The HARNESS_SHA values differ only in git describe: every run records HARNESS_CONTENT_KEY=${keys}, the same harness files (a commit or tag that left the harness files as they were)."
-		else
-			what="harness"
-		fi
-	fi
+	local differ="" what=""
+	[[ "${MULTI_RUN_HARNESS_SHAS}" != *,* ]] || what="harness"
 	[[ "${MULTI_RUN_ISTIO_VERSIONS}" != *,* ]] || what="${what:+${what} or }Istio version"
 	[[ -z "$what" ]] || differ+=" These differ, so the pooled rows were not all measured with the same ${what}."
 	echo "This report pools ${MULTI_RUN_N} runs (--allow-multi-run): ${MULTI_RUN_IDS//,/, }. HARNESS_SHA: ${MULTI_RUN_HARNESS_SHAS//,/, }. ISTIO_VERSION: ${MULTI_RUN_ISTIO_VERSIONS//,/, }.${differ}"
@@ -758,7 +746,6 @@ config_multi_run_csv() {
 	echo "# POOLED_RUNS=${MULTI_RUN_N}"
 	echo "# POOLED_RUN_IDS=${MULTI_RUN_IDS}"
 	echo "# POOLED_HARNESS_SHAS=${MULTI_RUN_HARNESS_SHAS}"
-	echo "# POOLED_HARNESS_CONTENT_KEYS=${MULTI_RUN_HARNESS_CONTENT_KEYS:-unknown}"
 	echo "# POOLED_ISTIO_VERSIONS=${MULTI_RUN_ISTIO_VERSIONS}"
 	echo "# NOTE: $(config_multi_run_note)"
 }
@@ -771,12 +758,12 @@ config_multi_run_csv() {
 # shellcheck disable=SC2329
 config_multi_run_json() {
 	_CMR_IDS="${MULTI_RUN_IDS:-}" _CMR_SHAS="${MULTI_RUN_HARNESS_SHAS:-}" _CMR_VERS="${MULTI_RUN_ISTIO_VERSIONS:-}" \
-		_CMR_KEYS="${MULTI_RUN_HARNESS_CONTENT_KEYS:-unknown}" awk -v n="${MULTI_RUN_N:-1}" "${JSON_STR_AWK}"'
+		awk -v n="${MULTI_RUN_N:-1}" "${JSON_STR_AWK}"'
 		function arr(s,    a, k, i, o) {
 			k = split(s, a, ",")
 			o = "["
 			for (i = 1; i <= k; i++) o = o (i > 1 ? "," : "") js(a[i])
 			return o "]"
 		}
-		BEGIN { printf "{\"runs\":%d,\"run_ids\":%s,\"harness_sha\":%s,\"istio_version\":%s,\"harness_content_key\":%s}\n", n, arr(ENVIRON["_CMR_IDS"]), arr(ENVIRON["_CMR_SHAS"]), arr(ENVIRON["_CMR_VERS"]), arr(ENVIRON["_CMR_KEYS"]) }'
+		BEGIN { printf "{\"runs\":%d,\"run_ids\":%s,\"harness_sha\":%s,\"istio_version\":%s}\n", n, arr(ENVIRON["_CMR_IDS"]), arr(ENVIRON["_CMR_SHAS"]), arr(ENVIRON["_CMR_VERS"]) }'
 }

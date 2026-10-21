@@ -45,9 +45,6 @@ flowchart TB
 - `kubectl` (`oc` also works), `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4.3+ (macOS ships 3.2: `brew install bash`)
 - GNU coreutils `timeout` for live controlplane runs (macOS has none: `brew install coreutils`, which adds `gtimeout`)
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
-- `ps` from procps (Linux; macOS's own works) for the sweeps, which stop a step's whole process tree
-  with it (on Linux, `/proc` stands in for a missing or busybox `ps`; a sweep warns at its start
-  only when neither works)
 - `python3` with PyYAML (tuning suite only)
 - `awk`: mawk, macOS's own or gawk up to 5.1. gawk 5.2 and 5.3 (Ubuntu 24.04's and Fedora's gawk)
   have a bug the reports would hit, so with them the harness runs mawk and stops when mawk is
@@ -170,31 +167,16 @@ during the sweep, or the generation of a member's Istio CR or active IstioRevisi
 edit with the same version, an OSSM operator upgrade, a TLS profile change; or that end-of-sweep
 check failed) and when its harness changed under it (below). `sweep-outcome.txt` in the sweep
 dir keeps the outcome. While a sweep runs, its dir holds a lock (`.sweep.lock`, its PID):
-another run into that dir is refused until it ends (a PID another user
-runs counts as alive; the lock of a run that died is taken over, by one run at a time). Each
-suite README lists its exit codes. Every script has `--help`, and scripts that change a cluster
-also accept `--dry-run`.
+another run into that dir is refused while that PID runs, and the lock of a run that died is
+taken over. Each suite README lists its exit codes. Every script has `--help`, and scripts that
+change a cluster also accept `--dry-run`.
 
-Every result records the harness that wrote it as `HARNESS_SHA`: `git describe`, plus
-`-dirty.<8hex>` when a file under `tests/`, `config/`, `charts/` or `terraform/` differs from that
-commit (an added untracked file there counts too, unless git ignores it: a run config in
-`tests/<suite>/configs/` counts unless it is named `*.local.env`; an ignored file never counts, also
-what your global `core.excludesFile`, or git's default `~/.config/git/ignore` when that key is
-unset, ignores; your other git settings, `.git/info/attributes` included, never change the value; a
-run's own results do not count). Next to it, `HARNESS_CONTENT_KEY` (12 hex characters) identifies
-the content of those files alone; the `<8hex>` is its start. A sweep reads them again before its
-steps (at most every `HARNESS_SHA_CHECK_SEC`, 60 s by default, `config/options.env`) and at its end,
-and each probe's and setup step's own read counts too. A file edited, added or removed there during
-the sweep (or a `git checkout`, `pull` or commit that changes one) is a problem in its outcome
-(exit 4) when a read sees it, also when it was undone before the sweep's next read and only a step
-read it (an edit made after a step's only read and undone before the next read is not seen); the
-problem names both values and when the change was first seen, and the rows measured after it carry
-the new value in their TSV (controlplane: a `# HARNESS_CHANGED_AT=` line in its one TSV;
-churn-dataplane: each row's `harness_sha`), while the sweep's own records (the TSV preamble,
-`sweep-outcome.txt`) keep the start's. A commit or tag that left those files as they were changes
-only the name `git describe` gives: a note, and every step keeps recording the start's
-`HARNESS_SHA`. Each report also records the harness it ran on as `REPORT_HARNESS_SHA`; the results
-dir it reads never counts as a change.
+Every result records the harness that wrote it as `HARNESS_SHA`: `git describe`, plus `-dirty`
+when git lists a changed tracked file, or an untracked file it does not ignore, under `tests/`,
+`config/`, `charts/` or `terraform/` (a run config in `tests/<suite>/configs/` counts unless it is
+named `*.local.env`; a run's own results do not count). A sweep reads it at its start and again at
+its end: a different value is a problem in its outcome (exit 4). A report of inputs with different
+values reads `mixed:<a>,<b>` and warns.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |
@@ -257,37 +239,21 @@ version check that stops unexpectedly counts as unknown: `fail` stops the run, `
 exits 4 when the version, the active revision or the generation of the Istio CR or its active
 IstioRevision changed (also when the Istio CR is not settled at the end, or its istiod Deployment
 cannot be read, but its active revision reads another version); istiod or IstioCNI not ready at the
-end, on the same version, is a warning. From its start the sweep keeps a not-finished record in
-`sweep-outcome.txt` in its results dir (`EXIT=unfinished`), and every report of that dir says the
-sweep has not finished (it died, or still runs; json `sweep_outcome.unfinished`); at its end the
-sweep writes its outcome there, and every report re-generated from that dir repeats its errors,
-warnings and notes (json `"unfinished": false`). A sweep that ends between the two says how in that
-record: one that stops on an error (a check it makes, or an unexpected abort whose `FATAL:` line
-names the script, line and command) records a stop (`STOPPED=1`, the reason in `STOP_REASON`,
-`TOTAL=unknown`, `CUT_SHORT=1`; every report shows the stop and its reason; exit 1, whatever code
-the failed command had); one interrupted (Ctrl-C, SIGTERM, or SIGHUP when its terminal closes) stays
-not finished and records when and by which signal (`ENDED_AT`, `ENDED_SIGNAL`; reports say
-"interrupted at ...", json `interrupted_at`, `interrupted_by`; exit 130, 143 or 129); only one
-killed outright (SIGKILL, out of memory, a lost host) leaves the record as it was. A signal sent to
-the sweep's process alone (`kill <pid>`, `kill -INT <pid>`, a service manager) reaches the step that
-runs (a setup, a probe, a cleanup) and every process under it (its kubectl calls, its per-member
-workers) at once; the sweep ends once they have, or sends SIGKILL to what still runs
-`SWEEP_STOP_GRACE_SEC` (30) seconds later (their own cleanup does not run; the warning names the
-suite's cleanup command), and only then releases its lock. For a sweep in a terminal's foreground (a
-terminal, a tmux or screen pane), a `kill -INT` or `kill -HUP` sent from elsewhere skips the
-processes in that foreground, which a Ctrl-C reaches itself: they get SIGKILL after the grace, with
-no cleanup, so stop such a sweep from elsewhere with SIGTERM (`kill <pid>`). The sweep's own
-commands between steps finish first, each bounded: a settle wait, the Istio version and proxy reads
-(tuning: the generation reads around each apply and revert), controlplane's leftover counts, and the
-end-of-sweep recheck. Stopping the step's tree needs a `ps` that lists every process with its start
-time (procps, or macOS's), or Linux's `/proc` in its place: without either, the sweep warns at its
-start, and a stop reaches only the step's own process (a `--dry-run` warns too; when the sweep's
-stdin is a terminal, a `kill -INT` or `kill -HUP` from elsewhere then reaches nothing: it is taken
-for a Ctrl-C, which reached the step itself). A results dir without `sweep-outcome.txt` is from a
-sweep that stopped before its start (nothing ran) or from an older harness. A kubectl error quoted
-in a record or a report names the API server as `<api-host>` or `<ip>`, never its address.
-`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`
-and `SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
+end, on the same version, is a warning. From its start a sweep's `sweep-outcome.txt` says
+`STATUS=running`; at its end, before its reports, the sweep writes its outcome there
+(`STATUS=finished`, or `stopped` with its reason), and every report of that dir repeats it (json
+`sweep_outcomes`). One interrupted (Ctrl-C, SIGTERM, or SIGHUP when its terminal closes) records
+`STATUS=interrupted` with the signal and its time (exit 130, 143 or 129); one that stops on an error
+(a check it makes, or an unexpected abort whose `FATAL:` line names the script, line and command)
+records `STATUS=stopped` with its reason (exit 1); only one killed outright (SIGKILL, out of memory,
+a lost host) keeps `STATUS=running`, and its reports say it has not finished. On a signal the sweep
+sends SIGTERM to the running step's process group (the step and every process it started), SIGKILL
+to what still runs `SWEEP_STOP_GRACE_SEC` (30) seconds later, and only then releases its lock. A
+results dir without `sweep-outcome.txt` is from a sweep that stopped before its start (nothing ran)
+or from an older harness. A kubectl error quoted in a record or a report names the API server as
+`<api-host>` or `<ip>`, never its address.
+`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL` and
+`SWEEP_STOP_GRACE_SEC` are set in the environment, never in a `--config` file.
 
 Every TSV, run summary and report also records what each member ran on: Kubernetes or OpenShift,
 the mesh operator build, the istiod and proxy images, istiod's env and the nodes' provider
@@ -363,8 +329,8 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
 - **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
   `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK`,
   `ISTIO_VERSION_READY_*` and
-  `ISTIO_PROXY_READ_PARALLEL` (the version check above), `HARNESS_SHA_CHECK_SEC` and
-  `SWEEP_STOP_GRACE_SEC` (every sweep, above) and the version pins in `config/versions.env`.
+  `ISTIO_PROXY_READ_PARALLEL` (the version check above), `SWEEP_STOP_GRACE_SEC` (every sweep,
+  above) and the version pins in `config/versions.env`.
 - **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and
   what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).
   A standalone step still takes those on the command line.
@@ -386,16 +352,8 @@ and a "Run config" section in its README that lists its keys. Tuning does not ta
   lists the runs and prints the `--results-dir <dir>/sweep-<RUN_ID>` that reports each alone.
   `--allow-multi-run` pools them on purpose, and every format then says it pools N runs and
   lists their `HARNESS_SHA` and `ISTIO_VERSION` values. A key that differs across the inputs reads
-  `mixed:<a>,<b>`, never one file's value. `HARNESS_SHA` values that differ while every input
-  records one `HARNESS_CONTENT_KEY` differ only in git describe: every report then gives a note
-  ("differ only in git describe: every ... records HARNESS_CONTENT_KEY=..., the same harness files")
-  instead of a warning, which an input without the key keeps. A report repeats only its results
-  dir's own `sweep-outcome.txt`: the record of a `sweep-*` dir below it (a pooled run, or one
-  sweep reported from its parent dir) that has not finished, was interrupted, stopped early or
-  records a `PROBLEM` is named in a note and a warning on stderr (json `pooled_sweep_outcomes`);
-  controlplane names one that has not finished, was interrupted or stopped early in a data
-  warning (on stderr too), and counts and names each record's `PROBLEM`s in its verdict instead.
-  Report that sweep dir alone to see its outcome.
+  `mixed:<a>,<b>`, never one file's value. A report repeats the `sweep-outcome.txt` of each sweep
+  dir its inputs come from.
 
 ## Grow the mesh
 

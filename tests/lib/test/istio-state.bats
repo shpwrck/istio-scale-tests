@@ -320,3 +320,40 @@ STUB
 	d="$(sweep_dir)"
 	! grep -rqF -e "api.ci-a.example" -e "192.0.2.53" "$d"
 }
+
+@test "masked kubectl errors name no user, email or home dir; a generation-only change names its likely causes; the console says the errors are masked" {
+	run _istio_version_mask 'Error from server (Forbidden): istios.sailoperator.io "default" is forbidden: User "jdoe" cannot get resource'
+	assert_output 'Error from server (Forbidden): istios.sailoperator.io "default" is forbidden: User "<user>" cannot get resource'
+	run _istio_version_mask 'error: you must be logged in as someone@example.com (/home/jdoe/.kube/config; /Users/jdoe/x)'
+	assert_output 'error: you must be logged in as <email> (<home>/.kube/config; <home>/x)'
+	run _istio_version_mask 'error: unable to read client-key /tmp/k for kube-admin due to open /tmp/k: no such file'
+	assert_output 'error: unable to read client-key /tmp/k for <user> due to open /tmp/k: no such file'
+	run istio_generation_causes 1
+	assert_output "a version changed and changed back, or a values change (an edit of the Istio CR)"
+	run istio_generation_causes 0
+	assert_output --partial "an OSSM operator upgrade (installPlanApproval Automatic on its Subscription, charts/spoke-ossm-operator) or a change of the cluster's TLS security profile"
+	# Through istio_version_recheck: only the IstioRevision moved.
+	run --separate-stderr bash -c '
+		source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/preamble.sh"
+		export ISTIO_VERSION=v1.30.5 ISTIO_VERSION_READY_WAIT_SEC=0
+		istio_version_resolve ci-a 0 "$1" 2>/dev/null
+		export STUB_ISTIO_REV_GEN=5
+		out=(); istio_version_recheck out "$1"; printf "%s\n" "${out[@]}"' _ "${ROOT}/tests/lib/test/fixtures/fake-istio-cr.sh"
+	assert_line --index 1 --partial "(ci-a: its IstioRevision default (generation 2 at the start, 5 at the end); ISTIO_GENERATIONS): only the IstioRevision moved, which is usually Sail rendering it again: an OSSM operator upgrade"
+	# istio_generations_diff: what moved, and whether the Istio CR did.
+	run istio_generations_diff "ci-a=2/2,ci-b=3/3,ci-c=unknown/unknown" "ci-a=2/2,ci-b=3/4,ci-c=4/4"
+	assert_output "$(printf '0\tci-b (IstioRevision generation 3 -> 4)')"
+	run istio_generations_diff "ci-a=2/2" "ci-a=3/3"
+	assert_output "$(printf '1\tci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3)')"
+	run istio_generations_diff "ci-a=2/2" "ci-a=2/2"
+	assert_output ""
+	# The start's warning says the errors it quotes are masked, and where the full one is.
+	printf '#!/bin/sh\necho "Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout" >&2\nexit 1\n' > "${BIN}/kubectl"
+	run --separate-stderr bash -c '
+		source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/preamble.sh"
+		export ISTIO_VERSION=v1.30.5 ISTIO_VERSION_READY_WAIT_SEC=0 ISTIO_VERSION_CHECK=warn
+		istio_version_resolve ci-a 0 "$1"' _ "${BIN}/kubectl"
+	[[ "$stderr" == *"dial tcp <ip>: i/o timeout"* ]]
+	[[ "$stderr" != *"192.0.2.10"* ]]
+	[[ "$stderr" == *$'\n'"  (API hosts, addresses, user names and home dirs are masked above; run a reproduce line for the full error)"$'\n'* ]]
+}

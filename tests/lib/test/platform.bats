@@ -900,7 +900,7 @@ env_list() {
 	grep -q '^platform_tuning_objects_refuse "$CONTEXTS_CSV" "this profile"$' "${ROOT}/tests/tuning/001-apply-profile.sh"
 	grep -q '^platform_tuning_objects_refuse "$CONTEXTS_CSV" "every pass of this sweep (the baseline included)"$' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh"
 	[ "$(grep -n '^platform_tuning_objects_refuse' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" | cut -d: -f1)" -lt \
-		"$(grep -n "^trap 'on_exit || true' EXIT" "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" | cut -d: -f1)" ]
+		"$(grep -n '^sweep_start ' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" | cut -d: -f1)" ]
 	[ "$(grep -n '^platform_tuning_objects_refuse' "${ROOT}/tests/tuning/001-apply-profile.sh" | cut -d: -f1)" -lt \
 		"$(grep -n '^mkdir -p "$STATE_DIR"' "${ROOT}/tests/tuning/001-apply-profile.sh" | cut -d: -f1)" ]
 }

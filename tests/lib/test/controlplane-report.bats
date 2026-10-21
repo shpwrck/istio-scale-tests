@@ -785,27 +785,25 @@ fit_of() {
 	refute_output --partial "mixed:mixed:"
 }
 
-@test "a re-generated report repeats the sweep's recorded outcome (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT and the start-of-run readiness keys in every format" {
-	local d="${BATS_TEST_TMPDIR}/outcome"
+@test "a re-generated report repeats the sweep's record (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT and the start-of-run readiness keys in every format" {
+	local d="${BATS_TEST_TMPDIR}/outcome" p="the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
 	mkdir -p "$d"
 	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=v1.30.5\n# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5\n# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy\n# ISTIO_READY_WAITED_SEC=60|' \
 		"$FIXTURE" > "${d}/controlplane-r.tsv"
-	printf '%s\n' '# Sweep outcome (tests/lib/common.sh sweep_outcome)' 'RUN_ID=fixture-t2' 'EXIT=4' \
-		'PROBLEM=the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)' > "${d}/sweep-outcome.txt"
+	printf '%s\n' '# Sweep outcome (bats)' STATUS=finished RUN_ID=fixture-t2 EXIT=4 TOTAL=2 FAILED=0 "PROBLEM=${p}" > "${d}/sweep-outcome.txt"
 	run --separate-stderr "$REPORT" --results-dir "$d"
 	assert_success
-	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.txt by run fixture-t2, exit 4):"
-	[[ "$stderr" != *"was recorded by run"* ]]
-	assert_output --partial "#   error: the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	assert_output --partial "# SWEEP OUTCOME (outcome): FINISHED, exit 4"
+	assert_output --partial "#   error: ${p}"
 	assert_output --partial "ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5"
 	assert_output --partial "ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy  ISTIO_READY_WAITED_SEC=60"
 	run --separate-stderr "$REPORT" --results-dir "$d" --format markdown
-	assert_output --partial "> - error: the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
+	assert_output --partial "> - error: ${p}"
 	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
 	assert_output --partial 'istio_notready_at_start: "<mesh-a-ctx>=IstioCNINotHealthy"'
 	run --separate-stderr "$REPORT" --results-dir "$d" --format json
-	[ "$(jq -c '[.sweep_outcome.exit, .sweep_outcome.problems[0], .metadata.istio_version_by_context, .metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec]' <<<"$output")" = \
-		'[4,"the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)","<mesh-a-ctx>=v1.30.5","<mesh-a-ctx>=IstioCNINotHealthy","60"]' ]
+	[ "$(jq -c '[.sweep_outcomes[0].exit, .sweep_outcomes[0].problems[0], .metadata.istio_version_by_context, .metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec]' <<<"$output")" = \
+		"$(jq -cn --arg p "$p" '[4, $p, "<mesh-a-ctx>=v1.30.5", "<mesh-a-ctx>=IstioCNINotHealthy", "60"]')" ]
 	run --separate-stderr "$REPORT" --results-dir "$d" --format charts
 	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
 	assert_output --partial 'istio_ready_waited_sec: "60"'
@@ -813,16 +811,15 @@ fit_of() {
 	assert_line "# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy"
 	assert_line "# ISTIO_READY_WAITED_SEC=60"
 	assert_line "# SWEEP_OUTCOME_EXIT=4"
-	assert_line "# SWEEP_OUTCOME_PROBLEM=the Istio version changed during the sweep (<mesh-a-ctx>: v1.30.5 at the start, v1.30.6 at the end)"
-	# Through a symlink to the results dir (no trailing slash), the same report.
+	assert_line "# SWEEP_OUTCOME_PROBLEM=${p}"
+	# Through a symlink to the results dir (no trailing slash), the same record.
 	ln -s "$d" "${BATS_TEST_TMPDIR}/latest"
 	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
 	assert_success
-	[ "$(jq -c '[.sweep_outcome.exit, .metadata.istio_notready_at_start]' <<<"$output")" = '[4,"<mesh-a-ctx>=IstioCNINotHealthy"]' ]
-	[[ "$stderr" != *"was recorded by run"* ]]
+	[ "$(jq -c '[.sweep_outcomes[0].exit, .metadata.istio_notready_at_start]' <<<"$output")" = '[4,"<mesh-a-ctx>=IstioCNINotHealthy"]' ]
 	rm "${d}/sweep-outcome.txt"
 	run --separate-stderr "$REPORT" --results-dir "$d" --format json
-	[ "$(jq -c '.sweep_outcome' <<<"$output")" = null ]
+	[ "$(jq -c '.sweep_outcomes' <<<"$output")" = '[]' ]
 }
 
 @test "growth report: a base-dir report of two sweeps lists every run, warns, and names the runs behind each pods-vs-config-only side" {
@@ -850,7 +847,7 @@ fit_of() {
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
 	assert_success
 	[ "$(jq -c '.pooled_runs' <<<"$output")" = \
-		'{"runs":2,"run_ids":["sweep-20261013T100000Z-111","sweep-20261013T110000Z-222"],"harness_sha":["fixture","abc1234-dirty"],"istio_version":["1.30.5","1.31.0"],"harness_content_key":["unknown"]}' ]
+		'{"runs":2,"run_ids":["sweep-20261013T100000Z-111","sweep-20261013T110000Z-222"],"harness_sha":["fixture","abc1234-dirty"],"istio_version":["1.30.5","1.31.0"]}' ]
 	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .istio_versions, .harness_sha, .harness_shas, .files_consumed]' <<<"$output")" = \
 		'["multiple",["20261013T100000Z-111","20261013T110000Z-222"],"mixed:1.30.5,1.31.0",["1.30.5","1.31.0"],"mixed:fixture,abc1234-dirty",["fixture","abc1234-dirty"],2]' ]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
@@ -871,7 +868,7 @@ fit_of() {
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format text
 	assert_success
 	assert_output --partial "# POOLED RUNS: This report pools 2 runs (--allow-multi-run)"
-	assert_output --partial "# RUN_ID=multiple  ISTIO_VERSION=mixed:1.30.5,1.31.0  HARNESS_SHA=mixed:fixture,abc1234-dirty  HARNESS_CONTENT_KEY=unknown  files_consumed=2"
+	assert_output --partial "# RUN_ID=multiple  ISTIO_VERSION=mixed:1.30.5,1.31.0  HARNESS_SHA=mixed:fixture,abc1234-dirty  files_consumed=2"
 	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222  istio_versions=1.30.5,1.31.0  harness_shas=fixture,abc1234-dirty"
 	assert_output --partial "# WARNING: The inputs were measured on different Istio versions"
 	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format csv
@@ -1018,7 +1015,12 @@ growth66() {
 		run --separate-stderr "$REPORT" --results-dir "$GRES" --format "$fmt"
 		assert_success
 		assert_output --partial "were measured with up to 2500 leftover controlplane-test namespaces"
-		[[ "$stderr" == *"WARNING: "*"up to 2500 leftover"* ]]
+		# Also on stderr, but for text, whose stdout has it already.
+		if [[ "$fmt" == text ]]; then
+			[[ "$stderr" != *"up to 2500 leftover"* ]]
+		else
+			[[ "$stderr" == *"WARNING: "*"up to 2500 leftover"* ]]
+		fi
 	done
 	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
 	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *"up to 2500 leftover controlplane-test namespaces"* ]]

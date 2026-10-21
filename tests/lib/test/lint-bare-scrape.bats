@@ -319,3 +319,19 @@ EOF
 	run lint_bare_orchestrator_step_file "$FIX/foo-run-sweep.sh"
 	assert_success
 }
+
+@test "lint: a bare step call through sweep_step in a sweep's loop is flagged; a guarded one passes; every sweep passes" {
+	local f="${BATS_TEST_TMPDIR}/foo-run-sweep.sh"
+	printf '#!/usr/bin/env bash\nfor ms in 1 2; do\n\tsweep_step "$SCRIPT_DIR/001-setup-test.sh" --contexts "$x"\n\techo next\ndone\n' > "$f"
+	run lint_bare_orchestrator_step_file "$f"
+	assert_failure
+	assert_output --partial 'bare orchestrator-step call "$SCRIPT_DIR/001-setup-test.sh"'
+	printf '#!/usr/bin/env bash\nfor ms in 1 2; do\n\tsweep_step "$SCRIPT_DIR/001-setup-test.sh" --contexts "$x" || echo warn\n\techo next\ndone\n' > "$f"
+	run lint_bare_orchestrator_step_file "$f"
+	assert_success
+	local s
+	for s in "${ROOT}"/tests/*/*-sweep.sh; do
+		run lint_bare_orchestrator_step_file "$s"
+		assert_success
+	done
+}

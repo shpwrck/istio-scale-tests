@@ -89,8 +89,7 @@ tsv() {
 	assert_success
 	assert_output --partial 'harness_sha: "unknown (not recorded)"'
 	assert_output --partial 'istio_version: "unknown (not recorded)"'
-	# Only the report's own harness (report_harness_sha) may name this checkout.
-	[[ "$(grep -v '^report_harness_sha: ' <<<"$output")" != *"$head"* ]]
+	[[ "$output" != *"$head"* ]]
 	refute_output --partial "istio_version: \"${ISTIO_VERSION}\""
 	# From before the platform record: unknown, with one warning, never this host's platform.
 	assert_line 'platform: "unknown"'
@@ -314,7 +313,7 @@ STUB
 		--output-dir "$RES"
 	assert_success
 	f="$(ls "$RES"/churn-*.tsv)"
-	# harness_sha (a dirty tree adds .<8hex> to -dirty).
+	# harness_sha (-dirty on a dirty tree).
 	grep -qx "# HARNESS_SHA=$(source "${ROOT}/tests/lib/common.sh"; source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" "$f"
 	grep -qx "# ISTIO_VERSION=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"

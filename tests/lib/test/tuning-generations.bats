@@ -242,7 +242,7 @@ gen_sweep() {
 	[ "$(<"$st/istio-generations-applied")" = ci-a=5/5 ]
 }
 
-@test "a sweep interrupted after a generation check found a problem, or could not compare a member, keeps it in its not-finished record as a note, and the comparison repeats it (a stop record keeps a problem as one: sweep-stop.bats)" {
+@test "a sweep interrupted after a generation check found a problem, or could not compare a member, keeps it in its interrupted record (a PROBLEM, a NOTE), and the comparison repeats it" {
 	_need_yaml
 	_gen_stub
 	local want="the Istio CR changed while the sweep changed nothing, between its read at the sweep's start and its read before the apply of pass 01-push-throttling: ci-a (Istio CR generation 2 -> 3, IstioRevision generation 2 -> 3); likely: a version changed and changed back, or a values change (an edit of the Istio CR); the passes run since that first read (baseline) may have measured another configuration, and pass 01-push-throttling may measure another configuration than its profile's"
@@ -251,20 +251,20 @@ gen_sweep() {
 	TUN_FOREIGN_AT=2 TUN_TERM_ON="* patch istio.sailoperator.io default --type=merge *" gen_sweep
 	[ -e "${TD}/term-sent" ]
 	[ "$status" -eq 143 ] || { echo "$stderr"; false; }
-	grep -qx 'EXIT=unfinished' "${TDIR}/sweep-outcome.txt"
-	grep -qx 'ENDED_SIGNAL=SIGTERM' "${TDIR}/sweep-outcome.txt"
-	grep -qxF "NOTE=${want}" "${TDIR}/sweep-outcome.txt" || { cat "${TDIR}/sweep-outcome.txt"; false; }
-	! grep -q '^PROBLEM=' "${TDIR}/sweep-outcome.txt" || false
+	grep -qx 'STATUS=interrupted' "${TDIR}/sweep-outcome.txt"
+	grep -qx 'SIGNAL=SIGTERM' "${TDIR}/sweep-outcome.txt"
+	grep -qx 'EXIT=143' "${TDIR}/sweep-outcome.txt"
+	grep -qxF "PROBLEM=${want}" "${TDIR}/sweep-outcome.txt" || { cat "${TDIR}/sweep-outcome.txt"; false; }
 	run --separate-stderr "${ROOT}/tests/tuning/004-compare-profiles.sh" --results-dir "$TDIR" --format markdown
-	assert_output --partial "> - warning: ${want}"
+	assert_output --partial "> - error: ${want}"
 	run --separate-stderr "${ROOT}/tests/tuning/004-compare-profiles.sh" --results-dir "$TDIR" --format text
-	assert_output --partial "  warning: ${want}"
+	assert_output --partial "  error: ${want}"
 	# A member it could not compare (its read before the apply failed): the note.
 	rm -rf "$TD" "${BATS_TEST_TMPDIR}/tres"
 	_gen_stub
 	TUN_FOREIGN_AT=2 TUN_FAIL_READS=2 TUN_TERM_ON="* patch istio.sailoperator.io default --type=merge *" gen_sweep
 	[ "$status" -eq 143 ] || { echo "$stderr"; false; }
-	grep -qx 'ENDED_SIGNAL=SIGTERM' "${TDIR}/sweep-outcome.txt"
+	grep -qx 'SIGNAL=SIGTERM' "${TDIR}/sweep-outcome.txt"
 	grep -qx "NOTE=the Istio CR generations of a member could not be compared between the sweep's read at the sweep's start and its read before the apply of pass 01-push-throttling (a read failed): ci-a (2/2 -> unknown/unknown); an edit of its Istio CR in that span by something other than the sweep is not ruled out" "${TDIR}/sweep-outcome.txt"
 }
 

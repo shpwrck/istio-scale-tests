@@ -121,27 +121,18 @@ size with a remote cluster; the p50-vs-mesh-size chart needs two.
 Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, such as
 another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
 error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
-when and by which signal; a signal sent to the sweep's process alone stops the running step and
-every process under it first, `SWEEP_STOP_GRACE_SEC` (30 s) before SIGKILL; a `kill -INT` or
-`kill -HUP` skips the processes of a sweep in a terminal's foreground, so stop such a sweep from
-elsewhere with SIGTERM; without a `ps` that lists start times or Linux's `/proc`, only the step's
-own process is stopped; see the top-level README); `3` the reachability gate stopped it
+when and by which signal; the running step's process group gets SIGTERM, and SIGKILL
+`SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `3` the reachability gate stopped it
 (`--on-unreachable fail`, see below; the reports are written); `4` it finished and wrote its
 reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio
 version, active revision or generation of the Istio CR or its active IstioRevision changed during
 the sweep (read again before the reports), or that check failed, or its harness (a file under
-`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read again
-before its steps, by each step and at its end). The last line on stderr says how many, by reason;
-`3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the
-outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a
-not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`,
-`HARNESS_CONTENT_KEY`, and what to do), so a report of a sweep that died, or still runs, or (with
-when and by which signal) was interrupted says "this sweep has not finished" in every format (json
-`sweep_outcome`: `"exit": null`, `"unfinished": true`; a finished one reads `"unfinished": false`;
-one that stopped on an error after its start records the stop and its reason instead, `STOPPED=1`
-and `CUT_SHORT=1`, see the top-level README): when no sweep runs any more, run the sweep again into
-a new dir (a dataplane sweep has no `--resume`); the rows already in the dir cover only the mesh
-sizes it finished. Proxies connected on another Istio version than their istiod at the start
+`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read at its
+start and its end). The last line on stderr says how many, by reason; `3` wins over `4`.
+`sweep-outcome.txt` in the sweep dir keeps the outcome (`STATUS=running` until the sweep ends, then
+`finished`, `stopped` or `interrupted`), and every report repeats it. When a sweep did not finish
+and no sweep runs any more, run the sweep again into a new dir; the rows already in the dir cover
+only the mesh sizes it finished. Proxies connected on another Istio version than their istiod at the start
 (`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
 
 ## Run config (`--config FILE`)
@@ -209,7 +200,7 @@ A shorter `REACH_DETAIL_TIMEOUT_SEC` ends on the client side and reads as fortio
 `i/o timeout`; on a mesh that sets `meshConfig.connectTimeout` or
 `defaultHttpRetryPolicy`, keep it above (1 + retries) x `connectTimeout`. The file has
 its own preamble (`REACH_SCHEMA`,
-`RUN_ID`, `HARNESS_SHA`, `HARNESS_CONTENT_KEY`, the `REACH_*` knobs, `ON_UNREACHABLE`, `RUN_CONFIG`,
+`RUN_ID`, `HARNESS_SHA`, the `REACH_*` knobs, `ON_UNREACHABLE`, `RUN_CONFIG`,
 `RUN_CONFIG_SHA256`), and stderr gets a per-target block ending in
 `WARNING: N of M remotes NOT reachable from <source>: ...`.
 
@@ -279,7 +270,7 @@ tuning through them). The rows and their status do not change; the capture only 
 evidence, and a failed capture never fails the run.
 
 - `index.tsv`: a `# KEY=value` preamble (`ISTIOD_DIAG_SCHEMA`, `RUN_ID`, `CREATED_BY`,
-  `HARNESS_SHA`, `HARNESS_CONTENT_KEY`, `DATE` and the six settings below), a header line, then one
+  `HARNESS_SHA`, `DATE` and the six settings below), a header line, then one
   row per affected pod (columns below).
 - `NNN-<tag>-<context>/`: the raw evidence of one capture: `summary.md`, the istiod pod
   status, the Deployment and ReplicaSet revisions, the newest istio-system events of
@@ -380,7 +371,7 @@ the row with a folder; the other rows count as repeats. json has the section as
 
 ## Outputs
 
-`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`, `HARNESS_CONTENT_KEY`,
+`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`,
 `ISTIO_VERSION` with `ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`, `KUBE_VERSIONS`,
 `FORTIO_IMAGE`, ...) and these columns. The preamble's platform record
 ([`tests/lib/platform.sh`](../lib/platform.sh): `PLATFORM`, `TEST_PLATFORM`, and per member
@@ -445,12 +436,8 @@ check, or is a `SETUP_FAILED`/`PROBE_FAILED` placeholder) or `skipped (remote un
 json (`summary`: `n_dropped`, `n_skipped_unreachable`, `n_placeholder`) carry the same counts. It
 reads every `latency-*.tsv` under `--results-dir`, subdirectories included, so pass one
 `sweep-<RUN_ID>/` to report a single sweep. Every format carries the inputs' preamble, each key
-merged over the files (`HARNESS_SHA`: the harness that measured the rows), and `REPORT_HARNESS_SHA`,
-the harness the report itself ran on: a report made again later, or from another checkout, may count
-rows by other rules. The results dir it reads never counts as a change to that harness.
-`HARNESS_CONTENT_KEY` (in the preamble; `unknown` for a TSV written before it) is the content key of
-the harness files the rows ran on: inputs whose `HARNESS_SHA` differs but that share one key differ
-only in git describe (a commit or tag that left the harness files as they were), not in the harness.
+merged over the files (`HARNESS_SHA`: the harness that measured the rows; `mixed:<a>,<b>`, with a
+warning, when the inputs ran on more than one).
 
 ## Local baseline verdict
 

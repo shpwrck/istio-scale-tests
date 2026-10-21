@@ -3,9 +3,10 @@
 # and redact-results.sh (PL33; no cluster: kubectl and curl are stubs, as in
 # controlplane-window2.bats, or fixture TSVs): 002 keeps the pods with the pod manifest
 # (istiod-spec.tsv, so --phase final has them) and writes a "# ISTIOD_NOT_READY=" line
-# right before the window's WINDOW_ROWS line; 004 gives a data warning naming the cell (a
-# growth window too), and the verdict does not change; the cell stays done; redaction maps
-# the member names in the line. Names are placeholders.
+# right before the window's WINDOW_ROWS line; 004 gives a data warning naming the cell for
+# it and for the "# ISTIOD_NOT_READY_AT_END=" line between them (a growth window too), read
+# only right before WINDOW_ROWS, and the verdict does not change; the cell stays done;
+# redaction maps the member names in the line. Names are placeholders.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -16,6 +17,8 @@ FX="${ROOT}/tests/lib/test/fixtures/istiod-diag"
 FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
 GROWTH="${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv"
 WARN_TAIL="A pod that is not Ready takes no new proxy connection, and one shutting down also drops its own as it exits (their reconnects to the other replicas add to the cell's push, convergence and CPU figures), so these cells' per-replica figures may include a replica that carried fewer proxies than the others, or none (its row's connected_proxies shows what it held at the window's end; a restarted replica's row is left out); it does not change the verdict."
+END_HEAD="have an istiod pod that was not Ready at the window's end (a readiness probe failing under load, or a replica shutting down):"
+END_TAIL="While not Ready it took no new proxy connection (one shutting down also drops its own as it exits, and their reconnects to the other replicas add to the cell's push, convergence and CPU figures), so these cells' per-replica figures may include a replica that carried fewer proxies than the others (a restarted replica's row is left out); it does not change the verdict."
 
 setup() {
 	RES="${BATS_TEST_TMPDIR}/res"
@@ -128,11 +131,12 @@ cp_tsv() {
 	[ "$(grep -c '^# WINDOW_ROWS=' "$tsv")" -eq 3 ]
 }
 
-@test "004 names a cell whose window had a not-Ready istiod pod in a data warning, in every format, and the verdict does not change; 002's own TSV through 004 too" {
-	local w a="${BATS_TEST_TMPDIR}/a" b="${BATS_TEST_TMPDIR}/b" v
+@test "004 names a cell whose window had a not-Ready istiod pod at its baseline, or at its end, in a data warning of each kind, in every format, and the verdict does not change; 002's own TSV through 004 too" {
+	local w e a="${BATS_TEST_TMPDIR}/a" b="${BATS_TEST_TMPDIR}/b" v
 	mkdir -p "$a" "$b"
 	w="1 cell(s) have an istiod pod that was Running but not Ready at the window's baseline: mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (istiod-x on mesh-b, istiod-y on mesh-b). ${WARN_TAIL}"
-	cp_tsv "${a}/controlplane-fixture-t2.tsv" "# ISTIOD_NOT_READY=mesh-b=istiod-x,mesh-b=istiod-y"
+	e="1 cell(s) ${END_HEAD} mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (istiod-z on mesh-a, istiod-y on mesh-b). ${END_TAIL}"
+	cp_tsv "${a}/controlplane-fixture-t2.tsv" "# ISTIOD_NOT_READY=mesh-b=istiod-x,mesh-b=istiod-y"$'\n'"# ISTIOD_NOT_READY_AT_END=mesh-a=istiod-z,mesh-b=istiod-y"
 	cp_tsv "${b}/controlplane-fixture-t2.tsv" ""
 	report json "$b"
 	v="$(jq -c '.metadata.sla' <<<"$output")"
@@ -140,14 +144,17 @@ cp_tsv() {
 	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
 	report json "$a"
 	[ "$(jq -c '.metadata.sla' <<<"$output")" = "$v" ]
-	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = "$(jq -cn --arg w "$w" '[$w]')" ]
-	[[ "$stderr" == *"WARNING: ${w}"* ]]
+	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = "$(jq -cn --arg w "$w" --arg e "$e" '[$w, $e]')" ]
+	[[ "$stderr" == *"WARNING: ${w}"* && "$stderr" == *"WARNING: ${e}"* ]]
 	report text "$a"
 	assert_line "# WARNING: ${w}"
+	assert_line "# WARNING: ${e}"
 	report csv "$a"
 	assert_line "# WARNING: ${w}"
+	assert_line "# WARNING: ${e}"
 	report markdown "$a"
 	assert_line "> **Warning:** ${w}"
+	assert_line "> **Warning:** ${e}"
 	# The rows 002 writes with the line: the cell is done (no INCOMPLETE), and named.
 	STUB_READY="True False" cp_window "${BATS_TEST_TMPDIR}/w"
 	assert_success
@@ -156,17 +163,27 @@ cp_tsv() {
 	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" != *INCOMPLETE* ]]
 }
 
-@test "004 reads the line only right before a WINDOW_ROWS line; a growth window's own line counts" {
-	local d="${BATS_TEST_TMPDIR}/r" g="${BATS_TEST_TMPDIR}/g"
+@test "004 reads a not-Ready line only right before a WINDOW_ROWS line (the end line right after the baseline line); a growth window's own lines count" {
+	local d="${BATS_TEST_TMPDIR}/r" g="${BATS_TEST_TMPDIR}/g" e
 	mkdir -p "$d" "$g"
 	# A line that is not right before a WINDOW_ROWS line names nothing.
 	cp_tsv "${d}/controlplane-fixture-t2.tsv" "# ISTIOD_NOT_READY=mesh-b=istiod-x"$'\n'"# NOTE=bats"
 	report json "$d"
 	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
+	cp_tsv "${d}/controlplane-fixture-t2.tsv" "# ISTIOD_NOT_READY_AT_END=mesh-b=istiod-y"$'\n'"# NOTE=bats"
+	report json "$d"
+	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
+	# A baseline line with another line between it and the end line names nothing; the end
+	# line still counts.
+	cp_tsv "${d}/controlplane-fixture-t2.tsv" "# ISTIOD_NOT_READY=mesh-b=istiod-x"$'\n'"# NOTE=bats"$'\n'"# ISTIOD_NOT_READY_AT_END=mesh-b=istiod-y"
+	e="1 cell(s) ${END_HEAD} mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (istiod-y on mesh-b). ${END_TAIL}"
+	report json "$d"
+	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = "$(jq -cn --arg e "$e" '[$e]')" ]
 	# A growth series' first window.
-	awk '!/^#/ && $1 != "timestamp" && !d++ { print "# ISTIOD_NOT_READY=mesh-a=istiod-g"; print "# WINDOW_ROWS=mesh-a=1/1" } { print }' "$GROWTH" > "${g}/controlplane-fixture-ns.tsv"
+	awk '!/^#/ && $1 != "timestamp" && !d++ { print "# ISTIOD_NOT_READY=mesh-a=istiod-g"; print "# ISTIOD_NOT_READY_AT_END=mesh-a=istiod-h"; print "# WINDOW_ROWS=mesh-a=1/1" } { print }' "$GROWTH" > "${g}/controlplane-fixture-ns.tsv"
 	report json "$g"
 	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" == *"1 cell(s) have an istiod pod that was Running but not Ready at the window's baseline: mesh=1 svcs=200 reps=1 ns=100 scope=namespace traffic=none window=grow (istiod-g on mesh-a). ${WARN_TAIL}"* ]]
+	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" == *"1 cell(s) ${END_HEAD} mesh=1 svcs=200 reps=1 ns=100 scope=namespace traffic=none window=grow (istiod-h on mesh-a). ${END_TAIL}"* ]]
 }
 
 @test "redact-results maps the member names of an ISTIOD_NOT_READY line, a member it alone names included, and keeps the pod names" {
@@ -190,9 +207,9 @@ cp_tsv() {
 	assert_output 0
 }
 
-@test "004 --help names the ISTIOD_NOT_READY data warning, within 100 columns" {
+@test "004 --help names both not-Ready lines and where they sit, within 100 columns" {
 	run --separate-stderr "$REPORT" --help
 	assert_success
 	[ -z "$(awk 'length($0) > 100' <<<"$output")" ] || { awk 'length($0) > 100' <<<"$output"; false; }
-	[[ "$(tr '\n' ' ' <<<"$output" | tr -s ' ')" == *"an istiod pod that was Running but not Ready at a window's baseline (its \"# ISTIOD_NOT_READY=<member>=<pod>,...\" line), and one not Ready at the window's end (its \"# ISTIOD_NOT_READY_AT_END=\" line): a pod that is not Ready takes no new proxy connection"* ]]
+	[[ "$(tr '\n' ' ' <<<"$output" | tr -s ' ')" == *"an istiod pod that was Running but not Ready at a window's baseline (the \"# ISTIOD_NOT_READY=<member>=<pod>,...\" line right before its WINDOW_ROWS line), and one not Ready at the window's end (the \"# ISTIOD_NOT_READY_AT_END=\" line there): a pod that is not Ready takes no new proxy connection"* ]]
 }

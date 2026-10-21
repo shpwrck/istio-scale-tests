@@ -237,7 +237,7 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 REACH_TSV="$(dirname "$OUTPUT_FILE")/reach-${RUN_ID}.tsv"
 REACH_URL_TEMPLATE="http://fortio-server-{ctx}.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-8080}/echo"
 
-harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$(dirname "$OUTPUT_FILE")"
+HARNESS_SHA="$(harness_sha --exclude "$(dirname "$OUTPUT_FILE")")"
 ALL_CTXS_CSV="$SOURCE_CTX"
 for r in ${REMOTES[@]+"${REMOTES[@]}"}; do ALL_CTXS_CSV+=",$r"; done
 
@@ -276,7 +276,6 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
-		"HARNESS_CONTENT_KEY=$HARNESS_CONTENT_KEY" \
 		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
@@ -312,7 +311,7 @@ if ((REACH_REQUESTS > 0)); then
 	# A sweep's 002s share one reach file (its RUN_ID): its header records every member the
 	# sweep covers (the inherited record), not the first mesh size's.
 	if reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)" "RUN_ID=${RUN_ID}" \
-		"HARNESS_SHA=${HARNESS_SHA}" "HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=churn-dataplane" \
+		"HARNESS_SHA=${HARNESS_SHA}" "SUITE=churn-dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then

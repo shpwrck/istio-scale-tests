@@ -143,9 +143,8 @@ prow21() {
 	grep -q "no final scrape for ctx-a/istiod-abc-x1; emitting N/A row" "${BATS_TEST_TMPDIR}/err"
 	run grep -c "counter went from" "${BATS_TEST_TMPDIR}/err"
 	assert_output 0
-	# The harness provenance comes from harness_sha (-dirty.<8hex> on a dirty tree).
+	# The harness provenance comes from harness_sha (-dirty on a dirty tree).
 	grep -qxF "# HARNESS_SHA=$(source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" "$f"
-	[ "$(grep -cE '^# HARNESS_SHA=.*-dirty$' "$f" || true)" = 0 ]
 }
 
 @test "propagation 002 + 005: every remote timed out, the source was clean: P1 is n=1/1 in the summary and every 005 format" {
@@ -164,10 +163,8 @@ prow21() {
 	source "${ROOT}/tests/lib/propagation.sh"
 	grep -qxF "$PROP_TSV_HEADER" "$f"
 	[ "$(awk -F'\t' '!/^#/ { print NF }' "$f" | sort -u)" = 23 ]
-	# The harness provenance comes from harness_sha (-dirty.<8hex> on a dirty tree,
-	# never a bare -dirty that names no content).
+	# The harness provenance comes from harness_sha (-dirty on a dirty tree).
 	grep -qxF "# HARNESS_SHA=$(source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" "$f"
-	[ "$(grep -cE '^# HARNESS_SHA=.*-dirty$' "$f" || true)" = 0 ]
 	# An older summary read n=0/1: the iteration's only row was dropped for a remote reason.
 	assert_output --regexp 'P1 local xDS push: +n=1/1 min=[0-9]+ms'
 	assert_output --regexp 'P3 remote sidecar: +n=0/1 \(no valid sample\)'

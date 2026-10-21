@@ -84,26 +84,17 @@ The "Istio CR / IstioRevision generations" row gives each pass's ISTIO_GENERATIO
 from its own TSVs: a profile's apply and revert raise them, so each pass ran on its
 own (one value for every member prints once, "(every member)"). The header's
 ISTIO_GENERATIONS merges the sweep's start and every pass: mixed when they differ.
-The "Harness (HARNESS_SHA)" row gives each pass's HARNESS_SHA from its own TSVs (a
-churn-dataplane pass also from its rows' harness_sha column: mixed when they record
-more than one, or another than the preamble, and the WARNING then names that pass and
-the combos whose baseline and churn rows ran different harnesses). When the passes'
-values differ, a WARNING says so (a profile's change may come from the harness); when
-every pass records one HARNESS_CONTENT_KEY (the harness files' content key; unknown in
-a TSV written before it), a note says they differ only in git describe (a commit or
-tag that left the harness files as they were) instead. A propagation comparison adds
-"Drain timeouts (iterations, counted)" when a pass has an iteration whose drain after
-the window timed out (DRAIN_TIMEOUT): its values count, as in 005.
-HARNESS_SHA in the header is the sweep's harness (HARNESS_CONTENT_KEY, next to it, is
-its files' content key); REPORT_HARNESS_SHA (every format, next to it) is the harness
-this report ran on, which can differ: a report made again later, or from another
-checkout, may count rows by other rules. The sweep dir it reads does not count as a
-change to it. SETTLE_SEC (each pass's wait after its apply, before its probe) and, for
-churn-dataplane, CHURN_RATE follow, as 003 recorded them (a sweep from before them prints
-neither).
+The "Harness (HARNESS_SHA)" row gives each pass's HARNESS_SHA from its own TSVs (git
+describe, -dirty with local changes); when the passes' values differ, or one pass's
+TSVs do, a WARNING says so (a profile's change may come from the harness). A
+propagation comparison adds "Drain timeouts (iterations, counted)" when a pass has an
+iteration whose drain after the window timed out (DRAIN_TIMEOUT): its values count, as
+in 005.
+HARNESS_SHA in the header is the sweep's harness. SETTLE_SEC (each pass's wait after its
+apply, before its probe) and, for churn-dataplane, CHURN_RATE follow, as 003 recorded
+them (a sweep from before them prints neither).
 The markdown starts with a YAML frontmatter of the same keys (lowercase:
-istio_generations, harness_sha, harness_content_key, report_harness_sha, settle_sec,
-churn_rate, tsv_columns and the others).
+istio_generations, harness_sha, settle_sec, churn_rate, tsv_columns and the others).
 
 The "Pass status" row reads ok, the marker the pass directory holds (SETUP_FAILED,
 PROBE_FAILED or REVERT_FAILED), or "no data": a pass without TSVs (the metadata lists
@@ -186,22 +177,18 @@ Options:
   --output FILE      Write to FILE instead of stdout.
   -h, --help         Show this help.
 
-When the sweep dir holds sweep-outcome.txt (003 writes it), the comparison repeats
-it, with the run that recorded it: the failed passes by reason, its problems (the
-Istio version, the active revision or the generation of the Istio CR or its active
-IstioRevision changed under the sweep; the Istio CR changed other than by the
-sweep's own apply and revert: during a pass, after its apply settled and not by its
-profile, or between two of the sweep's checkpoints while it changed nothing (the
-suite setup, between passes, after the last revert); an incomplete revert, or such
-an edit, which no revert undoes (they restore only the profiles' keys): a member's
-Istio CR spec after the last revert differs from the sweep's start; or the
-end-of-sweep check failed) and notes (members not ready at its start or end). The
-sweep writes it at its start as "not finished" (EXIT=unfinished) and replaces it at
-its end: a record still not finished is a sweep that died or still runs, or one
-interrupted, with when and by which signal; one that stopped on an error after its
-start shows the stop and its reason.
-A sweep dir without the file is from a sweep that stopped before its start (nothing
-ran), or from an older harness.
+When the sweep dir holds sweep-outcome.txt (003 writes it: STATUS=running at its
+start, its outcome at its end), the comparison repeats it: a sweep that has not
+finished (it died, or still runs), was interrupted or stopped early, the failed
+passes by reason, its problems (the Istio version, the active revision or the
+generation of the Istio CR or its active IstioRevision changed under the sweep; the
+Istio CR changed other than by the sweep's own apply and revert: during a pass, after
+its apply settled and not by its profile, or between two of the sweep's checkpoints
+while it changed nothing (the suite setup, between passes, after the last revert); an
+incomplete revert, or such an edit, which no revert undoes (they restore only the
+profiles' keys): a member's Istio CR spec after the last revert differs from the
+sweep's start; the end-of-sweep check failed; or the harness changed) and notes
+(members not ready at its start or end).
 
 Environment:
   FANOUT_MAX_SKEW_MS  propagation: the scrape-skew ceiling (ms) a row must be within to
@@ -371,11 +358,7 @@ for m in "${METRICS[@]}"; do metric_cols+="${m%%|*},"; done
 # pass's distinct (run_id, iteration) per group, what P1 is attempted against when the
 # TSV does not record ITERATIONS. "d<TAB>iterations": a propagation pass's distinct
 # (run_id, iteration) with DRAIN_TIMEOUT in status, p1_status or remote_status (the
-# drain after the window timed out; counted, as 005 counts them). "r<TAB>values<TAB>combos":
-# a churn-dataplane pass whose TSV rows record (harness_sha column) more than one harness,
-# or another than their file's preamble HARNESS_SHA (the harness changed during the pass):
-# every value (preamble's and rows', first seen first, comma-separated) and the combos
-# whose baseline and churn rows differ ("-" when none), as churn-dataplane 005 reads them.
+# drain after the window timed out; counted, as 005 counts them).
 summarize() {
 	awk -F'\t' -v cols="$metric_cols" -v gcols="$GROUP" -v suite="$SUITE" -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" "${PROP_ROW_AWK}"'
 	# prop_col_sample(c): whether a kept row carries a sample of propagation column c; the
@@ -400,23 +383,10 @@ summarize() {
 	}
 	# dt_col(c): the row has column c and it reads DRAIN_TIMEOUT.
 	function dt_col(c) { return ((c in idx) && $(idx[c]) == "DRAIN_TIMEOUT") }
-	# hadd(v): a harness value, in the order first seen.
-	function hadd(v) { if (!(v in hseen)) { hseen[v] = 1; hord[++hn] = v } }
 	BEGIN { nm = split(cols, mc, ","); ng = split(gcols, gc, ",") }
-	FNR == 1 { hdr = 0; hpre = ""; hnv = 0; delete hfseen }
-	/^# HARNESS_SHA=/ { if (hpre == "") { hpre = substr($0, 15); hadd(hpre) } }
+	FNR == 1 { hdr = 0 }
 	/^#/ || NF == 0 { next }
 	!hdr { delete idx; for (i = 1; i <= NF; i++) idx[$i] = i; hdr = 1; next }
-	("harness_sha" in idx) {
-		v = $(idx["harness_sha"]); hadd(v)
-		if (!(v in hfseen)) { hfseen[v] = 1; if (++hnv > 1) hbad = 1 }
-		if (hpre != "" && v != hpre) hbad = 1
-		if (("combo_id" in idx) && ("phase" in idx)) {
-			k = FILENAME SUBSEP $(idx["combo_id"])
-			if ($(idx["phase"]) == "baseline") hbl[k] = v
-			else if ($(idx["phase"]) == "churn" && !(k in hch)) { hch[k] = v; hco[++hnc] = k; hid[k] = $(idx["combo_id"]) }
-		}
-	}
 	{
 		total++
 		widths[NF]++
@@ -479,13 +449,6 @@ summarize() {
 		if (suite == "propagation") for (i = 1; i <= norder; i++) printf "i\t%s\t%d\n", order[i], giters[order[i]]
 		if (suite == "propagation") for (i = 1; i <= norder; i++) printf "o\t%s\t%d\n", order[i], p1ov[order[i]] + 0
 		if (suite == "propagation") printf "d\t%d\n", dt_iters
-		if (hbad) {
-			hv = ""; hc = ""
-			for (i = 1; i <= hn; i++) hv = hv (i > 1 ? "," : "") hord[i]
-			for (i = 1; i <= hnc; i++) if ((hco[i] in hbl) && hbl[hco[i]] != hch[hco[i]])
-				hc = hc (hc == "" ? "" : "; ") hid[hco[i]] " (baseline " hbl[hco[i]] ", churn " hch[hco[i]] ")"
-			printf "r\t%s\t%s\n", hv, (hc == "" ? "-" : hc)
-		}
 		for (k in has) {
 			split(k, a, SUBSEP)
 			if (k in cnt) printf "v\t%s\t%s\t%.6f\t%.6f\t%d\t%.6f\t%d\n", a[1], a[2], sum[k] / cnt[k], mx[k], ov[k] + 0, mn[k], cnt[k]
@@ -583,7 +546,7 @@ cfg_attempted() {
 	done
 }
 
-declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN PWIDTHS PGENS PHS PHCK PDT PROWHS
+declare -A VAL VMAX VOV VMIN VCNT VHAS GROWS GITERS P1OV NROWS STATUS GSEEN PWIDTHS PGENS PHS PDT
 # pass -> its platform record (KEY=value lines: platform_report_values, then its members'
 # Kubernetes versions and platform_lever_values), what the read at its end found changed during
 # it ("KEY<TAB>noun<TAB>what" lines: platform_drift_changes; not istiod's settings or the tuning
@@ -607,22 +570,12 @@ for p in "${PASSES[@]}"; do
 	# The generations this pass ran on, from its own TSVs (each apply and revert raises
 	# them); mixed when its TSVs disagree, unknown for a TSV without the key.
 	PGENS[$p]="$(config_input_value ISTIO_GENERATIONS unknown "${files[@]}")"
-	# The harness this pass ran (its TSVs' HARNESS_SHA) and that harness's content key
-	# (HARNESS_CONTENT_KEY; unknown for a TSV without it), likewise.
+	# The harness this pass ran (its TSVs' HARNESS_SHA), likewise.
 	PHS[$p]="$(config_input_value HARNESS_SHA unknown "${files[@]}")"
-	PHCK[$p]="$(config_input_value HARNESS_CONTENT_KEY unknown "${files[@]}")"
 	while IFS=$'\t' read -r kind a b c d e f h; do
 		case "$kind" in
 		n) NROWS[$p]="${a}/${b}" ;;
 		d) PDT[$p]="$a" ;;
-		r)
-			# Its rows ran on more than one harness: the pass reads mixed, its key adds
-			# unknown (a row records none), and HARNESS_WARNING names the pass.
-			PHS[$p]="mixed:${a}"
-			case ",${PHCK[$p]#mixed:}," in *,unknown,*) ;; *) PHCK[$p]="mixed:${PHCK[$p]#mixed:},unknown" ;; esac
-			PROWHS[$p]="pass ${p}'s rows record more than one harness (harness_sha column and preamble: ${a}), so the harness, or only the commit name git describe gives, changed during that pass (rows record no content key to tell the two apart)"
-			[[ "$b" == - ]] || PROWHS[$p]+="; combos whose baseline and churn rows ran different harnesses, so their delta_p99 pairs the two: ${b}"
-			;;
 		w) PWIDTHS[$p]="${PWIDTHS[$p]:+${PWIDTHS[$p]},}${a}" ;;
 		g) GROWS["$p|$a"]="$b"; [[ -n "${GSEEN[$a]:-}" ]] || { GSEEN[$a]=1; GROUP_VALUES+=("$a"); } ;;
 		i) GITERS["$p|$a"]="$b" ;;
@@ -690,31 +643,19 @@ else
 fi
 
 # The harness each pass ran (PHS, from its TSVs). HARNESS_WARNING when the passes' values
-# differ (or one pass's TSVs do, or its rows: PROWHS): a profile's change may then come
-# from the harness. HARNESS_NOTE instead when every pass records one HARNESS_CONTENT_KEY:
-# the values differ only in git describe (a commit or tag that left the harness files as
-# they were). A TSV without the key reads unknown, so older passes keep the warning.
-HARNESS_WARNING="" HARNESS_NOTE=""
-_hs_by=() _hs_vals="" _hk_vals="" _hs_rows=""
+# differ, or one pass's TSVs do: a profile's change may then come from the harness.
+HARNESS_WARNING=""
+_hs_by=() _hs_vals=""
 for p in "${PASSES[@]}"; do
 	[[ -n "${PHS[$p]:-}" ]] || continue
 	_hs_by+=("${p} ${PHS[$p]}")
 	_hs_vals+="${PHS[$p]}"$'\n'
-	_hk_vals+="${PHCK[$p]}"$'\n'
-	[[ -z "${PROWHS[$p]:-}" ]] || _hs_rows+=" ${PROWHS[$p]^}."
 done
 _hs_n="$(printf '%s' "$_hs_vals" | LC_ALL=C sort -u | awk 'END { print NR }')"
 if [[ "$_hs_vals" == *mixed:* ]] || ((_hs_n > 1)); then
-	_hk="$(printf '%s' "$_hk_vals" | LC_ALL=C sort -u)"
 	_hs_by_s="$(IFS=';'; echo "${_hs_by[*]}")"
-	_hs_by_s="${_hs_by_s//;/; }"
-	if [[ -n "$_hk" && "$_hk" != *$'\n'* && "$_hk" != unknown && "$_hk" != mixed:* ]]; then
-		HARNESS_NOTE="the passes' HARNESS_SHA values (${_hs_by_s}) differ only in git describe (a commit or tag that left the harness files as they were): every pass records HARNESS_CONTENT_KEY=${_hk}, the same harness files."
-		echo "note: ${HARNESS_NOTE}" >&2
-	else
-		HARNESS_WARNING="the passes ran on different harnesses (HARNESS_SHA ${_hs_by_s}): a profile's change against the baseline may come from the harness, not the profile.${_hs_rows} Compare those passes with care."
-		echo "WARNING: ${HARNESS_WARNING}" >&2
-	fi
+	HARNESS_WARNING="the passes ran on different harnesses (HARNESS_SHA ${_hs_by_s//;/; }): a profile's change against the baseline may come from the harness, not the profile. Compare those passes with care."
+	echo "WARNING: ${HARNESS_WARNING}" >&2
 fi
 
 BASE=""
@@ -1857,9 +1798,6 @@ for g in "${GROUP_VALUES[@]}"; do
 	done
 done
 
-# This report's own harness; the sweep dir it reads is no change to it.
-REPORT_HARNESS_SHA="$(report_harness_sha --exclude "$RESULTS_DIR")"
-
 # frontmatter: the markdown's YAML frontmatter (PL19), every value through yaml_str.
 frontmatter() {
 	local k v o
@@ -1879,8 +1817,6 @@ frontmatter() {
 	echo "istio_generations: $(yaml_str "$ISTIO_GENERATIONS_M")"
 	echo "istio_proxy_versions: $(yaml_str "$ISTIO_PROXY_VERSIONS_M")"
 	echo "harness_sha: $(yaml_str "$(istio_start_kv HARNESS_SHA)")"
-	echo "harness_content_key: $(yaml_str "$(istio_start_kv HARNESS_CONTENT_KEY)")"
-	echo "report_harness_sha: $(yaml_str "$REPORT_HARNESS_SHA")"
 	[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "settle_sec: $(yaml_str -n "$(meta_get SETTLE_SEC)")"
 	[[ -z "$(meta_get CHURN_RATE)" ]] || echo "churn_rate: $(yaml_str -n "$(meta_get CHURN_RATE)")"
 	echo "tsv_columns: $(yaml_str "$TSV_COLUMNS")"
@@ -1901,17 +1837,13 @@ render() {
 		[[ -n "$(meta_get CONTEXTS)" ]] && echo "- Contexts: $(meta_get CONTEXTS)"
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
 		[[ -n "$(meta_get ISTIO_VERSION)" ]] && echo "- Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
-		# Each on its own line, as every other report prints the two.
 		echo "- HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
-		echo "- HARNESS_CONTENT_KEY=$(istio_start_kv HARNESS_CONTENT_KEY) (the sweep's harness files)"
-		echo "- REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA} (this report's own)"
 		[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "- SETTLE_SEC=$(meta_get SETTLE_SEC) (each pass's wait after its apply, before its probe)"
 		[[ -z "$(meta_get CHURN_RATE)" ]] || echo "- CHURN_RATE=$(meta_get CHURN_RATE) (churn operations/s during each pass's probe)"
 		echo "- Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 		echo "- TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "- **Warning:** ${WIDTH_WARNING}"
 		[[ -z "$HARNESS_WARNING" ]] || echo "- **Warning:** ${HARNESS_WARNING}"
-		[[ -z "$HARNESS_NOTE" ]] || echo "- Note: ${HARNESS_NOTE}"
 		if [[ "$SUITE" == propagation ]]; then
 			echo "- Values are means over the samples the propagation report (005) counts: P1 once per iteration, left out only for a source-side reason (p1_status other than OK or DRAIN_TIMEOUT, a +Inf overflow, a source scrape skew over FANOUT_MAX_SKEW_MS; a remote that timed out or restarted keeps it), P2 and P3 per remote row, left out only for that remote's side (remote_status other than OK or DRAIN_TIMEOUT, its scrape skew over FANOUT_MAX_SKEW_MS; the source's restart, P1 timeout or overflow keeps them); \"(N overflowed)\" in the P1 local push cell counts the iterations its mean leaves out for a +Inf overflow. Profiles show the change against the baseline in brackets."
 		else
@@ -1925,7 +1857,7 @@ render() {
 		echo "- Histogram p99 rows (\"worst bucket\") are never averaged: they show the highest bucket range a valid row hit, or \"overflow (N rows)\" when N rows had their p99 in the +Inf bucket (propagation's P1 convergence: \"overflow (N iterations)\" when N iterations put a sample in the +Inf bucket, whatever their p99; counted although 005 leaves those iterations out of its means)."
 		for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "- **Warning:** ${w}"; done
 		echo ""
-		sweep_outcome_recorded "$RESULTS_DIR" md "$(meta_get RUN_ID)"
+		sweep_outcome_lines md "$RESULTS_DIR"
 		# Every cell through md_cell: a | in a pass name or a value would break the row.
 		local hdr="| Metric |" sep="|---|" r c
 		for p in "${PASSES[@]}"; do md_cell -v c "$p"; hdr+=" ${c} |"; sep+="---|"; done
@@ -1954,15 +1886,12 @@ render() {
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Istio: $(meta_get ISTIO_VERSION) (source $(meta_get ISTIO_VERSION_SOURCE), pin $(meta_get ISTIO_VERSION_PIN); by member $(meta_get ISTIO_VERSION_BY_CONTEXT))"
 		[[ -z "$(meta_get ISTIO_VERSION)" ]] || echo "Start-of-run readiness: ISTIO_NOTREADY_AT_START=$(istio_start_kv ISTIO_NOTREADY_AT_START), ISTIO_READY_WAITED_SEC=$(istio_start_kv ISTIO_READY_WAITED_SEC)"
 		echo "HARNESS_SHA=$(istio_start_kv HARNESS_SHA) (the sweep's)"
-		echo "HARNESS_CONTENT_KEY=$(istio_start_kv HARNESS_CONTENT_KEY) (the sweep's harness files)"
-		echo "REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA} (this report's own)"
 		[[ -z "$(meta_get SETTLE_SEC)" ]] || echo "SETTLE_SEC=$(meta_get SETTLE_SEC) (each pass's wait after its apply, before its probe)"
 		[[ -z "$(meta_get CHURN_RATE)" ]] || echo "CHURN_RATE=$(meta_get CHURN_RATE) (churn operations/s during each pass's probe)"
 		echo "Active revisions, Istio CR generations and proxy versions at the start: ISTIO_ACTIVE_REVISIONS=${ISTIO_ACTIVE_REVISIONS_M}; ISTIO_GENERATIONS=${ISTIO_GENERATIONS_M}; ISTIO_PROXY_VERSIONS=${ISTIO_PROXY_VERSIONS_M}"
 		echo "TSV columns: ${TSV_COLUMNS}"
 		[[ -z "$WIDTH_WARNING" ]] || echo "WARNING: ${WIDTH_WARNING}"
 		[[ -z "$HARNESS_WARNING" ]] || echo "WARNING: ${HARNESS_WARNING}"
-		[[ -z "$HARNESS_NOTE" ]] || echo "Note: ${HARNESS_NOTE}"
 		echo "Means over valid rows; profiles show the change against the baseline."
 		[[ "$SUITE" != controlplane ]] || echo "Connected proxies / cluster: one value per cluster scrape (n counts scrapes), none from a scrape with an istiod pod row that is not valid."
 		echo "Istio CR / IstioRevision generations: each pass's own, from its TSVs (its apply and revert raise them)."
@@ -1974,7 +1903,7 @@ render() {
 		[[ "$SUITE" != propagation ]] || echo "P1 is once per iteration, left out only for a source-side reason; P2 and P3 only for the remote's side; \"(N overflowed)\" counts the iterations its mean leaves out for a +Inf overflow."
 		for w in ${PLAT_WARNINGS[@]+"${PLAT_WARNINGS[@]}"}; do echo "WARNING: ${w}"; done
 		echo ""
-		sweep_outcome_recorded "$RESULTS_DIR" text "$(meta_get RUN_ID)"
+		sweep_outcome_lines text "$RESULTS_DIR"
 		{
 			printf 'Metric'
 			printf '\t%s' "${PASSES[@]}"

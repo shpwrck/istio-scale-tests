@@ -35,7 +35,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 source "${ROOT}/tests/lib/common.sh"
 # Loud ERR trap for unexpected aborts; per-combo failures become row statuses.
 # sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
-# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+# aborts after its start records (the EXIT trap sweep_start sets).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
@@ -236,35 +236,24 @@ Exit codes:
      IstioRevision went up at the same version (an edit of the Istio CR; or, the
      IstioRevision alone, an OSSM operator upgrade or a TLS security profile change),
      or that end-of-sweep version check failed, or the harness (a file under tests/,
-     config/, charts/ or terraform/) changed during the sweep (HARNESS_SHA read again
-     before its steps, by each step and at its end; 002 writes a "# HARNESS_CHANGED_AT="
-     line in the TSV before rows that ran other harness files than the TSV records), or
-     the cells could not be counted. A cell counts once, by its last row: a status row
-     fails it, with that reason; a measurement does not. Proxies on another Istio version
-     than their istiod at the start (ISTIO_PROXY_VERSIONS) are a note, never a failure. M
-     covers every cell of the matrix; one without a row fails as NOT_RUN. Cells the
-     memory guard skipped (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart,
-     on stdout, and do not make it 4. The outcome is also in sweep-outcome.txt, the
-     markdown report and the scale envelope.
-     From its start until then, sweep-outcome.txt says the sweep has not finished
-     (EXIT=unfinished): a sweep killed outright keeps it, and its reports say so; one
-     interrupted (SIGHUP, Ctrl-C, SIGTERM: exit 129, 130, 143) adds when and by which
-     signal; one that stops on an error after its start (exit 1) records the stop and
-     its reason (STOPPED=1, STOP_REASON, CUT_SHORT=1). After any of them, run
-     005-cleanup.sh, then the sweep again into a new dir with the mesh sizes it did not
-     finish.
-     A signal sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches
-     the step that runs (001, 002, 005) and every process under it at once; any still
-     running SWEEP_STOP_GRACE_SEC later get SIGKILL, and the lock is released after
-     them. For a sweep in a terminal's foreground, a kill -INT or -HUP skips the
-     processes in that foreground (a Ctrl-C reaches them itself): they get SIGKILL with
-     no cleanup, so stop such a sweep from elsewhere with SIGTERM. The sweep's own
-     commands between steps (a settle wait, the leftover counts, the Istio version and
-     proxy reads, the end-of-sweep recheck) finish first, each bounded. Stopping the
-     step's tree needs a ps that lists start times (procps, or macOS's), or Linux's /proc
-     in its place: without either, the sweep warns at its start (a --dry-run too), and a
-     stop reaches only the step's own process. While a run goes on, the sweep dir holds
-     its lock (.sweep.lock, its PID).
+     config/, charts/ or terraform/) changed during the sweep (HARNESS_SHA read at its
+     start and its end), or the cells could not be counted (TOTAL=unknown). A cell
+     counts once, by its last row: a status row fails it, with that reason; a
+     measurement does not. Proxies on another Istio version than their istiod at the
+     start (ISTIO_PROXY_VERSIONS) are a note, never a failure. M covers every cell of
+     the matrix; one without a row fails as NOT_RUN. Cells the memory guard skipped
+     (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart, on stdout, and do
+     not make it 4. The outcome is also in sweep-outcome.txt, the markdown report and
+     the scale envelope.
+     From its start until then, sweep-outcome.txt says STATUS=running: a sweep killed
+     outright keeps it, and its reports say so; one interrupted (SIGHUP, Ctrl-C,
+     SIGTERM: exit 129, 130, 143) records STATUS=interrupted with the signal and its
+     time; one that stops on an error after its start (exit 1) STATUS=stopped with its
+     reason. After any of them, run 005-cleanup.sh, then the sweep again into a new dir
+     with the mesh sizes it did not finish.
+     On a signal, the running step's process group gets SIGTERM, and SIGKILL
+     SWEEP_STOP_GRACE_SEC later. While a run goes on, the sweep dir holds its lock
+     (.sweep.lock, its PID).
 
 Environment:
   ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
@@ -313,10 +302,9 @@ Environment:
   (default 2): warn when a cluster's connected proxies and its Running sidecar pods
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
 $(platform_help_lines all)
-  HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
-  step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
-  processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
-  are read at once. Environment only (config/options.env).
+  SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
+  before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read
+  at once. Environment only (config/options.env).
 
 Requires GNU timeout for a live run (002's config-dump samples, the memory guard's
 Envoy-stats reads; on macOS: brew install coreutils, which installs gtimeout). Without
@@ -702,11 +690,14 @@ SCRIPT_DIR="${ROOT}/tests/controlplane"
 # A fresh RUN_ID and sweep-<RUN_ID>/ subdir.
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 OUTPUT_DIR="${OUTPUT_DIR_BASE}/sweep-${RUN_ID}"
-# The harness at this run's start, for the preambles it writes and its sweep-outcome.txt.
-# harness_sha_for_sweep exports the results dir, never the value: each step records the live
-# harness without it, and a harness that changes during the sweep is a problem in its outcome
-# (exit 4).
-harness_sha_for_sweep "$OUTPUT_DIR_BASE"
+# The harness at this run's start, for the preambles it writes and its sweep-outcome.txt;
+# its results under the output dir do not count, for its steps either (HARNESS_SHA_EXCLUDE:
+# each step records the harness it reads). sweep_finish reads it again: a harness that
+# changed during the sweep is a problem in its outcome (exit 4).
+HARNESS_SHA_EXCLUDE="$OUTPUT_DIR_BASE"
+[[ "$HARNESS_SHA_EXCLUDE" == /* ]] || HARNESS_SHA_EXCLUDE="${PWD%/}/${HARNESS_SHA_EXCLUDE}"
+export HARNESS_SHA_EXCLUDE
+HARNESS_SHA="$(harness_sha)"
 
 # matrix_cell_keys: this run's legacy matrix, one tab-separated key per line.
 matrix_cell_keys() {
@@ -778,7 +769,6 @@ precreate_tsv_preamble() {
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
-		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY:-unknown}"
 		echo "# KUBE_VERSIONS=${kver}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
@@ -1143,7 +1133,7 @@ leftover_counts() {
 # one is named in a warning. Every count runs on all of them at once. It deletes only on
 # members the operator named (--contexts): leftovers on another mesh member stop the sweep
 # before any change, with the 005 command for them. LEFTOVER_AT_START records the counts
-# (and that 005 deleted them), for the preamble; the outcome says so too (INFO). When it
+# (and that 005 deleted them), for the preamble; the record says so too (a NOTE). When it
 # deleted anything, the first cell waits SETTLE_SEC first, as after every cell's cleanup
 # (LEFTOVER_DELETED): its baseline must not land inside the deletion's push storm.
 LEFTOVER_DELETED=0
@@ -1209,7 +1199,7 @@ legacy_leftover_preflight() {
 		|| echo "warn: 005-cleanup.sh reported a failure; counting the namespaces again" >&2
 	LEFTOVER_DELETED=1
 	LEFTOVER_AT_START="${found_kv} (deleted by 005-cleanup.sh before the first cell)"
-	SWEEP_NOTES+=(--info "the leftover check found controlplane-test namespaces an earlier run left (${found}) and 005-cleanup.sh deleted them before the first cell, which waited SETTLE_SEC=${SETTLE_SEC}s after")
+	sweep_note "the leftover check found controlplane-test namespaces an earlier run left (${found}) and 005-cleanup.sh deleted them before the first cell, which waited SETTLE_SEC=${SETTLE_SEC}s after"
 	found=""
 	while IFS=$'\t' read -r ctx total; do
 		if [[ "$total" =~ ^[0-9]+$ ]] && ((total > 0)); then
@@ -1283,21 +1273,19 @@ fi
 # instead of recording every sample N/A. The plan (--dry-run) does not need it.
 ((DRY_RUN)) || require_timeout
 # SWEEP_TMP: this run's scratch files (the cell count, the leftover counts, the memory
-# guard's scrapes, the envelope's stderr), in one dir that every exit removes: this trap
-# until the sweep's own EXIT trap (below) replaces it, which removes it too.
+# guard's scrapes, the envelope's stderr), in one dir that this trap removes until
+# sweep_start's EXIT trap replaces it: then cp_sweep_cleanup (a sweep that ends before its
+# end) or the sweep's end removes it.
 SWEEP_TMP="$(mktemp -d "${TMPDIR:-/tmp}/controlplane-sweep.XXXXXX")" \
 	|| die "could not create a scratch dir under ${TMPDIR:-/tmp}; nothing was run."
 trap 'rm -rf "$SWEEP_TMP" 2>/dev/null || true' EXIT
-# The notes the sweep gathers for its outcome (the leftover check's, the cell count's); the
-# EXIT trap records them too when the sweep ends before its outcome.
-SWEEP_NOTES=()
 # The Istio version every member runs, read once before any cluster change and
 # exported, so 001, 002 and 005 record it (ISTIO_VERSION_CHECK=fail stops here on a
 # mismatch). --dry-run reads nothing: the pin, ISTIO_VERSION_SOURCE=pin.
 istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" "$DRY_RUN" ${KUBECTL[@]+"${KUBECTL[@]}"}
 echo "Istio version:     $(istio_version_label)" >&2
 # The status rows of a cell (CP_CELL_AWK cp_cell_state reads a cell's state by them, by the
-# rule 004 also uses). INTERRUPTED: the row the EXIT trap writes for the cell in progress
+# rule 004 also uses). INTERRUPTED: the row cp_sweep_cleanup writes for the cell in progress
 # when the sweep is interrupted or stops (CELL_IN_PROGRESS).
 CELL_STATUS_RE='^(SETUP_FAILED|PROBE_FAILED|GROW_FAILED|SWITCH_FAILED|SKIPPED_MEM_GUARD|SKIPPED_SERIES_STOPPED|RETIRE_FAILED|INTERRUPTED)$'
 # ensure_output_dir: create the sweep dir and say where it is.
@@ -1315,9 +1303,9 @@ if ! ((DRY_RUN)); then
 	platform_probe_share "$OUTPUT_DIR"
 	platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 fi
-# The cleanup to run when SIGKILL cut a step's own cleanup short (sweep_step's warning;
-# console only), from the repo root as the other sweeps name theirs.
-# shellcheck disable=SC2034  # read by sweep_step (tests/lib/common.sh)
+# The cleanup the console names when the sweep ends before its end (cp_sweep_cleanup does
+# not touch the members), from the repo root as the other sweeps name theirs.
+# shellcheck disable=SC2034  # read by sweep_start's EXIT trap (tests/lib/common.sh)
 SWEEP_CLEANUP_CMD="./tests/controlplane/005-cleanup.sh --contexts $(IFS=,; echo "${CONTEXTS[*]}")"
 ((GROWTH)) || SWEEP_CLEANUP_CMD+="; the next run of the sweep also deletes the namespaces before its first cell"
 capacity_plan_warn
@@ -1430,7 +1418,7 @@ stop_peak_metrics_poller() {
 
 # CELL_IN_PROGRESS: the cell whose rows are not all written yet, as the command that writes
 # its status row without the status (legacy_failed, or g_row and its arguments); empty
-# between cells. cell_interrupted_row (the EXIT trap) appends an INTERRUPTED row for it when
+# between cells. cell_interrupted_row (cp_sweep_cleanup) appends an INTERRUPTED row for it when
 # the sweep ends there (interrupted, or stopped), so the cell reads as failed, never as
 # measured from the rows written so far. A sweep killed outright writes none: the reports
 # then find it INCOMPLETE (fewer member rows than its mesh size) or, when all its rows were
@@ -1455,7 +1443,7 @@ legacy_cell_written() {
 		END { cp_end(); if ((want in cp_ms) && cp_cell_state(want) == "") print "done" }' "$tsv" 2>/dev/null)" || return 1
 	[[ "$r" == "done" ]]
 }
-# shellcheck disable=SC2329  # invoked by the EXIT trap below
+# shellcheck disable=SC2329  # invoked by cp_sweep_cleanup
 cell_interrupted_row() {
 	((${#CELL_IN_PROGRESS[@]})) || return 0
 	[[ "${BASHPID:-$$}" == "$$" ]] || return 0
@@ -1466,25 +1454,27 @@ cell_interrupted_row() {
 		return 0
 	fi
 	# A subshell: emit_failed_row dies when it cannot end a cut last line, and an exit in
-	# this EXIT trap would skip the outcome record after it.
+	# the EXIT trap would skip the rest of it.
 	( "${cir[0]}" INTERRUPTED "${cir[@]:1}" ) 2>/dev/null \
 		|| echo "warning: could not write the INTERRUPTED row of the cell in progress; the reports judge it by its rows" >&2
 }
 
-# A step that still runs first (sweep_step_kill: after a second signal, 002 may still be
-# writing rows), then the poller and scratch dir (SWEEP_TMP), then the cell in progress,
-# then a run that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
-# that record, stopped with its reason or interrupted, with the notes this run gathered so
-# far.
-_sweep_rc=0 # the trap's own $?, kept before its first step changes it
-trap '_sweep_rc=$?; sweep_step_kill || true; stop_peak_metrics_poller 2>/dev/null || true; rm -rf "$SWEEP_TMP" 2>/dev/null || true; cell_interrupted_row || true; sweep_outcome_on_exit "$_sweep_rc" ${SWEEP_NOTES[@]+"${SWEEP_NOTES[@]}"} || true' EXIT
+# cp_sweep_cleanup: what the EXIT trap runs when the sweep ends before its end (die, an
+# unexpected abort, Ctrl-C), after it recorded how (tests/lib/common.sh, sweep_start): the
+# poller and scratch dir (SWEEP_TMP), then the cell in progress (cell_interrupted_row).
+# shellcheck disable=SC2329  # run by sweep_start's EXIT trap
+cp_sweep_cleanup() {
+	stop_peak_metrics_poller 2>/dev/null || true
+	rm -rf "$SWEEP_TMP" 2>/dev/null || true
+	cell_interrupted_row || true
+}
 
 # Pre-create the TSV preamble before any combo (skipped in dry-run). A sweep with --config
 # also gets the run-config-<RUN_ID>.env replay copy.
 if ((! DRY_RUN)); then
-	# Until its outcome is written at the end, sweep-outcome.txt says this run has not
-	# finished (a run that dies keeps it).
-	sweep_outcome_start "$OUTPUT_DIR" "$RUN_ID" --next "if it died, run 005-cleanup.sh on its contexts, then the sweep again into a new dir with the mesh sizes it did not finish; the rows in this dir cover only the cells it finished"
+	# sweep-outcome.txt says the sweep runs until sweep_finish writes its outcome; one that
+	# ends before records how, then runs cp_sweep_cleanup.
+	sweep_start "$OUTPUT_DIR" "$RUN_ID" --cleanup cp_sweep_cleanup
 	metrics_preflight
 	precreate_tsv_preamble
 	config_snapshot "$OUTPUT_DIR" "$RUN_ID"
@@ -2363,71 +2353,29 @@ echo ""
 # The Istio version again, after the last window and before the reports (read-only).
 IV_END=()
 istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
-# These reports come before this run's outcome is written (sweep-outcome.txt still says
-# the sweep has not finished).
-export _SWEEP_OUTCOME_PENDING=1
-# The PROBLEMs that outcome will record, for the reports' verdict (env_sla_verdict: a PASS
-# reads CAUTION): the end-of-sweep Istio recheck's, and a harness that changed during the
-# sweep (the end check, read now: sweep_outcome records this same answer). Not that the
-# cells could not be counted: the reports count them.
-_so_hs=""
-_harness_sha_sweep_end _so_hs
-_so_np=0
-for _so_a in ${IV_END[@]+"${IV_END[@]}"} ${SWEEP_NOTES[@]+"${SWEEP_NOTES[@]}"}; do
-	[[ "$_so_a" != --problem ]] || _so_np=$((_so_np + 1))
-done
-[[ -z "$_so_hs" ]] || _so_np=$((_so_np + 1))
-export _SWEEP_OUTCOME_PROBLEMS="$_so_np"
-echo "Generating report..."
-"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
-
-MD_FILE="${OUTPUT_DIR}/sweep-${RUN_ID}.md"
-"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format markdown > "$MD_FILE"
-echo "Markdown summary written to $MD_FILE"
-
-CHARTS_FILE="${OUTPUT_DIR}/sweep-charts-${RUN_ID}.md"
-"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format charts > "$CHARTS_FILE"
-echo "Charts written to $CHARTS_FILE"
-
-# Campaign scale envelope (docs/campaigns/TEMPLATE.md), best-effort: a render
-# failure warns but never fails the sweep.
-ENVELOPE_FILE="${OUTPUT_DIR}/scale-envelope-${RUN_ID}.md"
-# Keep the render's stderr so the warning shows the actual reason.
-ENVELOPE_ERR="${SWEEP_TMP}/envelope.err"
-# Subshell: render_scale_envelope uses die(), which must not abort the sweep.
-if ( render_scale_envelope "$OUTPUT_DIR" "$SCRIPT_DIR/004-report-results.sh" \
-		"$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" ) > "$ENVELOPE_FILE" 2>"$ENVELOPE_ERR"; then
-	echo "Scale envelope written to $ENVELOPE_FILE"
-else
-	rm -f "$ENVELOPE_FILE"
-	echo "warning: scale-envelope generation failed (sweep data is safe above):" >&2
-	sed 's/^/  /' "$ENVELOPE_ERR" >&2
-fi
-rm -f "$ENVELOPE_ERR"
-
 # Every cell without a measurement has the status row emit_failed_row wrote (its
 # context column is the status); count them by reason, the memory guard's SKIPPED_* apart
-# (skipped on purpose, not failed: C2), also in sweep-outcome.txt and the markdown
-# summary. The RETIRE_FAILED stop (exit 1) wins over 4 (some cells failed, or the
-# Istio version or active revision changed under the sweep). Once per cell, keyed by the
-# five axes, traffic_config and window_kind, and decided by the rule the reports use
-# (CP_CELL_AWK cp_cell_state): a last row that is a status row fails it, with that row's
-# reason (also after a context's rows: a partial failure; INTERRUPTED: the run ended
-# inside it); a last row that is a measurement (valid or not) does not, unless the cell's
-# rows name fewer members than its mesh size, or fewer than its WINDOW_ROWS lines name
-# (INCOMPLETE: cut short while they were written). The total is every cell of the TSV and
-# of this run's matrix, and a matrix cell with no row counts failed as NOT_RUN. A growth
-# series' cells share that key (M-sweep, outside phases), so each of its status rows is a
-# cell of its own, of the plan.
+# (skipped on purpose, not failed: C2), before the reports (they read sweep-outcome.txt).
+# The RETIRE_FAILED stop (exit 1) wins over 4 (some cells failed, or the Istio version or
+# active revision changed under the sweep). Once per cell, keyed by the five axes,
+# traffic_config and window_kind, and decided by the rule the reports use (CP_CELL_AWK
+# cp_cell_state): a last row that is a status row fails it, with that row's reason (also
+# after a context's rows: a partial failure; INTERRUPTED: the run ended inside it); a last
+# row that is a measurement (valid or not) does not, unless the cell's rows name fewer
+# members than its mesh size, or fewer than its WINDOW_ROWS lines name (INCOMPLETE: cut
+# short while they were written). The total is every cell of the TSV and of this run's
+# matrix, and a matrix cell with no row counts failed as NOT_RUN. A growth series' cells
+# share that key (M-sweep, outside phases), so each of its status rows is a cell of its
+# own, of the plan.
 CELL_KEYS=""
 if ! ((GROWTH)); then
 	CELL_KEYS="$(matrix_cell_keys)"
 fi
 # The matrix's keys go in a file (in the environment, past about 4,200 cells, awk could
-# not even start), and a count that does not end with its TOTAL line is a problem, never
-# "all cells ran". As the report, a line shorter than 40 columns is not a row.
-# A keys file that cannot be read is that too (getline -1 would end the loop and count
-# the rows only). The EXIT trap removes it (SWEEP_TMP) on an interrupt.
+# not even start), and a count that does not end with its TOTAL line is a problem (the
+# total then reads unknown), never "all cells ran". As the report, a line shorter than 40
+# columns is not a row. A keys file that cannot be read is that too (getline -1 would end
+# the loop and count the rows only).
 CELL_RESULT=()
 _cells_dir="${SWEEP_TMP}/cells"
 mkdir -p "$_cells_dir" 2>/dev/null || true
@@ -2438,7 +2386,7 @@ awk -F'\t' -v growth="$GROWTH" -v keys="${_cells_dir}/keys" -v st="$CELL_STATUS_
 	BEGIN {
 		while ((r = (getline line < keys)) > 0)
 			if (split(line, f, "\t") >= 7) addkey(f[1] SUBSEP f[2] SUBSEP f[3] SUBSEP f[4] SUBSEP f[5] SUBSEP f[6] SUBSEP f[7])
-		if (r < 0) { print "awk: cannot read the plan cell keys file" > "/dev/stderr"; bad = 1; exit 2 }
+		if (r < 0) { print "awk: cannot read the matrix cell keys file" > "/dev/stderr"; bad = 1; exit 2 }
 		close(keys)
 	}
 	/^timestamp\t/ { cp_header(); next }
@@ -2477,8 +2425,8 @@ _cells_why="${_cells_why//"$OUTPUT_DIR"/<sweep dir>}"
 _cells_why="${_cells_why:0:200}"
 rm -rf "$_cells_dir"
 _cells_dir=""
-FAILED_CELLS=() CELL_COUNT_ARGS=() NOTRUN_CELLS=()
-CELLS_TOTAL="" _cells_seen="" _cells_pw=0 _cells_inc=0
+FAILED_CELLS=() NOTRUN_CELLS=()
+CELLS_TOTAL="" _cells_seen="" _cells_pw=0 _cells_inc=0 _cells_counted=1
 for _cell_line in ${CELL_RESULT[@]+"${CELL_RESULT[@]}"}; do
 	case "$_cell_line" in
 	FAILED$'\t'*) FAILED_CELLS+=("${_cell_line#FAILED$'\t'}") ;;
@@ -2506,26 +2454,46 @@ if ((_cells_rc == 0)) && is_nonneg_int "$_cells_seen"; then
 		_nr_list="$(printf '%s; ' "${NOTRUN_CELLS[@]:0:5}")"
 		_nr_list="${_nr_list%; }"
 		((${#NOTRUN_CELLS[@]} <= 5)) || _nr_list+="; and $((${#NOTRUN_CELLS[@]} - 5)) more"
-		SWEEP_NOTES+=(--note "${#NOTRUN_CELLS[@]} cell(s) of the matrix have no row (NOT_RUN: never reached): ${_nr_list}. To measure them, run the sweep again into a new dir with their axis values")
+		sweep_note "${#NOTRUN_CELLS[@]} cell(s) of the matrix have no row (NOT_RUN: never reached): ${_nr_list}. To measure them, run the sweep again into a new dir with their axis values"
 	fi
 else
-	FAILED_CELLS=() CELLS_TOTAL="$MATRIX_SIZE"
 	# The rows are intact, and the reports count them. The sweep dir (a local path) goes to
 	# stderr only, below, never into the record.
-	CELL_COUNT_ARGS=(--uncounted "${_cells_why:-awk exited ${_cells_rc} with no count}; the rows are intact: 004-report-results.sh counts them from the sweep dir")
+	FAILED_CELLS=() CELLS_TOTAL=unknown _cells_counted=0
+	sweep_problem "could not count the sweep's cells: ${_cells_why:-awk exited ${_cells_rc} with no count}; the rows are intact: 004-report-results.sh counts them from the sweep dir"
 fi
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
-# The outcome also goes at the end of the scale envelope, when it was written: a
-# campaign record pasted from it must show a version change or a failed sweep.
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${CELL_COUNT_ARGS[@]+"${CELL_COUNT_ARGS[@]}"} ${IV_END[@]+"${IV_END[@]}"} ${SWEEP_NOTES[@]+"${SWEEP_NOTES[@]}"} \
-	--run-id "$RUN_ID" --record "$OUTPUT_DIR" \
-	--md "$MD_FILE" --md "$ENVELOPE_FILE" \
-	--where "$_cells_where" \
+sweep_finish ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --where "$_cells_where" \
 	"$CELLS_TOTAL" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
-if ((${#CELL_COUNT_ARGS[@]})); then
-	echo "The sweep dir: ${OUTPUT_DIR} (count its cells with: ${SCRIPT_DIR}/004-report-results.sh --results-dir ${OUTPUT_DIR})" >&2
+((_cells_counted)) || echo "The sweep dir: ${OUTPUT_DIR} (count its cells with: ${SCRIPT_DIR}/004-report-results.sh --results-dir ${OUTPUT_DIR})" >&2
+
+echo "Generating report..."
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"
+
+MD_FILE="${OUTPUT_DIR}/sweep-${RUN_ID}.md"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format markdown > "$MD_FILE"
+echo "Markdown summary written to $MD_FILE"
+
+CHARTS_FILE="${OUTPUT_DIR}/sweep-charts-${RUN_ID}.md"
+"$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR" --format charts > "$CHARTS_FILE"
+echo "Charts written to $CHARTS_FILE"
+
+# Campaign scale envelope (docs/campaigns/TEMPLATE.md), best-effort: a render
+# failure warns but never fails the sweep. It repeats the sweep's outcome.
+ENVELOPE_FILE="${OUTPUT_DIR}/scale-envelope-${RUN_ID}.md"
+# Keep the render's stderr so the warning shows the actual reason.
+ENVELOPE_ERR="${SWEEP_TMP}/envelope.err"
+# Subshell: render_scale_envelope uses die(), which must not abort the sweep.
+if ( render_scale_envelope "$OUTPUT_DIR" "$SCRIPT_DIR/004-report-results.sh" \
+		"$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}" ) > "$ENVELOPE_FILE" 2>"$ENVELOPE_ERR"; then
+	echo "Scale envelope written to $ENVELOPE_FILE"
+else
+	rm -f "$ENVELOPE_FILE"
+	echo "warning: scale-envelope generation failed (sweep data is safe above):" >&2
+	sed 's/^/  /' "$ENVELOPE_ERR" >&2
 fi
+rm -rf "$SWEEP_TMP"
 if [[ -n "$SWEEP_STOPPED" ]]; then
 	echo "" >&2
 	echo "ERROR: the sweep stopped early: ${SWEEP_STOPPED} (RETIRE_FAILED row in the report). The cells above it are valid; later series did not run." >&2

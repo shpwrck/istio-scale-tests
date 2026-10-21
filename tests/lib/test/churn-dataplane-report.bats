@@ -292,16 +292,15 @@ two_pairs() {
 		crow c1 0 baseline 50 2 5 OK N/A N/A
 		crow c1 1 churn 48 4 9 OK 30 99
 	} > "${RES}/churn-dataplane-r1.tsv"
-	printf '%s\n' 'RUN_ID=r1' 'EXIT=0' 'NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)' > "${RES}/sweep-outcome.txt"
+	printf '%s\n' STATUS=finished 'RUN_ID=r1' 'EXIT=0' TOTAL=1 FAILED=0 'NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)' > "${RES}/sweep-outcome.txt"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
 	assert_line "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
 	assert_line "# ISTIO_READY_WAITED_SEC=60"
 	assert_line "# SWEEP_OUTCOME_RUN_ID=r1"
 	assert_line "# SWEEP_OUTCOME_NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)"
-	[[ "$stderr" != *"was recorded by run"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	[ "$(jq -c '[.metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec, .sweep_outcome.notes[0]]' <<<"$output")" = \
+	[ "$(jq -c '[.metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec, .sweep_outcomes[0].notes[0]]' <<<"$output")" = \
 		'["c2=IstioCNINotHealthy","60","not ready at the start: IstioCNINotHealthy on 1 member (c2)"]' ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
 	assert_output --partial '| ISTIO_NOTREADY_AT_START | `c2=IstioCNINotHealthy` |'

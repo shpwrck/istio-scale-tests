@@ -127,7 +127,7 @@ which wins over the upstream docs there when they disagree.
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`, `SWEEP_STOP_GRACE_SEC` |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `SWEEP_STOP_GRACE_SEC` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check) |
@@ -175,11 +175,8 @@ which wins over the upstream docs there when they disagree.
 `bash` 4.3+, `kubectl` (or `oc`), `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk` (gawk
 5.2 and 5.3 corrupt unset array elements passed to a function: `common.sh` then runs mawk, or
 stops), GNU `timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout`
-in `tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
-busybox; macOS's own; a sweep stops its step's whole tree with it; on Linux, `/proc` stands in for
-it), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter
-bats, which skip without it; `python3` alone for the signal bats' pseudo-terminal test, which
-skips without it), `aws` + `rosa` (ROSA only).
+in `tests/lib/common.sh`), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite,
+and the frontmatter bats, which skip without it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

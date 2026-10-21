@@ -6,8 +6,8 @@
 #
 # Exposes:
 #   harness_sha (in tests/lib/common.sh)          -> `git -C "${ROOT:-.}" describe --always --abbrev=7`,
-#       with `-dirty.<8hex>` naming the uncommitted content of tests/, config/, charts/ and
-#       terraform/ (submodules never count), or "unknown"
+#       with `-dirty` for uncommitted changes under tests/, config/, charts/ and terraform/
+#       (submodules never count), or "unknown"
 #   kube_versions <ctx> <kubectl_argv...>          -> kubectl server gitVersion, "unreachable"/"unknown" semantics
 #   probe_kube_versions <ctxs_csv> <kubectl_argv...>
 #                                                  -> CSV of ctx=ver pairs, PLATFORM_READ_PARALLEL
@@ -24,7 +24,7 @@
 #       and ISTIO_VERSION_BY_CONTEXT; a no-op when a parent sweep already resolved them
 #   istio_version_recheck <out_array> <kubectl_argv...>
 #                                                  -> read it again at the end of a sweep;
-#       sweep_outcome arguments (--problem when the version or active revision changed,
+#       sweep_finish arguments (--problem when the version or active revision changed,
 #       --note when unconfirmed or only readiness is off)
 #   istio_generations_read <ctxs_csv> <kubectl_argv...>
 #                                                  -> ctx=<Istio CR gen>/<IstioRevision gen>,...
@@ -77,9 +77,8 @@
 # All callers are expected to have run `set -euo pipefail`.
 # shellcheck shell=bash
 
-# harness_sha, harness_sha_for_sweep, harness_sha_check, report_harness_sha:
-# tests/lib/common.sh (every report needs the harness it runs, and not every report sources
-# this file).
+# harness_sha: tests/lib/common.sh (every sweep reads it, and not every sweep sources this
+# file).
 
 # Per-context Kubernetes server version probe. Honors PL2 semantics:
 #  - 5s --request-timeout
@@ -1099,7 +1098,7 @@ _istio_version_resolve_live() {
 }
 
 # _istio_notready_notes <out_arrayname> <start|end> <ctx=state,...> [<waited_sec>]: the
-# sweep_outcome --note arguments for members whose istiod or IstioCNI was not ready (the list
+# sweep_finish --note arguments for members whose istiod or IstioCNI was not ready (the list
 # as ISTIO_NOTREADY_AT_START holds it; rolling for an istiod rollout in progress): one line on
 # what that means and what to check, then one line per state with its members. Appends
 # nothing for an empty list, unchecked, unknown or none.
@@ -1262,7 +1261,7 @@ istio_version_refresh() {
 # again at the end of a sweep (after its last window, before its reports), read-only and
 # never dying, and compare it with ISTIO_VERSION_BY_CONTEXT (and the activeRevisionName
 # in _ISTIO_VERSION_REVS) from istio_version_resolve. Sets the named array to
-# sweep_outcome arguments, which print them (once, on stderr):
+# sweep_finish arguments, which print them (once, on stderr):
 #   --problem <msg>  a member now runs another version or another active revision (also
 #                    when its Istio CR is not settled at the end but the active revision
 #                    reads another version: a version bump whose upgrade failed partway),
@@ -1768,7 +1767,7 @@ NS_LIFECYCLE_HEADER=$'timestamp\tcontext\tseries\tnamespace_count\taction\tnames
 # file); the caller sources tests/lib/config.sh and tests/lib/platform.sh.
 # shellcheck disable=SC2329
 ns_lifecycle_init() {
-	local file="$1" run_id="${2:-unknown}" dir hs hk
+	local file="$1" run_id="${2:-unknown}" dir hs
 	[[ -n "$file" ]] || return 0
 	declare -F config_preamble_lines >/dev/null || die "ns_lifecycle_init needs config_preamble_lines (source tests/lib/config.sh)"
 	declare -F platform_preamble_lines >/dev/null || die "ns_lifecycle_init needs platform_preamble_lines (source tests/lib/platform.sh)"
@@ -1776,13 +1775,12 @@ ns_lifecycle_init() {
 	dir="$(dirname "$file")"
 	mkdir -p "$dir"
 	# The harness without the results dir this file lives in (they would read dirty).
-	harness_read hs hk --exclude "$dir"
+	hs="$(harness_sha --exclude "$dir")"
 	{
 		echo "# Namespace lifecycle (controlplane growth mode) — $(date -u -Iseconds)"
 		echo "# NS_LIFECYCLE_SCHEMA=2"
 		echo "# RUN_ID=${run_id}"
 		echo "# HARNESS_SHA=${hs}"
-		echo "# HARNESS_CONTENT_KEY=${hk}"
 		istio_version_kv | sed 's/^/# /'
 		echo "# APPLY_CHUNK_OBJECTS=${CONTROLPLANE_APPLY_CHUNK_OBJECTS:-unknown}"
 		echo "# APPLY_ATTEMPTS=${CONTROLPLANE_APPLY_ATTEMPTS:-unknown}"

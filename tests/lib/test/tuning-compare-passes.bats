@@ -2,7 +2,7 @@
 # tuning 004-compare-profiles through its real entrypoint (PL33), per pass: each pass's
 # Istio CR / IstioRevision generations from its own TSVs (a profile's apply and revert
 # raise them), "TSV columns: none" that says why, and the --help that names the sweep's
-# own PROBLEM causes and REPORT_HARNESS_SHA. Contexts are placeholders (ci-a, ci-b).
+# own PROBLEM causes. Contexts are placeholders (ci-a, ci-b).
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -63,13 +63,12 @@ setup() {
 	assert_line "- TSV columns: 9"
 }
 
-@test "tuning 004 --help names the sweep's own problem causes and REPORT_HARNESS_SHA" {
+@test "tuning 004 --help names the sweep's own problem causes" {
 	run "$COMPARE" --help
 	assert_success
 	local flat
 	flat="$(tr '\n' ' ' <<<"$output" | tr -s ' ')"
 	[[ "$flat" == *"during a pass, after its apply settled and not by its profile"* ]]
 	[[ "$flat" == *"an incomplete revert, or such an edit, which no revert undoes (they restore only the profiles' keys): a member's Istio CR spec after the last revert differs from the sweep's start"* ]]
-	[[ "$flat" == *"REPORT_HARNESS_SHA (every format, next to it) is the harness this report ran on"* ]]
 	[[ "$flat" == *'"none" when no pass wrote a TSV'* ]]
 }

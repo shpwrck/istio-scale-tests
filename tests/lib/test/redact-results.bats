@@ -55,9 +55,8 @@ cp_sweep() {
 	local d tsv out="${BATS_TEST_TMPDIR}/copy"
 	d="$(find "$RES" -maxdepth 1 -name 'sweep-*' -type d)"
 	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# A run that died while it held the dir leaves its lock (the real sweep_lock).
-	bash -c 'source "$1/tests/lib/common.sh"; sweep_lock "$2"' _ "$ROOT" "$d"
-	[ -s "$d/.sweep.lock" ]
+	# A run that died while it held the dir leaves its lock (sweep_start's: its PID).
+	echo 99999999 > "$d/.sweep.lock"
 	run --separate-stderr "$REDACT" --out "$out" "$d"
 	assert_success
 	[[ "$stderr" == *"/.sweep.lock (a sweep's lock file: the PID of the run that held the dir)"* ]]

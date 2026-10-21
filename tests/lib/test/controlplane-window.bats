@@ -2,9 +2,8 @@
 # Controlplane windows, through 002, 003 and 004 (PL33; no cluster: kubectl and curl are
 # stubs): 002's istiod %-of-limit divides by the limit of the pods it summed, and its
 # WINDOW_ROWS line records the replicas each istiod Deployment wants (fewer Running warns);
-# a split window across a harness change records both harnesses in the TSV; 004 over a
-# sweep's TSV warns of a window on fewer pods than wanted; and a member with no istiod pod
-# Running (one N/A row, <ctx>=1/<spec>) gives no replica shortfall.
+# 004 over a sweep's TSV warns of a window on fewer pods than wanted; and a member with no
+# istiod pod Running (one N/A row, <ctx>=1/<spec>) gives no replica shortfall.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -110,33 +109,6 @@ cp_row() {
 	# 3800Mi of 2 x 2048Mi and 3000m of 2 x 2000m (over the Deployment's 3: 62 and 50).
 	[ "$(col istiod_mem_pct_of_limit)" = "93 93" ]
 	[ "$(col istiod_cpu_pct_of_limit)" = "75 75" ]
-}
-
-@test "002 split phases across a harness change: the rows go to the baseline's harness, a HARNESS_CHANGED_AT line after them records the final's, and the next window adds none" {
-	local sd="${BATS_TEST_TMPDIR}/state" live key
-	mkdir -p "$sd"
-	cp_window
-	assert_success
-	live="$(sed -n 's/^# HARNESS_SHA=//p' "$TSV")"
-	key="$(sed -n 's/^# HARNESS_CONTENT_KEY=//p' "$TSV")"
-	cp_window --phase baseline --state-dir "$sd"
-	assert_success
-	# A checkout between the phases: the baseline ran other files than the final and the TSV.
-	printf 'base999\t111111111111\t2030-01-01T00:00:00Z\n' > "${sd}/harness"
-	cp_window --phase final --state-dir "$sd"
-	assert_success
-	[[ "$stderr" == *"warning: [002] this window's baseline ran other harness files (HARNESS_SHA=base999) than its final scrape (HARNESS_SHA=${live}): a harness file was edited, or a checkout ran, during the window; the TSV records both"* ]]
-	[[ "$stderr" == *"warning: [002] these rows ran other harness files than controlplane-R1.tsv records (HARNESS_SHA=${live}, HARNESS_CONTENT_KEY=${key}; now HARNESS_SHA=base999, HARNESS_CONTENT_KEY=111111111111): a HARNESS_CHANGED_AT line before them records it"* ]]
-	cp_window
-	assert_success
-	[[ "$stderr" != *"other harness files"* ]]
-	run awk -F'\t' '/^# (WINDOW_ROWS|HARNESS_CHANGED_AT)=/ { print; next } !/^#/ && $1 != "timestamp" { print "row" }' "$TSV"
-	assert_line --index 3 "# HARNESS_CHANGED_AT=2030-01-01T00:00:00Z HARNESS_SHA=base999 HARNESS_CONTENT_KEY=111111111111"
-	assert_line --index 4 "# WINDOW_ROWS=ctx-a=2/3"
-	assert_line --index 6 "row"
-	assert_line --index 7 --regexp "^# HARNESS_CHANGED_AT=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z HARNESS_SHA=${live} HARNESS_CONTENT_KEY=${key}\$"
-	assert_line --index 8 "# WINDOW_ROWS=ctx-a=2/3"
-	[ "${#lines[@]}" -eq 11 ]
 }
 
 @test "004 over a sweep's TSV: a window that wrote all its rows on fewer pods than its Deployment wants is a data warning; a member whose one row is N/A (no istiod pod Running) gives no shortfall" {

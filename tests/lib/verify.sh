@@ -208,8 +208,23 @@ EXTRACTED_PATTERNS=(
 	'run_timeout() {'
 	# counter window deltas (metrics.sh)
 	'counter_delta() {'
-	# sweep outcome (common.sh)
-	'sweep_outcome() {'
+	# a sweep's start, steps, stop and outcome (common.sh)
+	'sweep_start() {'
+	'_sweep_record() {'
+	'_sweep_mask() {'
+	'_sweep_unlock() {'
+	'sweep_step() {'
+	'_sweep_step_stop() {'
+	'_sweep_step_kill() {'
+	'_sweep_on_signal() {'
+	'_sweep_on_exit() {'
+	'sweep_err_trap() {'
+	'sweep_problem() {'
+	# anchored: controlplane 004's msweep_note is another function
+	'^[[:space:]]*sweep_note() {'
+	'_sweep_outcome_by() {'
+	'sweep_finish() {'
+	'sweep_outcome_lines() {'
 	# which propagation rows count (propagation.sh, awk)
 	'function prop_drop_reason('
 	'function prop_p1_drop_reason('
@@ -234,15 +249,8 @@ EXTRACTED_PATTERNS=(
 	'_istio_version_recheck_live() {'
 	'_istio_version_errline() {'
 	'_istio_version_hostkey() {'
-	# sweep outcome record (common.sh), multi-run refusal (config.sh)
-	'_sweep_outcome_by() {'
-	'_sweep_outcome_sweep_ids() {'
-	'sweep_outcome_recorded() {'
-	# not-finished record (common.sh); dirty hash, masked
-	# errors, generations, proxy versions (preamble.sh); proxy summary (envelope.sh)
-	'sweep_outcome_unfinished() {'
-	'sweep_outcome_start() {'
-	'_harness_keys() {'
+	# masked errors, generations, proxy versions (preamble.sh); proxy summary
+	# (envelope.sh); multi-run refusal (config.sh)
 	'_istio_version_mask() {'
 	'_istio_live_version_read() {'
 	'istio_proxy_versions() {'
@@ -266,43 +274,17 @@ EXTRACTED_PATTERNS=(
 	# the bats negation lint (lint-bats-negation.sh)
 	'lint_bats_negation_file() {'
 	'lint_bats_negation_paths() {'
-	# placeholder rows and the legacy schema (propagation.sh); a
-	# sweep that ends before its outcome, escaped markdown cells, a fork-free size check
-	# (common.sh)
+	# placeholder rows and the legacy schema (propagation.sh); a TSV's end line,
+	# escaped markdown cells, a fork-free size check (common.sh)
 	'prop_placeholder_row() {'
 	'function prop_legacy_reason_('
-	'sweep_trap_signals() {'
-	'_sweep_on_signal() {'
-	'sweep_err_trap() {'
-	'sweep_outcome_cut_short() {'
-	'sweep_outcome_brief() {'
-	'sweep_outcome_pooled() {'
 	'tsv_end_line() {'
-	'sweep_outcome_on_exit() {'
 	'md_cell() {'
 	'function md_cell('
 	'yaml_str() {'
 	'file_min_bytes() {'
-	# one run per sweep dir, signals reach a sweep's step, one harness
-	# per sweep and per report (common.sh); a controlplane cell's attempts and states
-	# (common.sh CP_CELL_AWK); the Istio CR generations a sweep reads again (preamble.sh)
-	'sweep_step() {'
-	'sweep_lock() {'
-	'_sweep_unlock() {'
-	'harness_sha_for_sweep() {'
-	'report_harness_sha() {'
-	# a sweep's harness read again before its steps and at its end; its step's whole
-	# process tree stopped on a signal; a stale lock taken over by one run (common.sh)
-	'harness_sha_check() {'
-	'_harness_sha_sweep_end() {'
-	'_sweep_tree_read() {'
-	'_sweep_tree_freeze() {'
-	'_sweep_step_stop() {'
-	'sweep_step_kill() {'
-	'_sweep_step_reap() {'
-	'_sweep_pid_alive() {'
-	'_sweep_lock_refuse() {'
-	'_sweep_lock_release_mutex() {'
+	# a controlplane cell's states (common.sh CP_CELL_AWK); the Istio CR generations a
+	# sweep reads again (preamble.sh)
 	'function cp_header('
 	'function cp_isrow('
 	'function cp_key('
@@ -319,18 +301,7 @@ EXTRACTED_PATTERNS=(
 	'istio_version_refresh() {'
 	'_istio_proxy_versions_run() {'
 	'_istio_proxy_versions_cleanup() {'
-	# the harness content key (common.sh); the sweep settings checked at its start; a lock
-	# written in two steps; a stop without a working ps; the one JSON string escaper
-	'harness_read() {'
-	'harness_content_key() {'
-	'_harness_same_files() {'
-	'harness_same() {'
-	'sweep_settings_check() {'
-	'_sweep_lock_pid() {'
-	'_sweep_ps_works() {'
-	'_sweep_ps_check() {'
-	'_sweep_ps_table() {'
-	'_sweep_kill_hint() {'
+	# the one JSON string escaper (common.sh)
 	'JSON_STR_AWK='
 	'function js('
 	# an in-pod load stopped with its probe, or waited out after its exec failed (fortio.sh)

@@ -225,8 +225,8 @@ _conc_kubectl() {
 	cd "$BATS_TEST_TMPDIR"
 	run harness_sha
 	[ "$status" -eq 0 ]
-	# A tree with uncommitted changes adds -dirty.<8hex> (tests/lib/test/common.bats).
-	[[ "$output" == "$expected" || "$output" =~ ^"${expected}"-dirty\.[0-9a-f]{8}$ ]]
+	# A tree with uncommitted changes adds -dirty (tests/lib/test/sweep.bats).
+	[[ "$output" == "$expected" || "$output" == "${expected}-dirty" ]]
 }
 
 @test "harness_sha: non-repo ROOT -> unknown" {
@@ -758,7 +758,7 @@ setup() {
 }
 
 # _iv_recheck: resolve (members per IV_*; no readiness wait), then apply the END_*
-# overrides and recheck; print the sweep_outcome arguments it returned, one per line.
+# overrides and recheck; print the sweep_finish arguments it returned, one per line.
 _iv_recheck() {
 	(
 		unset ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT _ISTIO_VERSION_RESOLVED
@@ -779,7 +779,7 @@ _iv_recheck() {
 	assert_success
 	assert_output ""
 	[ -z "$stderr" ]
-	# b runs another version at the end: a problem (the sweep fails). sweep_outcome prints
+	# b runs another version at the end: a problem (the sweep fails). sweep_finish prints
 	# it, once; the recheck itself prints nothing.
 	IV_a=v1.30.5 IV_b=v1.30.5 END="IV_b=v1.31.0" run --separate-stderr _iv_recheck a,b
 	assert_success
@@ -835,7 +835,7 @@ _iv_recheck() {
 	refute_output --partial unconfirmed
 	local -a args=()
 	mapfile -t args < <(IV_a=v1.30.5 END="IV_a=v1.30.6 IVSTATE_a=IstiodNotReady IVDEP_a=fail" _iv_recheck a 2>/dev/null)
-	run --separate-stderr sweep_outcome "${args[@]}" 3
+	run --separate-stderr sweep_finish "${args[@]}" 3
 	assert_failure 4
 	# The same version: unconfirmed, a note; the sweep does not fail.
 	IV_a=v1.30.5 END="IVSTATE_a=IstiodNotReady IVDEP_a=fail" run --separate-stderr _iv_recheck a
@@ -865,13 +865,13 @@ _iv_recheck() {
 	assert_line --index 5 "not ready at the end: IstiodNotReady on 1 member (b)"
 	assert_line --index 7 "not ready at the end: rolling (an istiod rollout in progress, or old istiod pods still terminating) on 1 member (d)"
 	refute_output --partial -- "--problem"
-	# Through sweep_outcome: warnings, exit 0.
+	# Through sweep_finish: notes, exit 0.
 	local -a args=()
 	mapfile -t args < <(IV_a=v1.30.5 END="IVSTATE_a=IstioCNINotHealthy" _iv_recheck a 2>/dev/null)
-	run --separate-stderr sweep_outcome "${args[@]}" 3
+	run --separate-stderr sweep_finish "${args[@]}" 3
 	assert_success
 	assert_output "All 3 cells ran (their rows' own statuses are in the report)."
-	[[ "$stderr" == "warning: istiod or IstioCNI was not ready at the end of the sweep, on the same Istio version: "*$'\n'"warning: not ready at the end: IstioCNINotHealthy on 1 member (a)." ]]
+	[[ "$stderr" == "note: istiod or IstioCNI was not ready at the end of the sweep, on the same Istio version: "*$'\n'"note: not ready at the end: IstioCNINotHealthy on 1 member (a)." ]]
 	# Another version while not ready, or rolling out another version, is still a change.
 	IV_a=v1.30.5 END="IV_a=v1.31.0 IVSTATE_a=IstiodNotReady" run --separate-stderr _iv_recheck a
 	assert_line --index 0 -- "--problem"
@@ -894,7 +894,9 @@ _iv_recheck() {
 		write_preamble "probe" "${d}/run.tsv" "${kv[@]}"
 		local -a out=()
 		istio_version_recheck out _iv_kubectl
-		sweep_outcome "${out[@]}" --run-id r2-run --record "$d" 2 2>/dev/null
+		harness_sha() { echo h1; }
+		sweep_start "$d" r2-run
+		sweep_finish "${out[@]}" 2 2>/dev/null
 	)
 	run grep -x '# ISTIO_NOTREADY_AT_START=b=IstioCNINotHealthy' "${d}/run.tsv"
 	assert_success
@@ -920,7 +922,9 @@ _iv_recheck() {
 		write_preamble "probe" "${d}/run.tsv" "${kv[@]}"
 		local -a out=()
 		istio_version_recheck out _iv_kubectl
-		sweep_outcome ${out[@]+"${out[@]}"} --run-id r2-run --record "$d" 2 >/dev/null
+		harness_sha() { echo h1; }
+		sweep_start "$d" r2-run
+		sweep_finish ${out[@]+"${out[@]}"} 2 >/dev/null
 	)
 	run grep -x '# ISTIO_NOTREADY_AT_START=none' "${d}/run.tsv"
 	assert_success

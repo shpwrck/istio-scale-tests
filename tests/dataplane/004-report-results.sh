@@ -57,21 +57,11 @@ Usage: $(basename "$0") [options]
                      --config > environment > default.
   --results-dir DIR  Results directory (default: ${DATAPLANE_RESULTS_DIR}). Every
                      latency-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
-                     Run on the parent of one sweep dir (no sweep-outcome.txt of its
-                     own), the report repeats no outcome, but a note names that sweep's
-                     record when it did not end cleanly, as --allow-multi-run's does.
   --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
-                     (csv # POOLED_HARNESS_CONTENT_KEYS= and json harness_content_key
-                     also their HARNESS_CONTENT_KEY values); its note says when the
-                     HARNESS_SHA values differ only in git describe (every run records
-                     one key). It repeats no sweep-outcome.txt of a sweep-* dir below the
-                     results dir (report each sweep alone to see it), but its note names
-                     each one that has not finished, was interrupted, stopped early or
-                     records a PROBLEM (json pooled_sweep_outcomes), and so does a
-                     warning on stderr.
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values,
+                     and repeats the sweep-outcome.txt of each pooled sweep.
   --format FMT       Output format: text, csv, markdown (or md), json, charts
                      (default: text).
   --fail-on-unreachable
@@ -115,31 +105,21 @@ The HTTP 200 share prints as a percentage in text and markdown (100.00%); csv an
 json keep it a 0-1 ratio, avg_http_200_ratio (avg_pct_200: same value, old name).
 A FAILED or UNREACHABLE row measured nothing: its QPS and latencies are N/A.
 
-When the results dir holds sweep-outcome.txt (003 writes it), every format repeats
-it, with the run that recorded it: the failed cells by reason, its problems (the Istio
-version, the active revision or the generation of the Istio CR or its active
-IstioRevision changed under the sweep, or the end-of-sweep check failed) and notes
-(members not ready at its start or end, proxies on another version). The sweep writes
-it at its start as "not finished" (EXIT=unfinished) and replaces it at its end: while
-it says not finished (the sweep died, or still runs), every format says "this sweep
-has not finished" (json sweep_outcome: "exit": null, "unfinished": true, "started_at";
-a finished one reads "unfinished": false). One interrupted (Ctrl-C, SIGTERM, SIGHUP)
-says when and by which signal (json "interrupted_at", "interrupted_by"), and one that
-stopped on an error after its start shows the stop and its reason, as any stop. A
-sweep dir without the file is from a sweep that stopped before its start (nothing
-ran), or from an older harness.
+Each dir that holds input TSVs and a sweep-outcome.txt (003 writes it: STATUS=running
+at its start, its outcome at its end) gets that record repeated in every format (json
+sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something
+to say): a sweep that has not finished (it died, or still runs), was interrupted or
+stopped early, its failed cells by reason, its problems (the Istio version, the active
+revision or the generation of the Istio CR or its active IstioRevision changed under
+the sweep, the end-of-sweep check failed, or the harness changed) and notes (members
+not ready at its start or end, proxies on another version).
 
 The preamble list includes ISTIO_PROXY_VERSIONS (the proxy versions connected to each
 member's istiod at the start) next to ISTIO_ACTIVE_REVISIONS.
 
-REPORT_HARNESS_SHA (every format, after the preamble's HARNESS_SHA): the harness this
-report ran on, which can differ from HARNESS_SHA, the harness that measured the rows:
-a report made again later, or from another checkout, may count rows by other rules.
-The results dir it reads does not count as a change to it. HARNESS_CONTENT_KEY (in the
-preamble list; unknown for a TSV written before it): the content key of the harness
-files the rows ran on. Inputs whose HARNESS_SHA differs but that share one key differ
-only in git describe (a commit or tag that left the harness files as they were), not
-in the harness.
+HARNESS_SHA (in the preamble list): the harness that measured the rows (git describe,
+-dirty with local changes); mixed:<a>,<b> with a warning when the inputs ran on more
+than one.
 
 Environment:
   DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
@@ -206,26 +186,6 @@ fi
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
-# A pooled report repeats only its results dir's own sweep-outcome.txt
-# (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
-# and names each pooled sweep whose record has not finished, was interrupted, stopped early
-# or holds a PROBLEM (sweep_outcome_pooled): text, md, charts, csv; json pooled_sweep_outcomes.
-# One run on the parent dir of its sweep (no record of its own) repeats none either: the
-# same note, alone, names that sweep's record when it did not end cleanly.
-POOLED_OUTCOME_NOTE=""
-POOLED_SWEEP_OUTCOMES=""
-if [[ -n "$POOLED_NOTE" ]]; then
-	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
-	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
-	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE+=" Pooled sweep records that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
-	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
-elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/sweep-outcome.prev.txt" ]]; then
-	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
-	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
-fi
-# The same list on stderr (as controlplane's data warning), in sight when the report goes
-# to a file.
-[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || echo "warning: sweep records below ${RESULTS_DIR} that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }; report each sweep dir alone to see its outcome" >&2
 
 # The preamble (# KEY=VALUE and # KEY[x]=VALUE lines) of every input, each key merged over
 # the files that carry it: one value, or mixed:a,b when it varies (per-probe keys such as
@@ -264,8 +224,11 @@ REPORT_WARNINGS="$(platform_report_warnings "${TSV_FILES[@]}")"
 KIND_PATH_WARNING="$(platform_kind_path_warning "$(sed -n 's/^NODE_PROVIDER_BY_CONTEXT=//p' <<<"$PLATFORM_VALUES")" \
 	"remote latency and the remote-minus-local delta are not a cloud load balancer's; quote them from cloud clusters only.")"
 [[ -z "$KIND_PATH_WARNING" ]] || { echo "WARNING: ${KIND_PATH_WARNING}" >&2; REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}${KIND_PATH_WARNING}"; }
-# This report's own harness, every format; the results dir it reads is no change to it.
-PREAMBLE+=("REPORT_HARNESS_SHA=$(report_harness_sha --exclude "$RESULTS_DIR")")
+# One warning, every format, when the inputs ran on more than one harness.
+for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
+	[[ "$kv" == HARNESS_SHA=mixed:* ]] || continue
+	REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}the inputs ran on different harnesses (HARNESS_SHA ${kv#HARNESS_SHA=mixed:}), so their rows may not all be measured the same way"
+done
 
 # AWK aggregation: group by (mesh_size, qps_target, target_class).
 # Counts:
@@ -721,8 +684,7 @@ report_text() {
 	echo ""
 	[[ -z "$REPORT_WARNINGS" ]] || { platform_warning_lines text "$REPORT_WARNINGS"; echo ""; }
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf 'NOTE: %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
-	sweep_outcome_recorded "$RESULTS_DIR" text
+	sweep_outcome_lines text "${TSV_FILES[@]}"
 	echo "Files: ${TSV_FILES[*]}"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Numeric averages exclude rows with"
 	echo "status != OK or istiod_restarted != 0. n_total and n_valid are reported per cell."
@@ -756,8 +718,7 @@ report_csv() {
 	for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do echo "# $kv"; done
 	platform_warning_lines comment "$REPORT_WARNINGS"
 	config_multi_run_csv
-	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
-	sweep_outcome_recorded "$RESULTS_DIR" csv
+	sweep_outcome_lines csv "${TSV_FILES[@]}"
 	echo "# LOCAL_BASELINE=${LB_VERDICT}"
 	((LB_LEGACY_FILES > 0)) && echo "# LOCAL_BASELINE_FILES_WITHOUT_MIN_QPS_RATIO=${LB_LEGACY_FILES}"
 	local c m q _t _v verdict reason _rest
@@ -872,8 +833,7 @@ report_markdown() {
 	echo ""
 	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
-	sweep_outcome_recorded "$RESULTS_DIR" md
+	sweep_outcome_lines md "${TSV_FILES[@]}"
 	echo "Aggregated by (mesh_size, qps_target, target_class). Rows with status != OK or"
 	echo "istiod_restarted != 0 are excluded from numeric averages."
 	echo ""
@@ -1023,12 +983,10 @@ report_json() {
 		--argjson no_valid "$RV_NO_VALID" \
 		--slurpfile istiod_diag <(printf '%s\n' "$diag_json") \
 		--argjson pooled_runs "$(config_multi_run_json)" \
-		--argjson pooled_sweep_outcomes "$(printf '%s' "$POOLED_SWEEP_OUTCOMES" | jq -Rn '[inputs]')" \
-		--argjson sweep_outcome "$(sweep_outcome_recorded "$RESULTS_DIR" json)" \
+		--argjson sweep_outcomes "$(sweep_outcome_lines json "${TSV_FILES[@]}")" \
 		'def one($x; $name): if ($x | length) == 1 then $x[0] else error("dataplane report: \($name) is not one JSON value") end;
 		{metadata: one($metadata; "metadata"), warnings: one($warnings; "warnings"),
-		  pooled_runs: $pooled_runs, pooled_sweep_outcomes: $pooled_sweep_outcomes,
-		  sweep_outcome: $sweep_outcome,
+		  pooled_runs: $pooled_runs, sweep_outcomes: $sweep_outcomes,
 		  summary: {n_total: $n_total, n_valid: $n_valid, n_dropped: $n_dropped,
 		            n_skipped_unreachable: $n_skipped,
 		            n_placeholder: $n_placeholder, placeholders: one($placeholders; "placeholders"),
@@ -1054,7 +1012,7 @@ report_charts() {
 	echo ""
 	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
+	sweep_outcome_lines charts "${TSV_FILES[@]}"
 	# Name every local point that is drawn as 0 because it has no valid sample, and
 	# every one that averages OK rows below the QPS ratio (legacy TSVs).
 	local c m q _t _v verdict reason _qa _qr _srep _remote _sts nbr _unr lb_notes=0

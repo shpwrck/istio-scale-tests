@@ -4,7 +4,9 @@
 # before the window's lines; a Running istiod pod that is not Ready is named on the console;
 # each member's istiod Deployment is read once a window (resolve_pods), and read again at
 # the rows only when that read lacks a limit; a window into a TSV that exists reads nothing
-# for its preamble.
+# for its preamble. A standalone 002 refuses a --mesh-size larger than its contexts; its
+# config_dump samples are taken once per context in a window; a --phase final's scrape
+# skew is the spread of the baseline's completion stamps.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -148,4 +150,97 @@ deploy_reads() {
 	# `kubectl top` summed).
 	[ "$(col istiod_mem_pct_of_limit)" = "$(printf '93 %.0s' {1..11})93" ]
 	[ "$(col istiod_cpu_pct_of_limit)" = "$(printf '75 %.0s' {1..11})75" ]
+}
+
+@test "a standalone 002 refuses a --mesh-size larger than its contexts before any read" {
+	PATH="${BIN}:${PATH}" run --separate-stderr bash "${CP}/002-collect-resource-metrics.sh" \
+		--contexts ci-a --mesh-size 2 --dry-run
+	[ "$status" -eq 1 ]
+	[[ "$stderr" == *"--mesh-size 2 is larger than the 1 context(s) given (ci-a)"*"(INCOMPLETE). Give a context per member, or a smaller --mesh-size."* ]]
+}
+
+# ---------------------------------------------------------------------------
+# 002 run alone: its config_dump samples and scrape skew
+
+# _cp002_stub: a kubectl for controlplane 002 run alone, logging every call to KLOG: two
+# Running istiod pods per context, one Running controlplane-test pod (ns1/sc-1) whose
+# /config_dump answers a fixture body, the Istio CR as fake-istio-cr.sh; a curl that
+# serves one /metrics body and /ready.
+_cp002_stub() {
+	export FX="${ROOT}/tests/lib/test/fixtures/istiod-diag" KLOG="${BATS_TEST_TMPDIR}/kubectl.log"
+	: > "$KLOG"
+	cat > "${BIN}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$KLOG"
+case " $* " in
+*" get istios.sailoperator.io default "* | *" get istiorevisions.sailoperator.io "* | *" get deployments.apps istiod -o json "*)
+	exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;;
+*" -n istio-system get pods -l app=istiod --field-selector=status.phase=Running "*) printf 'istiod-abc-x1 istiod-abc-x2\n' ;;
+*" -l app.kubernetes.io/instance=controlplane-test -o jsonpath="*) printf 'ns1|sc-1\n' ;;
+*" exec sc-1 "*) cat "$FX/../fortio_ok.json" ;;
+*" -o json "*) cat "$FX/empty_list.json" ;;
+*) exit 1 ;;
+esac
+STUB
+	cat > "${BIN}/curl" <<'STUB'
+#!/usr/bin/env bash
+out="" url=""
+while (($#)); do
+	case "$1" in
+	-o) out="$2"; shift 2 ;;
+	http://*) url="$1"; shift ;;
+	*) shift ;;
+	esac
+done
+case "$url" in
+*/metrics) body="$FX/pre_metrics.txt" ;;
+*/ready) echo LIVE; exit 0 ;;
+*/debug/syncz) echo '[]'; exit 0 ;;
+*) exit 7 ;;
+esac
+if [[ -n "$out" ]]; then cp "$body" "$out"; else cat "$body"; fi
+STUB
+	chmod +x "${BIN}/kubectl" "${BIN}/curl"
+}
+
+# _cp002 <args...>: controlplane 002 with the stubs, its TSV under res/.
+_cp002() {
+	PATH="${BIN}:${PATH}" run --separate-stderr "${CP}/002-collect-resource-metrics.sh" \
+		--settle 0 --output-dir "${BATS_TEST_TMPDIR}/res" "$@"
+}
+
+# _cp002_col <name>: that column of every row of the one TSV under res/.
+_cp002_col() {
+	awk -F'\t' -v n="$1" '$1 == "timestamp" { for (i = 1; i <= NF; i++) if ($i == n) c = i; next } !/^#/ && c { print $c }' \
+		"$(find "${BATS_TEST_TMPDIR}/res" -maxdepth 1 -name 'controlplane-*.tsv')"
+}
+
+@test "the config_dump samples are taken once per context in a window, not once per istiod replica: each replica's row shows the same samples" {
+	_cp002_stub
+	_cp002 --contexts ci-a --config-dump-samples 1
+	assert_success
+	# Two istiod replicas, two rows; one pod list and one exec for both.
+	[ "$(_cp002_col context | wc -l)" -eq 2 ]
+	[ "$(grep -c 'controlplane-test -o jsonpath=' "$KLOG")" -eq 1 ]
+	[ "$(grep -c ' exec sc-1 ' "$KLOG")" -eq 1 ]
+	[ "$(_cp002_col sidecar_config_bytes_samples | sort -u)" = 1/1 ]
+	local avg
+	avg="$(_cp002_col sidecar_config_bytes_avg | sort -u)"
+	[[ "$avg" =~ ^[1-9][0-9]*$ ]]
+}
+
+@test "a --phase final's scrape skew is the spread of the baseline's completion stamps (.tsend), as in a combined run, not of its start stamps" {
+	_cp002_stub
+	local st="${BATS_TEST_TMPDIR}/state" k
+	_cp002 --contexts ci-a,ci-b --phase baseline --state-dir "$st" --config-dump-samples 0
+	assert_success
+	# Four baseline scrapes (2 contexts x 2 replicas) that started together and finished 3 s apart.
+	for k in 0 1 2 3; do
+		echo 1000 > "${st}/baseline-${k}.ts"
+		echo $(( 1000 + k * 3000 )) > "${st}/baseline-${k}.tsend"
+	done
+	_cp002 --contexts ci-a,ci-b --phase final --state-dir "$st" --config-dump-samples 0
+	assert_success
+	[ "$(_cp002_col context | wc -l)" -eq 4 ]
+	[ "$(_cp002_col scrape_skew_ms | sort -u)" = 9000 ]
 }

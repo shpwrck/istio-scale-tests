@@ -48,20 +48,11 @@ Usage: $(basename "$0") [options]
                      --config > environment > default.
   --results-dir DIR  Results directory (default: ${CHURN_RESULTS_DIR}). Every
                      churn-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
-                     Run on the parent of one sweep dir (no sweep-outcome.txt of its
-                     own), the report repeats no outcome, but a note names that sweep's
-                     record when it did not end cleanly, as --allow-multi-run's does.
   --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
                      with different run ids). Without it the report stops, lists the
                      runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
-                     (csv # POOLED_HARNESS_CONTENT_KEYS= also their HARNESS_CONTENT_KEY
-                     values); its note says when the HARNESS_SHA values differ only in
-                     git describe (every run records one key). It repeats no
-                     sweep-outcome.txt of a sweep-* dir below the results dir (report each
-                     sweep alone to see it), but its note names each one that has not
-                     finished, was interrupted, stopped early or records a PROBLEM, and
-                     so does a warning on stderr.
+                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values,
+                     and repeats the sweep-outcome.txt of each pooled sweep.
   --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
@@ -97,26 +88,16 @@ from this checkout: "unknown (not recorded)" for a TSV written before 002 record
 them; inputs that differ read mixed:<value>,<value> with each distinct value once
 (mixed:v1.30.5,v1.29.0, also when one run's own value was mixed:v1.30.5/v1.29.0).
 istio_version is each member's active IstioRevision .spec.version as 002 read it
-(istio_version_by_context: which member ran which).
-report_harness_sha (every format; csv REPORT_HARNESS_SHA) is the harness this report
-ran on, which can differ from harness_sha, the harness that measured the rows: a
-report made again later, or from another checkout, may count rows by other rules. The
-results dir it reads does not count as a change to it. harness_content_key (every
-format; csv HARNESS_CONTENT_KEY) is the content key of the harness files the rows ran
-on, "unknown (not recorded)" for a TSV written before it. When harness_sha differs
-between inputs that share one key, they differ only in git describe (a commit or tag
-that left the harness files as they were): stderr gives a note instead of the
-"disagree" warning.
-When the results dir holds sweep-outcome.txt (003 writes it), text, csv and md
-repeat it, with the run that recorded it: the failed cells by reason, its problems
-(the Istio version, the active revision or the generation of the Istio CR or its
-active IstioRevision changed under the sweep, or the end-of-sweep check failed) and
-notes (members not ready at its start or end). The sweep writes it at its start as
-"not finished" (EXIT=unfinished) and replaces it at its end: a record still not
-finished is a sweep that died or still runs, or one interrupted (Ctrl-C, SIGTERM,
-SIGHUP), with when and by which signal; one that stopped on an error after its start
-shows the stop and its reason. A sweep dir without the file is from a sweep that
-stopped before its start (nothing ran), or from an older harness.
+(istio_version_by_context: which member ran which). A mixed harness_sha (the inputs
+ran on more than one harness) adds a warning in every format.
+Each dir that holds input TSVs and a sweep-outcome.txt (003 writes it: STATUS=running
+at its start, its outcome at its end) gets that record repeated in every format (csv
+"# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something to say): a sweep
+that has not finished (it died, or still runs), was interrupted or stopped early, its
+failed cells by reason, its problems (the Istio version, the active revision or the
+generation of the Istio CR or its active IstioRevision changed under the sweep, the
+end-of-sweep check failed, or the harness changed) and notes (members not ready at
+its start or end).
 Histogram p99 columns (queue time, push time) show the worst bucket any valid row
 hit, or "overflow (N rows)" when N rows had their p99 above the highest finite bucket;
 csv adds worst_bucket and n_overflow columns.
@@ -191,26 +172,6 @@ fi
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${TSV_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
-# A pooled report repeats only its results dir's own sweep-outcome.txt
-# (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
-# and names each pooled sweep whose record has not finished, was interrupted, stopped early
-# or holds a PROBLEM (sweep_outcome_pooled): text, md, charts and csv.
-# One run on the parent dir of its sweep (no record of its own) repeats none either: the
-# same note, alone, names that sweep's record when it did not end cleanly.
-POOLED_OUTCOME_NOTE=""
-POOLED_SWEEP_OUTCOMES=""
-if [[ -n "$POOLED_NOTE" ]]; then
-	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
-	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
-	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE+=" Pooled sweep records that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
-	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
-elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/sweep-outcome.prev.txt" ]]; then
-	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${TSV_FILES[@]}")"
-	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
-fi
-# The same list on stderr (as controlplane's data warning), in sight when the report goes
-# to a file.
-[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || echo "warning: sweep records below ${RESULTS_DIR} that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }; report each sweep dir alone to see its outcome" >&2
 
 # Every format reads the rows through churn_rows, which re-derives the status of a row
 # an older 002 wrote as OK with no number in a measured column, so it
@@ -250,10 +211,9 @@ preamble_get() {
 # every input TSV, never read from this checkout or environment: the report may run on
 # another commit than the probe. A file without the line (written before 002 recorded
 # the key) reads "unknown (not recorded)"; inputs that differ give mixed:a,b
-# (config_input_value: each distinct value once) plus a stderr warning (PL26), or with
-# <note>, a note that ends with it instead.
+# (config_input_value: each distinct value once) plus a stderr warning (PL26).
 run_meta() {
-	local key="$1" note="${2:-}" v n
+	local key="$1" v n
 	v="$(config_input_value "$key" "unknown (not recorded)" "${TSV_FILES[@]}")"
 	[[ -n "$v" ]] || v="unknown (not recorded)"
 	# How many inputs differ: one file's own mixed:a/b is not a disagreement, nor v1.30.5
@@ -272,27 +232,11 @@ run_meta() {
 		exit
 	}' "${TSV_FILES[@]}")"
 	if [[ "$v" == mixed:* ]] && ((n >= 2)); then
-		if [[ -n "$note" ]]; then
-			echo "note: the input TSVs' ${key} values (${v#mixed:}) ${note}" >&2
-		else
-			echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
-		fi
+		echo "warning: input TSVs disagree on ${key} (${v#mixed:}); the report mixes runs" >&2
 	fi
 	echo "$v"
 }
-# The content key of the harness files the rows ran on. HARNESS_SHA values that differ
-# while every input records one key differ only in git describe (a commit or tag that left
-# the harness files as they were): a note, not the warning. A TSV without the key keeps
-# the warning.
-HARNESS_CONTENT_KEY_M="$(run_meta HARNESS_CONTENT_KEY)"
-_hs_note=""
-case "$HARNESS_CONTENT_KEY_M" in
-mixed:* | unknown*) ;;
-*) _hs_note="differ only in git describe (a commit or tag that left the harness files as they were): every input records HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY_M}, the same harness files" ;;
-esac
-HARNESS_SHA_M="$(run_meta HARNESS_SHA "$_hs_note")"
-# This report's own harness, every format; the results dir it reads is no change to it.
-REPORT_HARNESS_SHA_M="$(report_harness_sha --exclude "$RESULTS_DIR")"
+HARNESS_SHA_M="$(run_meta HARNESS_SHA)"
 ISTIO_VERSION_M="$(run_meta ISTIO_VERSION)"
 # Where ISTIO_VERSION came from (live: each member's active IstioRevision; pin:
 # config only), the configured pin and which member ran which (PL19); files written
@@ -322,6 +266,9 @@ PLATFORM_VALUES+=$'\n'"KUBE_VERSIONS=$(platform_merge_by_context KUBE_VERSIONS "
 # Every format's body repeats their warnings (inputs that disagree, a build that changed during
 # the sweep, a value not read; PL19).
 REPORT_WARNINGS="$(platform_report_warnings --with KUBE_VERSIONS "${TSV_FILES[@]}")"
+# One warning, every format, when the inputs ran on more than one harness.
+[[ "$HARNESS_SHA_M" != mixed:* ]] \
+	|| REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}the inputs ran on different harnesses (HARNESS_SHA ${HARNESS_SHA_M#mixed:}), so their rows may not all be measured the same way"
 
 # TSV schema (21 columns):
 #  $1  run_id
@@ -350,11 +297,8 @@ report_text() {
 	echo "=== Churn Convergence Results ==="
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf 'NOTE: %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
-	sweep_outcome_recorded "$RESULTS_DIR" text
+	sweep_outcome_lines text "${TSV_FILES[@]}"
 	echo "# harness_sha (recorded by 002): ${HARNESS_SHA_M}"
-	echo "# harness_content_key (recorded by 002): ${HARNESS_CONTENT_KEY_M}"
-	echo "# report_harness_sha (this report's own): ${REPORT_HARNESS_SHA_M}"
 	echo "# istio_version (recorded by 002): ${ISTIO_VERSION_M}  source: ${ISTIO_VERSION_SOURCE_M}  pin: ${ISTIO_VERSION_PIN_M}"
 	echo "# istio_version_by_context: ${ISTIO_VERSION_BY_CONTEXT_M}"
 	echo "# istio_notready_at_start: ${ISTIO_NOTREADY_AT_START_M}  istio_ready_waited_sec: ${ISTIO_READY_WAITED_SEC_M}"
@@ -469,8 +413,6 @@ report_text() {
 
 report_csv() {
 	echo "# HARNESS_SHA=${HARNESS_SHA_M}"
-	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY_M}"
-	echo "# REPORT_HARNESS_SHA=${REPORT_HARNESS_SHA_M}"
 	echo "# ISTIO_VERSION=${ISTIO_VERSION_M}"
 	echo "# ISTIO_VERSION_SOURCE=${ISTIO_VERSION_SOURCE_M}"
 	echo "# ISTIO_VERSION_PIN=${ISTIO_VERSION_PIN_M}"
@@ -487,8 +429,7 @@ report_csv() {
 	platform_report_lines comment "$PLATFORM_VALUES"
 	platform_warning_lines comment "$REPORT_WARNINGS"
 	config_multi_run_csv
-	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
-	sweep_outcome_recorded "$RESULTS_DIR" csv
+	sweep_outcome_lines csv "${TSV_FILES[@]}"
 	# worst_bucket / n_overflow: histogram p99 metrics only (the highest bucket a valid
 	# row hit, "overflow" when a row's p99 was in +Inf; n counts the numeric rows).
 	echo "mesh_size,churn_intensity,base_replicas,scale_to,metric,n,min,max,avg,worst_bucket,n_overflow"
@@ -604,12 +545,7 @@ in the `+Inf` bucket (above the histogram's highest finite bucket); `N/A` means 
 p99. `harness_sha` and `istio_version` in the front matter are what `002` recorded in the
 TSVs (`unknown (not recorded)` for a TSV written before it recorded them, `mixed:a,b` when
 the inputs differ, each distinct value once), not the commit or pin of the host that ran
-this report. `report_harness_sha` in the front matter is that commit: the harness this
-report ran on (`<describe>-dirty.<8hex>` with uncommitted changes; the results dir it reads
-does not count), which can differ from `harness_sha`: a report made again later, or from
-another checkout, may count rows by other rules. `harness_content_key` is the content key of
-the harness files the rows ran on: inputs whose `harness_sha` differs but that share one key
-differ only in git describe (a commit or tag that left the harness files as they were).
+this report.
 
 | Column | Units | Source | Definition / caveats |
 |--------|-------|--------|----------------------|
@@ -665,8 +601,6 @@ report_markdown() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${harness_sha}")"
-	echo "harness_content_key: $(yaml_str "${HARNESS_CONTENT_KEY_M}")"
-	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "tuning_baseline: $(yaml_str "$(preamble_get TUNING_BASELINE)")"
 	echo "sidecar_egress_hosts: $(yaml_str "$(preamble_get SIDECAR_EGRESS_HOSTS)")"
@@ -679,8 +613,7 @@ report_markdown() {
 	echo ""
 	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
-	sweep_outcome_recorded "$RESULTS_DIR" md
+	sweep_outcome_lines md "${TSV_FILES[@]}"
 	echo "| Axis | Values |"
 	echo "|------|--------|"
 	echo "| mesh_sizes | ${sweep_mesh} |"
@@ -810,8 +743,6 @@ report_charts() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "istio_proxy_versions: $(yaml_str "${ISTIO_PROXY_VERSIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_M}")"
-	echo "harness_content_key: $(yaml_str "${HARNESS_CONTENT_KEY_M}")"
-	echo "report_harness_sha: $(yaml_str "${REPORT_HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
@@ -823,7 +754,7 @@ report_charts() {
 	echo ""
 	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
+	sweep_outcome_lines charts "${TSV_FILES[@]}"
 	churn_rows | awk -F'\t' '
 	# Charts average each series per mesh size over valid rows only ($21=="OK").
 	# A value of TIMEOUT or N/A is not a sample. Mermaid xychart cannot draw a gap,

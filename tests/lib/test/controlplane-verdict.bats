@@ -1,17 +1,17 @@
 #!/usr/bin/env bats
 # Controlplane 004's verdict and provenance, through the entrypoint (PL33; fixture TSVs, no
-# cluster): rows in the figures from more than one harness turn a PASS into CAUTION
-# whatever the sweep outcome records; so does a window that ran on fewer istiod pods than
-# its member's Deployment wants (WINDOW_ROWS <n>/<spec>), while a line without /<spec>
-# below the preamble's replicas is a warning only; the "could not count the sweep's cells"
-# PROBLEM is not counted; a pooled report counts each pooled sweep's outcome and names it;
-# HARNESS_CONTENT_KEY in every format and the envelope; the scaling json escapes a quote and
-# a backslash; a row cut short is no row (its cell INCOMPLETE); and inputs of several Istio
-# versions, or rows of a run that recorded no harness, turn a PASS into CAUTION.
+# cluster): a window that ran on fewer istiod pods than its member's Deployment wants
+# (WINDOW_ROWS <n>/<spec>) turns a PASS into CAUTION, while a line without /<spec> below the
+# preamble's replicas is a warning only; a cell cut short while its member rows were written
+# (INCOMPLETE: rows of fewer members than its mesh size, or in a TSV without WINDOW_ROWS a
+# member with fewer rows than its istiod replicas) turns a PASS into CAUTION, but never in
+# a standalone 002 run; a sweep outcome that is not clean, in any input dir, turns a PASS
+# into CAUTION; the scaling json escapes a quote and a backslash; a row cut short is no row
+# (its cell INCOMPLETE); and inputs of several Istio versions turn a PASS into CAUTION,
+# while several harnesses only warn.
 
 bats_require_minimum_version 1.5.0
 load test_helper
-source "${ROOT}/tests/lib/envelope.sh"
 
 REPORT="${ROOT}/tests/controlplane/004-report-results.sh"
 FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
@@ -23,16 +23,14 @@ setup() {
 	TSV="${RES}/controlplane-fixture-t2.tsv"
 }
 
-# cp_tsv <file> <second WINDOW_ROWS> <mesh-b rows in it> [line before it]: the fixture's
-# preamble (plus HARNESS_CONTENT_KEY=111111111111 and ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,
-# mesh-b=3) and two cells (15 and 30 services) of valid rows, each member 3 rows a window
-# (mesh-b <n> in the second).
+# cp_tsv <file> <second WINDOW_ROWS> <mesh-b rows in it>: the fixture's preamble (plus
+# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,mesh-b=3) and two cells (15 and 30 services) of valid
+# rows, each member 3 rows a window (mesh-b <n> in the second).
 cp_tsv() {
-	awk -F'\t' -v OFS='\t' -v w2="$2" -v nb="$3" -v x="${4:-}" '
+	awk -F'\t' -v OFS='\t' -v w2="$2" -v nb="$3" '
 	function row(at, s, m, n,    i) { for (i = 1; i <= n; i++) { $0 = t; $1 = "2026-06-01T" at ":00+00:00"; $2 = m; $4 = s; $31 = 0; print } }
 	/^#/ {
 		print
-		if (index($0, "# HARNESS_SHA=") == 1) print "# HARNESS_CONTENT_KEY=111111111111"
 		if (index($0, "# ISTIOD_REPLICAS=") == 1) print "# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,mesh-b=3"
 		next
 	}
@@ -40,9 +38,31 @@ cp_tsv() {
 	t == "" { t = $0 }
 	END {
 		print "# WINDOW_ROWS=mesh-a=3/3,mesh-b=3/3"; row("00:00", 15, "mesh-a", 3); row("00:00", 15, "mesh-b", 3)
-		if (x != "") print x
 		print "# WINDOW_ROWS=" w2; row("00:10", 30, "mesh-a", 3); row("00:10", 30, "mesh-b", nb)
 	}' "$FIXTURE" > "$1"
+}
+
+# no_window_rows <file>: <file> without its WINDOW_ROWS lines (an older harness).
+no_window_rows() {
+	sed '/^# WINDOW_ROWS=/d' "$1" > "${1}.new"
+	mv "${1}.new" "$1"
+}
+
+# pooled <base>: two sweep dirs under <base>, run-a and run-b, each a cp_tsv of valid rows.
+pooled() {
+	local s
+	for s in a b; do
+		mkdir -p "${1}/sweep-${s}"
+		cp_tsv "${1}/sweep-${s}/controlplane-run-${s}.tsv" "mesh-a=3/3,mesh-b=3/3" 3
+		sed "s/^# RUN_ID=.*/# RUN_ID=run-${s}/" "${1}/sweep-${s}/controlplane-run-${s}.tsv" > "${1}/sweep-${s}/x"
+		mv "${1}/sweep-${s}/x" "${1}/sweep-${s}/controlplane-run-${s}.tsv"
+	done
+}
+
+# set_key <file> <KEY> <value>: the preamble's "# KEY=" line set to <value>.
+set_key() {
+	sed "s|^# ${2}=.*|# ${2}=${3}|" "$1" > "${1}.new"
+	mv "${1}.new" "$1"
 }
 
 # report <format> [dir] [flag...]: 004 over res/ (or dir), its stderr apart.
@@ -81,9 +101,6 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=2/2" 2
 	report json
 	[ "$(verdict)" = PASS ]
-	# Its sweep started at 3 (ISTIOD_REPLICAS_BY_CONTEXT): a data warning only.
-	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
-	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *"(mesh-b wanted 2 istiod replicas, 3 at the sweep's start)"* ]]
 	# The window wrote 3 rows for mesh-b and the TSV holds 2: cut short, as before /<spec>.
 	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 2
 	report json
@@ -113,104 +130,66 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" != *"fewer istiod pods"* ]]
 }
 
-@test "rows in the figures from two harnesses turn PASS into CAUTION with no outcome record, a finished one without the PROBLEM and an interrupted one (a NOTE); a change of git describe alone stays PASS" {
-	local h
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3 "# HARNESS_CHANGED_AT=2026-06-01T00:05:00Z HARNESS_SHA=other99 HARNESS_CONTENT_KEY=222222222222"
-	h="the rows in the figures ran on more than one harness (HARNESS_SHA fixture,other99; see the provenance warning), so their cells may not be measured the same way; the figures: peak utilization"
-	# A copied TSV: no outcome record.
+@test "a cell cut short while its member rows were written is INCOMPLETE (rows of fewer members than its mesh size; in a TSV without WINDOW_ROWS, a member with fewer rows than its istiod replicas in the cell written last): a data warning in every format, CAUTION; a standalone 002 run is never INCOMPLETE" {
+	local fmt s2="${BATS_TEST_TMPDIR}/standalone"
+	# The second cell has rows of mesh-a only (an older harness: no WINDOW_ROWS lines).
+	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 0
+	no_window_rows "$TSV"
 	report json
 	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "${h}"* ]]
-	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == "The inputs ran on different harnesses (HARNESS_SHA fixture,other99; the harness changed during a run (HARNESS_CHANGED_AT))"* ]]
-	# A finished sweep whose own reads missed the change (no PROBLEM).
-	printf 'RUN_ID=fixture-t2\nEXIT=0\nUNIT=cells\nTOTAL=2\n' > "${RES}/sweep-outcome.txt"
-	report json
-	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "${h}"* ]]
-	# An interrupted sweep: its exit trap records the change as a NOTE.
-	printf 'RUN_ID=fixture-t2\nEXIT=unfinished\nUNIT=cells\nNOTE=the harness changed during the sweep (bats)\n' > "${RES}/sweep-outcome.txt"
-	report json
-	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "${h}"* ]]
-	# The PROBLEM as well: the headline names both.
-	printf 'RUN_ID=fixture-t2\nEXIT=4\nUNIT=cells\nTOTAL=2\nPROBLEM=the harness changed during the sweep (bats)\n' > "${RES}/sweep-outcome.txt"
-	report json
-	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures may not measure what they seem to; the figures: "*"; also the rows in the figures ran on more than one harness (HARNESS_SHA fixture,other99; see the provenance warning), so their cells may not be measured the same way" ]]
-	# Another git describe of the same harness files: one harness.
-	rm -f "${RES}/sweep-outcome.txt"
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3 "# HARNESS_CHANGED_AT=2026-06-01T00:05:00Z HARNESS_SHA=v9.9.9-tag HARNESS_CONTENT_KEY=111111111111"
-	report json
-	[ "$(verdict)" = PASS ]
-	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = null ]
-}
-
-@test "a 'could not count the sweep's cells' PROBLEM is not counted (the report counts the cells itself, as the sweep's own pages do); another PROBLEM is" {
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3
-	printf "RUN_ID=fixture-t2\nEXIT=4\nUNIT=cells\nTOTAL=unknown\nPROBLEM=could not count the sweep's cells: no TSV (bats)\n" > "${RES}/sweep-outcome.txt"
-	report json
-	[ "$(verdict)" = PASS ]
-	printf 'PROBLEM=istiod restarted during the sweep (bats)\n' >> "${RES}/sweep-outcome.txt"
-	report json
-	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures"* ]]
-}
-
-@test "a pooled report counts the PROBLEMs of each pooled sweep's outcome and names each record" {
-	local base="${BATS_TEST_TMPDIR}/base" s
-	for s in a b; do
-		mkdir -p "${base}/sweep-${s}"
-		cp_tsv "${base}/sweep-${s}/controlplane-run-${s}.tsv" "mesh-a=3/3,mesh-b=3/3" 3
-		sed -i.bak "s/^# RUN_ID=.*/# RUN_ID=run-${s}/" "${base}/sweep-${s}/controlplane-run-${s}.tsv"
-		rm -f "${base}/sweep-${s}/controlplane-run-${s}.tsv.bak"
+	[[ "$(headline)" == "1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size"* ]]
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == "1 cell(s) are INCOMPLETE: the sweep was cut short while their member rows were written "*": mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (rows of 1 of 2 members)."* ]]
+	for fmt in text markdown csv charts; do
+		report "$fmt"
+		[[ "$output" == *"1 cell(s) are INCOMPLETE: the sweep was cut short while their member rows were written"*"traffic=none (rows of 1 of 2 members)"* ]] || { echo "${fmt}: ${output}"; false; }
 	done
-	report json "$base" --allow-multi-run
-	[ "$(verdict)" = PASS ]
-	printf 'RUN_ID=run-a\nEXIT=4\nPROBLEM=a\n' > "${base}/sweep-a/sweep-outcome.txt"
-	# sweep-b: one that has not finished (it died, or still runs).
-	printf 'RUN_ID=run-b\nEXIT=unfinished\nPROBLEM=b\n' > "${base}/sweep-b/sweep-outcome.txt"
-	report json "$base" --allow-multi-run
+	# mesh-b wrote 2 rows in the cell written last, 3 (its istiod replicas) in the first.
+	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 2
+	no_window_rows "$TSV"
+	report json
 	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "the sweep outcomes record 2 PROBLEM(s) (sweep-a/sweep-outcome.txt: 1; sweep-b/sweep-outcome.txt: 1), so the figures"* ]]
-	# One sweep alone: its record.
-	report json "${base}/sweep-b"
-	[[ "$(headline)" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures"* ]]
-	report json "${base}/sweep-a"
-	[[ "$(headline)" == "the sweep outcome records 1 PROBLEM(s) (sweep-outcome.txt), so the figures"* ]]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *": mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (mesh-b has rows of 2 of its 3 istiod replicas)."* ]]
+	# The same rows from a standalone 002 run (PHASE is not sweep) are no sweep's cells.
+	mkdir -p "$s2"
+	cp "$TSV" "${s2}/${TSV##*/}"
+	set_key "${s2}/${TSV##*/}" PHASE final
+	report json "$s2"
+	[ "$(verdict)" = PASS ]
+	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
 }
 
-@test "HARNESS_CONTENT_KEY in every format and the envelope (mixed:<list> for several)" {
-	local mixed="mixed:111111111111,222222222222"
+@test "a sweep outcome that is not clean turns PASS into CAUTION, one rule named in the headline: a record still running, interrupted or stopped, a failed cell, a PROBLEM; a NOTE stays PASS; a pooled report names each record" {
+	local base="${BATS_TEST_TMPDIR}/base" h="the sweep outcome is not clean (" st
 	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3
+	for st in running interrupted stopped; do
+		printf 'STATUS=%s\nRUN_ID=fixture-t2\n' "$st" > "${RES}/sweep-outcome.txt"
+		report json
+		[ "$(verdict)" = CAUTION ]
+		[[ "$(headline)" == "${h}res: ${st}: see sweep-outcome.txt), so the figures may not cover or measure what they seem to; the figures: "* ]]
+	done
+	printf 'STATUS=finished\nTOTAL=2\nFAILED=1\nFAILED_BY=INCOMPLETE x1\n' > "${RES}/sweep-outcome.txt"
 	report json
-	[ "$(jq -c '.metadata | [.harness_content_key, .harness_content_keys]' <<<"$output")" = '["111111111111",["111111111111"]]' ]
-	report text
-	assert_output --partial "  HARNESS_SHA=fixture  HARNESS_CONTENT_KEY=111111111111  "
-	assert_output --partial "  harness_shas=fixture  harness_content_keys=111111111111  "
-	report csv
-	assert_line "# HARNESS_CONTENT_KEY=111111111111"
-	report markdown
-	assert_line 'harness_content_key: "111111111111"'
-	assert_line 'harness_content_keys: ["111111111111"]'
-	report charts
-	assert_line 'harness_content_key: "111111111111"'
-	source "${ROOT}/tests/lib/platform.sh"
-	run render_scale_envelope "$RES" "$REPORT" mesh-a,mesh-b false
-	assert_success
-	assert_output --partial "(harness \`fixture\`, HARNESS_CONTENT_KEY \`111111111111\`; report harness "
-	# Rows of two harnesses: mixed.
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3 "# HARNESS_CHANGED_AT=2026-06-01T00:05:00Z HARNESS_SHA=other99 HARNESS_CONTENT_KEY=222222222222"
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "${h}res: finished, 1 failed: see sweep-outcome.txt)"* ]]
+	printf 'STATUS=finished\nTOTAL=2\nFAILED=0\nPROBLEM=istiod restarted during the sweep (bats)\n' > "${RES}/sweep-outcome.txt"
 	report json
-	[ "$(jq -c '.metadata | [.harness_content_key, .harness_content_keys]' <<<"$output")" = "[\"${mixed}\",[\"111111111111\",\"222222222222\"]]" ]
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "${h}res: finished, 1 problem(s): see sweep-outcome.txt)"* ]]
 	report text
-	assert_output --partial "  HARNESS_CONTENT_KEY=${mixed}  "
-	report csv
-	assert_line "# HARNESS_CONTENT_KEY=${mixed}"
-	report markdown
-	assert_line "harness_content_key: \"${mixed}\""
-	run render_scale_envelope "$RES" "$REPORT" mesh-a,mesh-b false
-	assert_success
-	assert_output --partial "HARNESS_CONTENT_KEY \`${mixed}\`"
+	assert_output --partial "Customer SLA verdict: CAUTION — ${h}res: finished, 1 problem(s): see sweep-outcome.txt)"
+	# A note is a caveat, not a failure.
+	printf 'STATUS=finished\nTOTAL=2\nFAILED=0\nNOTE=a member was not ready at the start (bats)\n' > "${RES}/sweep-outcome.txt"
+	report json
+	[ "$(verdict)" = PASS ]
+	# Pooled sweeps: the headline names each record that is not clean.
+	pooled "$base"
+	printf 'STATUS=finished\nTOTAL=2\nFAILED=0\nPROBLEM=a (bats)\n' > "${base}/sweep-a/sweep-outcome.txt"
+	printf 'STATUS=running\n' > "${base}/sweep-b/sweep-outcome.txt"
+	report json "$base" --allow-multi-run
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "${h}sweep-a: finished, 1 problem(s); sweep-b: running: see sweep-outcome.txt)"* ]]
+	[ "$(jq -c '[.sweep_outcomes[] | [.dir, .status]]' <<<"$output")" = '[["sweep-a","finished"],["sweep-b","running"]]' ]
 }
 
 @test "the namespace-scaling json escapes a quote and a backslash in a cell's scoping (JSON_STR_AWK js)" {
@@ -233,40 +212,31 @@ headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
 }
 
-@test "a report whose inputs ran different Istio versions turns PASS into CAUTION and names the versions; one version stays PASS" {
-	local base="${BATS_TEST_TMPDIR}/base" s v
-	for s in a b; do
-		v=1.30.5
-		[ "$s" = a ] || v=1.30.6
-		mkdir -p "${base}/sweep-${s}"
-		cp_tsv "${base}/sweep-${s}/controlplane-run-${s}.tsv" "mesh-a=3/3,mesh-b=3/3" 3
-		sed -i.bak -e "s/^# RUN_ID=.*/# RUN_ID=run-${s}/" -e "s/^# ISTIO_VERSION=.*/# ISTIO_VERSION=${v}/" "${base}/sweep-${s}/controlplane-run-${s}.tsv"
-		rm -f "${base}/sweep-${s}/controlplane-run-${s}.tsv.bak"
-	done
+@test "inputs of different Istio versions turn PASS into CAUTION and name the versions; different harnesses alone warn in every format, without a verdict change" {
+	local base="${BATS_TEST_TMPDIR}/base" w
+	pooled "$base"
+	set_key "${base}/sweep-a/controlplane-run-a.tsv" ISTIO_VERSION 1.30.5
+	set_key "${base}/sweep-b/controlplane-run-b.tsv" ISTIO_VERSION 1.30.6
 	report json "$base" --allow-multi-run
 	[ "$(verdict)" = CAUTION ]
 	[[ "$(headline)" == "the inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.30.6; see the provenance warning), so their cells may not be comparable; the figures: "* ]]
 	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == "The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.30.6)"* ]]
-	sed -i.bak 's/^# ISTIO_VERSION=.*/# ISTIO_VERSION=1.30.5/' "${base}/sweep-b/controlplane-run-b.tsv"
+	set_key "${base}/sweep-b/controlplane-run-b.tsv" ISTIO_VERSION 1.30.5
 	report json "$base" --allow-multi-run
 	[ "$(verdict)" = PASS ]
-}
-
-@test "rows in the figures from a run that recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY turn PASS into CAUTION: they cannot be shown to come from one harness" {
-	local h="a run whose rows are in the figures recorded neither HARNESS_SHA nor HARNESS_CONTENT_KEY (git could not name its harness, or an older harness did not record it), so the rows cannot be shown to come from one harness; the figures: "
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3
-	sed -i.bak -e 's/^# HARNESS_SHA=.*/# HARNESS_SHA=unknown/' -e '/^# HARNESS_CONTENT_KEY=/d' "$TSV"
-	report json
-	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "${h}"* ]]
-	# No harness line at all (an older harness): the same.
-	sed -i.bak '/^# HARNESS_SHA=/d' "$TSV"
-	report json
-	[ "$(verdict)" = CAUTION ]
-	[[ "$(headline)" == "${h}"* ]]
-	# A known content key alone names the harness: PASS.
-	cp_tsv "$TSV" "mesh-a=3/3,mesh-b=3/3" 3
-	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=unknown/' "$TSV"
-	report json
+	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = null ]
+	# One Istio version, two harnesses: a warning, still PASS.
+	set_key "${base}/sweep-b/controlplane-run-b.tsv" HARNESS_SHA abc1234-dirty
+	w="The inputs ran on different harnesses (HARNESS_SHA fixture,abc1234-dirty), so their cells may not be measured the same way."
+	report json "$base" --allow-multi-run
 	[ "$(verdict)" = PASS ]
+	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = "$w" ]
+	[ "$(jq -r '.metadata.harness_sha' <<<"$output")" = "mixed:fixture,abc1234-dirty" ]
+	[[ "$stderr" == *"WARNING: ${w}"* ]]
+	report text "$base" --allow-multi-run
+	assert_line "# WARNING: ${w}"
+	report csv "$base" --allow-multi-run
+	assert_line "# WARNING: ${w}"
+	report markdown "$base" --allow-multi-run
+	assert_line "> **Warning:** ${w}"
 }

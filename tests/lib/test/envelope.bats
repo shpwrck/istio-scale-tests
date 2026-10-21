@@ -451,3 +451,17 @@ _conc_kubectl() {
 	assert_line "# ISTIOD_REPLICAS=1-3"
 	assert_line "# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=1,mesh-b=3"
 }
+
+@test "env_sla_verdict: INCOMPLETE (arg 10) turns a PASS into CAUTION and joins a CAUTION or FAIL reason" {
+	run env_sla_verdict 10 15 40 50 0 4 4 75 90 0
+	[[ "$output" == PASS\|* ]]
+	run env_sla_verdict 10 15 40 50 0 4 4 75 90 1
+	[[ "$output" == "CAUTION|1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote: cut short while they were written), so their figures cover part of the mesh; the figures, these cells included: "* ]]
+	run env_sla_verdict 80 15 40 50 0 4 4 75 90 1
+	[[ "$output" == CAUTION\|* && "$output" == *"; also 1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
+	run env_sla_verdict 95 15 40 50 0 4 4 75 90 3
+	[[ "$output" == FAIL\|* && "$output" == *"; also 3 cell(s) are INCOMPLETE (rows of fewer members than their mesh size, or a member with fewer rows than its window wrote)" ]]
+	# Not a count: 0.
+	run env_sla_verdict 10 15 40 50 0 4 4 75 90 y
+	[[ "$output" == PASS\|* ]]
+}
