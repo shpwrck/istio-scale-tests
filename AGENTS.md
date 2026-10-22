@@ -99,35 +99,23 @@ which wins over the upstream docs there when they disagree.
   that shapes a run needs such a key, read before the flag parser: the `--config` vocabulary is the
   `options.env` exports matching the suite's key list (`config_suite_prefixes`), so the key also
   makes it config-settable. A sweep axis gets a plural CSV key that falls back to the singular one.
-- Platform record: every TSV writer and placeholder calls `platform_probe` before any window and
-  writes `platform_preamble_lines` next to `config_preamble_lines`; a run's markdown summary adds
-  `platform_md_row` after its `| Run config |` row; every suite report merges the record over its
-  inputs with `platform_report_values` and prints `platform_report_warnings` in every format's body
-  (tuning 004 compares each pass's record with the reference pass's, the baseline's or else the
-  first pass with data's, member by member in its `Platform record` row and notes, over
-  `PLATFORM_PASS_KEYS` (every record key but `ISTIOD_ENV_BY_CONTEXT` and
-  `TUNING_OBJECTS_BY_CONTEXT`, which a profile changes and its `istiod env` and `Tuning objects`
-  rows show per pass, plus each member's `KUBE_VERSIONS`) and what `platform_lever_values` gives
-  (the tuning levers, the root Sidecar's egress hosts, istiod's limits and replica counts; one the
-  pass's profile sets is a note, and one it sets that a member did not run, or that a member's
-  TSVs do not record, warns), with what `platform_drift_changes` and `platform_drift_unread` find
-  changed or not compared during each pass); a suite's sweep calls `platform_probe_share` right
-  after its `platform_probe` (controlplane: after its `--resume` check), then
-  `platform_start_warnings`, and `platform_drift_check` after its last step, before its reports
-  (tuning 003 refuses to start on a profile's objects with `platform_tuning_objects_refuse` instead
-  of warning, and since a profile changes the record, each pass calls `platform_probe_reset`,
-  `platform_probe` and `platform_probe_share` before its probes and `platform_drift_check` after
-  them; 004 compares the passes); every script that sources `platform.sh` calls `platform_validate`
-  with its argument checks (`tests/lib/platform.sh`; `tests/lib/test/config-suites.bats` and
-  `platform.bats` check the pairing). `TEST_PLATFORM`, `PLATFORM_READ_TIMEOUT` and
-  `PLATFORM_READ_PARALLEL` are keys of every suite (`CONFIG_SHARED_PREFIXES`,
-  `tests/lib/config.sh`).
+- Platform record (`tests/lib/platform.sh`): every TSV writer and placeholder calls `platform_probe`
+  before any window and writes `platform_preamble_lines` next to `config_preamble_lines`; a run's
+  markdown summary adds `platform_md_row` after its `| Run config |` row; every suite report merges
+  the record with `platform_report_values` and prints `platform_report_warnings` in every format's
+  body (tuning 004 instead warns through its own "Platform record" row, in every format and on
+  stderr); a sweep calls `platform_probe_share` right after its `platform_probe`, then
+  `platform_start_warnings`, and `platform_drift_check` after its last step, before `sweep_finish`
+  (tuning 003: around each pass's probes). Tuning 001 and 003 refuse to start on a profile's
+  objects; the other sweeps warn. Every script that sources it calls `platform_validate`;
+  `TEST_PLATFORM`, `PLATFORM_READ_TIMEOUT` and `PLATFORM_READ_PARALLEL` are keys of every suite
+  (`CONFIG_SHARED_PREFIXES`).
 
 ## Repository map
 
 | Path | Use |
 | --- | --- |
-| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_*`, `ISTIO_PROXY_READ_PARALLEL`, `HARNESS_SHA_CHECK_SEC`, `SWEEP_STOP_GRACE_SEC` |
+| `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC`, `SWEEP_STOP_GRACE_SEC` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
 | `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
 | `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check) |
@@ -147,7 +135,7 @@ which wins over the upstream docs there when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (its `values-openshift.yaml` is added on OpenShift members by `tests/lib/platform.sh`; gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.2 or 5.3 host); bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.2 or 5.3 host); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments; `kind-lab/` builds a hub and two members on one machine |
@@ -155,11 +143,11 @@ which wins over the upstream docs there when they disagree.
 ## Testing and verification
 
 - `git submodule update --init`, then `tests/lib/verify.sh`: syntax, shellcheck, inline-copy
-  audit, bats, the bare-scrape, keyed-array and bats-negation lints (a `! cmd` that is not a bats
-  test's last command never fails it: write `! cmd || false` or `run ! cmd`), and every
-  `# ci-dry-run:` script against an empty kubeconfig (no cluster needed). Required before merging
-  changes to `tests/lib/`. The bats that parse the reports' YAML frontmatter need `python3` +
-  PyYAML and skip without it (CI installs it), so a run without PyYAML proves less than it reports.
+  audit, bats, the bare-scrape and keyed-array lints, and every `# ci-dry-run:` script against an
+  empty kubeconfig (no cluster needed). Required before merging changes to `tests/lib/`. In a bats
+  test, a `! cmd` that is not its last command never fails it: write `! cmd || false` or
+  `run ! cmd`. The bats that parse the reports' YAML frontmatter need `python3` + PyYAML and skip
+  without it (CI installs it), so a run without PyYAML proves less than it reports.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
   (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its
   `values-openshift.yaml`; each ApplicationSet preset with both platform overlays
@@ -175,11 +163,10 @@ which wins over the upstream docs there when they disagree.
 `bash` 4.3+, `kubectl` (or `oc`), `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk` (gawk
 5.2 and 5.3 corrupt unset array elements passed to a function: `common.sh` then runs mawk, or
 stops), GNU `timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout`
-in `tests/lib/common.sh`), a `ps` with `-A -o pid=,ppid=,pgid=,stat=,lstart=` (procps on Linux, not
-busybox; macOS's own; a sweep stops its step's whole tree with it; on Linux, `/proc` stands in for
-it), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter
-bats, which skip without it; `python3` alone for the signal bats' pseudo-terminal test, which
-skips without it), `aws` + `rosa` (ROSA only).
+in `tests/lib/common.sh`), GNU `parallel` (`tests/lib/verify.sh --jobs` and CI; moreutils'
+`parallel` is another tool), `ps` (`sweep.bats` and `gateway-api.bats` call it), `istioctl`
+matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter bats, which skip
+without it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

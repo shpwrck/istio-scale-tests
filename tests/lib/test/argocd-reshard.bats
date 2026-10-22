@@ -1,9 +1,8 @@
 #!/usr/bin/env bats
 # terraform/scripts/argocd-controller-reshard.sh (BACKLOG 9.1) against a stub kubectl: the
 # restart waits for the operator's reconcile to settle, deletes the controller pods once and
-# waits for Ready replacements; the app-status check names Applications without a status
-# and expected destinations that no Application targets yet (argocd-app-status.bats has the
-# rest of that check).
+# waits for Ready replacements (MODE=app-status is in argocd-app-status.bats). A failing case
+# runs with a 0 s timeout: it fails after its first poll.
 
 load test_helper
 
@@ -26,14 +25,13 @@ pods_json() {
 }
 
 setup() {
-	STUB_DIR="$(mktemp -d)"
+	STUB_DIR="${BATS_TEST_TMPDIR}/stub"
 	STUB_LOG="${STUB_DIR}/calls.log"
 	export STUB_DIR STUB_LOG
 	mkdir -p "${STUB_DIR}/bin"
 	: >"$STUB_LOG"
 	# kubectl: the StatefulSet answers from sts.<n>.json in call order (the last one repeats);
-	# pods from pods.json until a delete, then from pods.after.json; Applications from apps.json,
-	# ApplicationSets from appsets.json (none: an empty list); the refresh annotation succeeds.
+	# pods from pods.json until a delete, then from pods.after.json.
 	cat >"${STUB_DIR}/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 echo "kubectl $*" >>"$STUB_LOG"
@@ -49,21 +47,19 @@ case "$args" in
 *" get pods "*)
 	if [[ -f "$STUB_DIR/deleted" ]]; then cat "$STUB_DIR/pods.after.json"; else cat "$STUB_DIR/pods.json"; fi ;;
 *" delete pod "*) touch "$STUB_DIR/deleted" ;;
-*" get applications.argoproj.io -o name "*) jq -r '.items[] | "application.argoproj.io/" + .metadata.name' "$STUB_DIR/apps.json" ;;
-*" get applications.argoproj.io -o json "*) cat "$STUB_DIR/apps.json" ;;
-*" get applicationsets.argoproj.io -o json "*) cat "$STUB_DIR/appsets.json" 2>/dev/null || echo '{"items":[]}' ;;
-*" annotate applications.argoproj.io "*) ;;
 *) exit 1 ;;
 esac
 EOF
 	chmod +x "${STUB_DIR}/bin/kubectl"
 	export PATH="${STUB_DIR}/bin:${PATH}"
 	export KUBECONFIG_PATH=/dev/null KUBE_CONTEXT=acm-hub GITOPS_NS=openshift-gitops ARGOCD_NAME=openshift-gitops
-	export SETTLE_SEC=0 POLL_SEC=0 STABLE_POLLS=2 ROLLOUT_TIMEOUT_SEC=2 APP_STATUS_TIMEOUT_SEC=1
+	export SETTLE_SEC=0 POLL_SEC=0 STABLE_POLLS=2 ROLLOUT_TIMEOUT_SEC=2
 }
 
-teardown() {
-	rm -rf "$STUB_DIR"
+# reset_stub: a StatefulSet read from its first state again, no delete yet, an empty call log.
+reset_stub() {
+	rm -f "${STUB_DIR}"/sts.* "${STUB_DIR}"/pods.* "${STUB_DIR}/deleted"
+	: >"$STUB_LOG"
 }
 
 @test "reshard: waits out the operator's scale-up, restarts the pods once, waits for Ready" {
@@ -84,110 +80,49 @@ teardown() {
 	[ "$(head -n "$first_delete" "$STUB_LOG" | grep -c 'get statefulset .* -o json')" -ge 3 ]
 }
 
-@test "reshard: a terminating pod counts as not settled" {
+@test "reshard: a terminating pod or a pending rollout is not settled: it fails without deleting anything" {
+	export ROLLOUT_TIMEOUT_SEC=0
 	sts_json 1 1 1 r1 r1 >"${STUB_DIR}/sts.1.json"
 	pods_json a:1:1 >"${STUB_DIR}/pods.json"
 	run bash "$SCRIPT"
 	assert_failure
-	assert_output --partial "did not settle within 2s"
+	assert_output --partial "did not settle within 0s"
 	run grep -c ' delete pod ' "$STUB_LOG"
 	assert_output 0
-}
-
-@test "reshard: never settled (rollout pending) fails without deleting anything" {
+	reset_stub
 	sts_json 2 2 2 r1 r2 >"${STUB_DIR}/sts.1.json"
 	pods_json a:1 b:1 >"${STUB_DIR}/pods.json"
 	run bash "$SCRIPT"
 	assert_failure
-	assert_output --partial "did not settle within 2s (last state: settled=0 replicas=2 revision=r2)"
+	assert_output --partial "did not settle within 0s (last state: settled=0 replicas=2 revision=r2)"
 	run grep -c ' delete pod ' "$STUB_LOG"
 	assert_output 0
 }
 
-@test "reshard: replacements that never get Ready fail the step" {
+@test "reshard: replacements that never get Ready, or an old pod that is still listed (not a replacement), fail the step" {
+	export STABLE_POLLS=1 ROLLOUT_TIMEOUT_SEC=0
 	sts_json 1 1 1 r1 r1 >"${STUB_DIR}/sts.1.json"
 	pods_json a:1 >"${STUB_DIR}/pods.json"
 	pods_json b:0 >"${STUB_DIR}/pods.after.json"
 	run bash "$SCRIPT"
 	assert_failure
-	assert_output --partial "replacement pods not Ready within 2s (0/1 Ready, old pods left: 0)"
-}
-
-@test "reshard: an old pod that is still listed is not a replacement" {
+	assert_output --partial "replacement pods not Ready within 0s (0/1 Ready, old pods left: 0)"
+	reset_stub
 	sts_json 1 1 1 r1 r1 >"${STUB_DIR}/sts.1.json"
 	pods_json a:1 >"${STUB_DIR}/pods.json"
 	pods_json a:1 >"${STUB_DIR}/pods.after.json"
 	run bash "$SCRIPT"
 	assert_failure
-	assert_output --partial "old pods left: 1"
+	assert_output --partial "(0/1 Ready, old pods left: 1)"
 }
 
-@test "reshard: a missing StatefulSet is an error" {
-	run bash "$SCRIPT"
-	assert_failure
-	assert_output --partial "StatefulSet openshift-gitops/openshift-gitops-application-controller not found"
-}
-
-@test "app-status: every Application has a sync and health status" {
-	cat >"${STUB_DIR}/apps.json" <<'EOF'
-{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"name":"in-cluster"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
-{"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"name":"mesh-b"}},"status":{"sync":{"status":"OutOfSync"},"health":{"status":"Progressing"}}}]}
-EOF
-	MODE=app-status run bash "$SCRIPT"
-	assert_success
-	assert_output --partial "all 2 Application(s) have a sync and health status"
-}
-
-@test "app-status: names the Applications without status and their destination cluster" {
-	cat >"${STUB_DIR}/apps.json" <<'EOF'
-{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"name":"in-cluster"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
-{"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"name":"mesh-b"}},"status":{}},
-{"metadata":{"name":"mesh-b-ingress"},"spec":{"destination":{"server":"https://api.mesh-b.example:6443"}},"status":{"sync":{"status":"Synced"}}}]}
-EOF
-	MODE=app-status run bash "$SCRIPT"
-	assert_failure
-	assert_output --partial "mesh-b-ossm (destination mesh-b)"
-	assert_output --partial "mesh-b-ingress (destination https://api.mesh-b.example:6443)"
-	refute_output --partial "in-cluster-ossm"
-}
-
-@test "app-status: waits for an Application on every expected destination (name or server)" {
-	cat >"${STUB_DIR}/apps.json" <<'EOF'
-{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"server":"https://kubernetes.default.svc"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
-{"metadata":{"name":"mesh-a-ossm"},"spec":{"destination":{"name":"mesh-a"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
-{"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"server":"https://api.mesh-b.example:6443"}},"status":{"sync":{"status":"OutOfSync"},"health":{"status":"Missing"}}}]}
-EOF
-	MODE=app-status EXPECTED_DESTINATIONS="mesh-a,https://api.mesh-b.example:6443" run bash "$SCRIPT"
-	assert_success
-	assert_output --partial "all 3 Application(s) have a sync and health status, compared since this check started; every Application and ApplicationSet they list exists, and every member ApplicationSet owns an Application for each of the 2 members"
-}
-
-@test "app-status: an expected destination with no Application fails, named, even when every status is set" {
-	# The ApplicationSets have generated nothing for mesh-c yet: only the hub's own
-	# Applications and mesh-b's exist, all with a status (the 2026-10-16 timing).
-	cat >"${STUB_DIR}/apps.json" <<'EOF'
-{"items":[{"metadata":{"name":"in-cluster-ossm"},"spec":{"destination":{"name":"in-cluster"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}},
-{"metadata":{"name":"mesh-b-ossm"},"spec":{"destination":{"name":"mesh-b"}},"status":{"sync":{"status":"Synced"},"health":{"status":"Healthy"}}}]}
-EOF
-	MODE=app-status EXPECTED_DESTINATIONS="mesh-b mesh-c" run bash "$SCRIPT"
-	assert_failure
-	assert_output --partial "no Application targets these destination clusters after 1s"
-	assert_output --partial "  mesh-c"
-	refute_output --partial "  mesh-b"
-	refute_output --partial "without a sync or health status"
-}
-
-@test "app-status: no Applications at all is a failure, not a pass" {
-	echo '{"items":[]}' >"${STUB_DIR}/apps.json"
-	MODE=app-status run bash "$SCRIPT"
-	assert_failure
-	assert_output --partial "no Applications found in openshift-gitops"
-}
-
-@test "an unknown MODE and missing auth are refused" {
+@test "an unknown MODE, missing auth and a missing StatefulSet are refused" {
 	MODE=bogus run bash "$SCRIPT"
 	assert_failure
 	assert_output --partial "MODE must be reshard or app-status"
+	run bash "$SCRIPT"
+	assert_failure
+	assert_output --partial "StatefulSet openshift-gitops/openshift-gitops-application-controller not found"
 	unset KUBECONFIG_PATH
 	run bash "$SCRIPT"
 	assert_failure

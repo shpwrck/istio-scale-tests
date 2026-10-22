@@ -52,9 +52,10 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/propagation/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
+Saves a snapshot of every istiod pod's pilot_* metrics as <ctx>-<pod>-<timestamp>.prom.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
   --contexts CSV     Kube contexts to scrape (default: \$SETUP_CONTEXTS).
   --output-dir DIR   Results directory (default: ${PROPAGATION_RESULTS_DIR}).
   --watch            Loop continuously.
@@ -62,13 +63,13 @@ Usage: $(basename "$0") [options]
   --dry-run          Show what would be scraped without connecting.
   -h, --help         Show this help.
 
-Writes <ctx>-<pod>-<timestamp>.prom per istiod pod, filtered to pilot_* series.
+Environment (config/options.env describes each): SETUP_CONTEXTS, METRICS_SCRAPE_TIMEOUT,
+PROPAGATION_SNAPSHOT_PF_BASE (apart from FANOUT_PF_BASE, so it can run beside 002),
+PROPAGATION_RESULTS_DIR (relative to the repo root).
 
-Environment:
-  SETUP_CONTEXTS, METRICS_SCRAPE_TIMEOUT (curl --max-time per scrape, default 30),
-  PROPAGATION_SNAPSHOT_PF_BASE (local port block base, default 22014; kept
-  apart from FANOUT_PF_BASE so this can run alongside 002),
-  PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root).
+Exit codes: 0 the snapshots were written (or the plan shown); 1 an error.
+
+See tests/propagation/README.md.
 EOF
 }
 

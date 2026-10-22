@@ -26,13 +26,11 @@
 # because its remote rows failed; a TSV from before field 20 takes it from the first row
 # with status OK, restarted=0, no p1_overflow and skew within the ceiling.
 #
-# Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA, HARNESS_CONTENT_KEY,
+# Carries forward TSV preamble metadata (RUN_ID, HARNESS_SHA,
 # ISTIO_VERSION and its ISTIO_VERSION_PIN / ISTIO_VERSION_SOURCE /
-# ISTIO_VERSION_BY_CONTEXT, the start-of-run readiness ISTIO_NOTREADY_AT_START /
-# ISTIO_READY_WAITED_SEC, each member's active revision ISTIO_ACTIVE_REVISIONS, its
-# Istio CR / IstioRevision generations ISTIO_GENERATIONS and connected proxy versions
-# ISTIO_PROXY_VERSIONS (unknown for a TSV written before them; mixed when pooled inputs
-# differ), KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
+# ISTIO_VERSION_BY_CONTEXT, each member's active revision ISTIO_ACTIVE_REVISIONS and its
+# Istio CR / IstioRevision generations ISTIO_GENERATIONS (unknown for a TSV written before
+# them; mixed when pooled inputs differ), KUBE_VERSIONS, SETTLE_SEC, POLL_INTERVAL_S, TIMEOUT_SEC, ITERATIONS) into all
 # report formats, plus RUN_CONFIG / RUN_CONFIG_SHA256 (the --config behind the inputs)
 # and the platform record (PLATFORM, MESH_OPERATOR_BY_CONTEXT, ...: tests/lib/platform.sh)
 # over all input TSVs.
@@ -86,124 +84,30 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/propagation/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
-  --results-dir DIR  Results directory (default: ${PROPAGATION_RESULTS_DIR}). Every
-                     endpoint-*.tsv under it is read; a sweep-*/ dir from 006 is one run.
-                     Run on the parent of one sweep dir (no sweep-outcome.txt of its
-                     own), the report repeats no outcome, but a note names that sweep's
-                     record when it did not end cleanly, as --allow-multi-run's does.
-  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
-                     with different run ids). Without it the report stops, lists the
-                     runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values
-                     (csv # POOLED_HARNESS_CONTENT_KEYS= and json harness_content_key
-                     also their HARNESS_CONTENT_KEY values); its note says when the
-                     HARNESS_SHA values differ only in git describe (every run records
-                     one key). It repeats no sweep-outcome.txt of a sweep-* dir below the
-                     results dir (report each sweep alone to see it), but its note names
-                     each one that has not finished, was interrupted, stopped early or
-                     records a PROBLEM (json pooled_sweep_outcomes), and so does a
-                     warning on stderr.
-  --format FMT       Output format: text, csv, json, markdown, charts (default: text).
+Reports every endpoint-*.tsv under the results dir: per mesh size, the phases P1_local_wall,
+P1_conv_p50, P1_conv_p99, P2_discovery and P3_dataplane (n_total, n_valid, n_attempted;
+which rows count is in tests/propagation/README.md, "Outputs"), istiod restart
+diagnostics, what the inputs record and each sweep dir's outcome.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
+  --results-dir DIR  Results directory, read recursively; a sweep-*/ dir is one run
+                     (default: ${PROPAGATION_RESULTS_DIR}).
+  --allow-multi-run  Pool several runs (default: a dir with more than one stops the report).
+  --format FMT       text, csv, json, markdown (or md) or charts (default: text).
   -h, --help         Show this help.
 
 Example (one sweep, as 006 runs it; from the repo root):
   tests/propagation/$(basename "$0") \\
     --results-dir ${PROPAGATION_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
-TSV columns consumed (positions are stable; new columns appended):
-  1  run_id            2  mesh_size       3  iteration       4  source_ctx
-  5  remote_ctx        6  t0_epoch_ns     7  p1_ms           8  p2_ms
-  9  p3_ms            10  status         11  p1_conv_p50_ms 12  p1_conv_p99_ms
- 13  p1_sample_count  14  p1_proxy_count 15  p1_overflow    16  restarted
- 17  p2_dirty         18  window_ms      19  scrape_skew_ms 20  p1_status
- 21  p1_scrape_skew_ms                  22  remote_status  23  remote_scrape_skew_ms
-(older TSVs: 18, 19 or 21 columns; 006's SETUP_FAILED/PROBE_FAILED rows use all 23)
+Environment (config/options.env describes each): FANOUT_MAX_SKEW_MS (the skew ceiling),
+PROPAGATION_PERCENTILE_MIN_N (samples before p95/p99 show), PROPAGATION_RESULTS_DIR (relative
+to the repo root).
 
-Phases emitted in the report:
-  P1_local_wall  wall-clock ms (p1_ms) from the t0 active-label flip until the
-                 histogram delta _count reached proxy_count.
-  P1_conv_p50    p50 of delta-window pilot_proxy_convergence_time (ms).
-  P1_conv_p99    p99 of delta-window pilot_proxy_convergence_time (ms).
-                 Both are histogram bucket bounds: text and markdown show bucket
-                 ranges with no average (max is the worst bucket); csv and json
-                 keep the numbers and add worst_bucket.
-  P2_discovery   pilot_xds_pushes{type="eds"} counter-delta detection (ms).
-  P3_dataplane   watcher Envoy /clusters detection (ms).
+Exit codes: 0 the report was written; 1 an error.
 
-Filtering policy (rows excluded from numeric aggregation): P2 and P3 are measured
-on a remote, so a row's P2/P3 are left out only for that remote's side:
-  remote_status (field 22) != OK   (its istiod RESTART or RESTART_UNKNOWN, a P2 or
-                                    P3 timeout, its sidecar's NOT_DRAINED,
-                                    SCRAPE_INCOMPLETE of its scrape)
-  remote_scrape_skew_ms (field 23) > FANOUT_MAX_SKEW_MS
-never for the source's restart, P1 timeout or p1_overflow. A row with no remote
-(remote_status N/A) measures P1 only. A TSV without field 22 (21 or fewer
-columns) cannot split a row by side: status != OK, restarted == 1 or unknown,
-or scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS drops it; p1_overflow does not.
-P2 values are additionally suppressed when p2_dirty == 1.
-P1 phases (one sample per iteration, measured on the source) use the source side
-only: an iteration's P1 is left out when p1_status (field 20) is not OK
-(TIMEOUT_P1, RESTART, RESTART_UNKNOWN, NOT_DRAINED of the source sidecar,
-SCRAPE_INCOMPLETE of a source scrape), p1_overflow == 1, or p1_scrape_skew_ms
-(field 21) > FANOUT_MAX_SKEW_MS; a remote that timed out or restarted keeps it. A
-TSV without field 20 (written before it) takes P1 from the iteration's first row
-with status OK, restarted 0, p1_overflow 0 and scrape_skew_ms within the ceiling.
-DRAIN_TIMEOUT (in any of these status fields: the drain after the iteration timed
-out) counts as OK, since the values were measured before that drain; every format
-warns with the number of such iterations per mesh size.
-
-n_total / n_valid: rows considered vs rows used after the above filtering; for
-the P1 phases, iterations (P1 is one sample per iteration, as 002's summary counts it).
-n_attempted (after n_valid in text and markdown, the last csv column; json
-n_attempted): what the probes were configured to run, from each TSV's ITERATIONS and
-REMOTES: iterations for the P1 phases, ITERATIONS
-x remotes rows (one per iteration with no remote) for P2/P3; a SETUP_FAILED or
-PROBE_FAILED placeholder counts its ITERATIONS x (mesh size - 1) unless a probe TSV of
-its sweep has its mesh size. "-" (csv empty, json null) when a TSV does not record it.
-When fewer iterations or rows were measured than attempted, every format warns (text
-WARNING, csv # WARNING, markdown > Warning, json data_warnings) and stderr says so.
-TSV_COLUMNS (csv # TSV_COLUMNS=, markdown tsv_columns, json tsv_columns) lists the
-column counts of the input rows; more than one also warns: the row rules above differ
-by width, so pooled figures mix rules.
-Averages are rounded to the nearest ms; json mesh_size is a number. n_valid is 0
-(never "-") in every format when no row of a phase counts.
-
-REPORT_HARNESS_SHA (every format, next to HARNESS_SHA): the harness this report ran
-on, which can differ from HARNESS_SHA, the harness that measured the rows: a report
-made again later, or from another checkout, may count rows by other rules. The
-results dir it reads does not count as a change to it. HARNESS_CONTENT_KEY (next to
-HARNESS_SHA; unknown for a TSV written before it): the content key of the harness
-files the rows ran on. Inputs whose HARNESS_SHA differs but that share one key differ
-only in git describe (a commit or tag that left the harness files as they were):
-stderr gives a note instead of the "disagree" warning.
-
-text, markdown and json also carry an "istiod restart diagnostics" section: every
-istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
-changed, the cause, the evidence folder relative to the results dir) and a tally by
-cause; restarted_untimed rows (may predate the window) are counted apart (json key
-istiod_diag).
-
-When the results dir holds sweep-outcome.txt (006 writes it), every format repeats
-it, with the run that recorded it: the failed cells by reason, its problems (the Istio
-version, the active revision or the generation of the Istio CR or its active
-IstioRevision changed under the sweep, or the end-of-sweep check failed) and notes
-(members not ready at its start or end). The sweep writes it at its start as "not
-finished" (EXIT=unfinished) and replaces it at its end: a record still not finished
-is a sweep that died or still runs, or one interrupted (Ctrl-C, SIGTERM, SIGHUP),
-with when and by which signal; one that stopped on an error after its start shows
-the stop and its reason. A sweep dir without the file is from a sweep that stopped
-before its start (nothing ran), or from an older harness.
-
-Environment:
-  FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the skew filters above: fields 21 and
-                      23, or 19 in an older TSV (default 1000).
-  PROPAGATION_PERCENTILE_MIN_N  Minimum sample count before p95/p99 are reported
-                      (default 20; 0 disables). Below it p95/p99 are N/A
-                      (null in JSON). p50 is always reported.
-  PROPAGATION_RESULTS_DIR  --results-dir default (relative to the repo root).
+See tests/propagation/README.md.
 EOF
 }
 
@@ -267,7 +171,7 @@ fi
 # PER_FILE_VALS[KEY|i]; sequences iterate the rows in input order. Scalars are merged
 # over every input (config_merged_preamble): one value, or mixed:a,b with a warning; the
 # platform record's keys (PLATFORM_KEYS) by platform_report_values instead, below.
-SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA HARNESS_CONTENT_KEY REPORT_HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS ISTIO_PROXY_VERSIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256
+SWEEP_LEVEL_KEYS=(SWEEP_RUN_ID HARNESS_SHA ISTIO_VERSION ISTIO_VERSION_PIN ISTIO_VERSION_SOURCE ISTIO_VERSION_BY_CONTEXT ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS SOURCE_CTX ITERATIONS POLL_INTERVAL_S TIMEOUT_SEC SETTLE_SEC FANOUT_MAX_SKEW_MS FANOUT_METRICS_TIMEOUT BACKER_IMAGE TUNING_BASELINE SIDECAR_EGRESS_HOSTS RUN_CONFIG RUN_CONFIG_SHA256
 	"${PLATFORM_KEYS[@]}")
 PER_ITER_KEYS=(RUN_ID DATE MESH_SIZE REMOTES KUBE_VERSIONS)
 # Legacy combined order used by report_endpoint_*'s "first valid value" lookup
@@ -306,19 +210,12 @@ done < <(config_merged_preamble "${ENDPOINT_FILES[@]}")
 for k in $CONFIG_MERGED_UNKNOWN_IF_MISSING; do
 	[[ -n "${PREAMBLE[$k]:-}" ]] || PREAMBLE[$k]=unknown
 done
-# HARNESS_SHA values that differ only in their git describe part (every input records one
-# HARNESS_CONTENT_KEY: a commit or tag that left the harness files as they were) are a
-# note, not a disagreement. A TSV without the key reads unknown: the warning stays.
-_hck="$(config_input_value HARNESS_CONTENT_KEY unknown "${ENDPOINT_FILES[@]}")"
 for k in "${SWEEP_LEVEL_KEYS[@]}"; do
-	case "$k" in RUN_CONFIG | RUN_CONFIG_SHA256) continue ;; esac
+	# A mixed HARNESS_SHA is a data warning below (every format and stderr).
+	case "$k" in RUN_CONFIG | RUN_CONFIG_SHA256 | HARNESS_SHA) continue ;; esac
 	# The record's own merge warns for its keys (per member: a mesh size has other members).
 	! platform_report_is_key "$k" || continue
 	[[ "${PREAMBLE[$k]:-}" == mixed:* ]] || continue
-	if [[ "$k" == HARNESS_SHA && -n "$_hck" && "$_hck" != unknown && "$_hck" != mixed:* ]]; then
-		echo "note: the input TSVs' HARNESS_SHA values (${PREAMBLE[$k]#mixed:}) differ only in git describe (a commit or tag that left the harness files as they were): every input records HARNESS_CONTENT_KEY=${_hck}, the same harness files" >&2
-		continue
-	fi
 	echo "warning: input TSVs disagree on sweep-level ${k} (${PREAMBLE[$k]#mixed:}); the report shows it as mixed" >&2
 done
 # Which --config produced the inputs (PL2/PL19), over every input rather than the last
@@ -333,32 +230,10 @@ while IFS= read -r kv; do PREAMBLE["${kv%%=*}"]="${kv#*=}"; done <<<"$PLATFORM_V
 # Every format's body repeats the record's warnings (inputs that disagree, a build that changed
 # during the sweep, a value not read; PL19).
 REPORT_WARNINGS="$(platform_report_warnings "${ENDPOINT_FILES[@]}")"
-# This report's own harness, every format; the results dir it reads is no harness change.
-PREAMBLE[REPORT_HARNESS_SHA]="$(report_harness_sha --exclude "$RESULTS_DIR")"
 # PL6: the report pools every TSV under the results dir; more than one run stops it
 # unless --allow-multi-run, and then every format says so (config_multi_run_note).
 config_check_multi_run "$RESULTS_DIR" "$ALLOW_MULTI_RUN" "${ENDPOINT_FILES[@]}"
 POOLED_NOTE="$(config_multi_run_note)"
-# A pooled report repeats only its results dir's own sweep-outcome.txt
-# (sweep_outcome_recorded), never one of a sweep-* dir below it: the pooled note says so
-# and names each pooled sweep whose record has not finished, was interrupted, stopped early
-# or holds a PROBLEM (sweep_outcome_pooled): text, md, charts, csv; json pooled_sweep_outcomes.
-# One run on the parent dir of its sweep (no record of its own) repeats none either: the
-# same note, alone, names that sweep's record when it did not end cleanly.
-POOLED_OUTCOME_NOTE=""
-POOLED_SWEEP_OUTCOMES=""
-if [[ -n "$POOLED_NOTE" ]]; then
-	POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, when it has one, never that of a sweep-* dir below it: report each sweep alone to see its failed cells, problems and notes."
-	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${ENDPOINT_FILES[@]}")"
-	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE+=" Pooled sweep records that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
-	POOLED_NOTE+=" ${POOLED_OUTCOME_NOTE}"
-elif [[ ! -f "${RESULTS_DIR%/}/sweep-outcome.txt" && ! -f "${RESULTS_DIR%/}/sweep-outcome.prev.txt" ]]; then
-	POOLED_SWEEP_OUTCOMES="$(sweep_outcome_pooled "$RESULTS_DIR" "${ENDPOINT_FILES[@]}")"
-	[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || POOLED_OUTCOME_NOTE="This report repeats only the results dir's own sweep-outcome.txt, and it has none: report the sweep-* dir below it to see its failed cells, problems and notes. Sweep records below the results dir that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }."
-fi
-# The same list on stderr (as controlplane's data warning), in sight when the report goes
-# to a file.
-[[ -z "$POOLED_SWEEP_OUTCOMES" ]] || echo "warning: sweep records below ${RESULTS_DIR} that did not end cleanly: ${POOLED_SWEEP_OUTCOMES//$'\n'/; }; report each sweep dir alone to see its outcome" >&2
 
 # ---- what the probes set out to measure (PL17), and the TSV widths ------------------
 # One pass over the inputs, per file: its ITERATIONS, REMOTES, MESH_SIZE and SWEEP_RUN_ID,
@@ -437,7 +312,8 @@ TSV_COLUMNS="$(IFS=,; echo "${TSV_WIDTHS[*]-}")"
 # measured fewer iterations or rows than they were configured to (n_total counts only
 # what was written, and a failed cell's status row); a mesh size with iterations whose
 # drain timed out (counted, but a slow removal is worth knowing about); inputs of
-# different widths, which the row rules of tests/lib/propagation.sh filter differently.
+# different widths, which the row rules of tests/lib/propagation.sh filter differently;
+# inputs that ran on more than one harness.
 DATA_WARNINGS=""
 data_warning() { DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}$1"; }
 while IFS= read -r _ms; do
@@ -456,6 +332,8 @@ if ((${#TSV_WIDTHS[@]} > 1)); then
 	_wf="$(IFS=,; echo "${TSV_WIDTH_FILES[*]}")"
 	data_warning "the input TSVs have different column counts (${_wf//,/, }), so their rows are filtered by different rules (tests/lib/propagation.sh): one without remote_status (under 23 columns) drops a row's P2/P3 for either side's failure, one without p1_status (under 21) takes P1 from its iteration's first OK row, and an 18-column one has no p2_dirty or scrape-skew check. Compare its figures with care."
 fi
+[[ "${PREAMBLE[HARNESS_SHA]:-}" != mixed:* ]] \
+	|| data_warning "the inputs ran on different harnesses, or one did not record its harness (HARNESS_SHA ${PREAMBLE[HARNESS_SHA]#mixed:}), so their rows may not all be measured the same way"
 # data_warnings_lines <prefix>: each DATA_WARNINGS line behind a prefix (nothing when none).
 data_warnings_lines() {
 	[[ -n "$DATA_WARNINGS" ]] || return 0
@@ -463,7 +341,7 @@ data_warnings_lines() {
 	while IFS= read -r w; do printf '%s%s\n' "$1" "$w"; done <<<"$DATA_WARNINGS"
 }
 data_warnings_lines "WARNING: " >&2
-# lines_json <text>: <text> (DATA_WARNINGS, POOLED_SWEEP_OUTCOMES) as a JSON array of
+# lines_json <text>: <text> (DATA_WARNINGS) as a JSON array of
 # strings, one per line (through stdin and JSON_STR_AWK, tests/lib/common.sh).
 lines_json() {
 	printf '%s' "$1" | awk "${JSON_STR_AWK}"'BEGIN { ORS = ""; printf "[" } { printf "%s%s", (NR > 1 ? "," : ""), js($0) } END { print "]" }'
@@ -762,8 +640,7 @@ report_endpoint_text() {
 	echo "=== Endpoint Propagation Latency ==="
 	echo ""
 	[[ -z "$POOLED_NOTE" ]] || printf 'POOLED RUNS: %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf 'NOTE: %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
-	sweep_outcome_recorded "$RESULTS_DIR" text
+	sweep_outcome_lines text "${ENDPOINT_FILES[@]}"
 	echo "Run metadata:"
 	format_preamble_text
 	echo "  TSV_COLUMNS: ${TSV_COLUMNS:-none}"
@@ -825,8 +702,7 @@ report_endpoint_csv() {
 	platform_warning_lines comment "$REPORT_WARNINGS"
 	data_warnings_lines "# WARNING: "
 	config_multi_run_csv
-	[[ -z "$POOLED_OUTCOME_NOTE" ]] || echo "# NOTE: ${POOLED_OUTCOME_NOTE}"
-	sweep_outcome_recorded "$RESULTS_DIR" csv
+	sweep_outcome_lines csv "${ENDPOINT_FILES[@]}"
 	echo ""
 	# worst_bucket: the bucket range of max_ms, for the histogram phases only; n_attempted:
 	# what the probes were configured to run (empty when not recorded).
@@ -914,9 +790,8 @@ report_endpoint_markdown() {
 	echo ""
 	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	if [[ -n "$DATA_WARNINGS" ]]; then data_warnings_lines "> **Warning:** "; echo ""; fi
-	sweep_outcome_recorded "$RESULTS_DIR" md
+	sweep_outcome_lines md "${ENDPOINT_FILES[@]}"
 	echo "**Source files:** ${#ENDPOINT_FILES[@]} TSV file(s)"
 	echo ""
 	for f in "${ENDPOINT_FILES[@]}"; do
@@ -1014,8 +889,7 @@ report_endpoint_json() {
 	format_preamble_json
 	printf ',"warnings":%s' "$(platform_warning_lines json "$REPORT_WARNINGS")"
 	printf ',"pooled_runs":%s' "$(config_multi_run_json)"
-	printf ',"pooled_sweep_outcomes":%s' "$(lines_json "$POOLED_SWEEP_OUTCOMES")"
-	printf ',"sweep_outcome":%s' "$(sweep_outcome_recorded "$RESULTS_DIR" json)"
+	printf ',"sweep_outcomes":%s' "$(sweep_outcome_lines json "${ENDPOINT_FILES[@]}")"
 	printf ',"tsv_columns":[%s]' "$TSV_COLUMNS"
 	printf ',"data_warnings":%s' "$(lines_json "$DATA_WARNINGS")"
 	printf ',"rows":'
@@ -1067,8 +941,8 @@ report_endpoint_charts() {
 	echo ""
 	platform_warning_lines md "$REPORT_WARNINGS"
 	[[ -z "$POOLED_NOTE" ]] || printf '> **Pooled runs.** %s\n\n' "$POOLED_NOTE"
-	if [[ -z "$POOLED_NOTE" && -n "$POOLED_OUTCOME_NOTE" ]]; then printf '> **Note.** %s\n\n' "$POOLED_OUTCOME_NOTE"; fi
 	if [[ -n "$DATA_WARNINGS" ]]; then data_warnings_lines "> **Warning:** "; echo ""; fi
+	sweep_outcome_lines charts "${ENDPOINT_FILES[@]}"
 	cat "${ENDPOINT_FILES[@]}" | awk -v MAXSKEW="${FANOUT_MAX_SKEW_MS:-1000}" -v PCT_MIN_N="${PROPAGATION_PERCENTILE_MIN_N:-20}" -v ATT="$ATT_SPEC" "$AWK_AGG"'
 	function chart_avg(src, ms, n,    arr, sum, i) {
 		if (n == 0) return -1

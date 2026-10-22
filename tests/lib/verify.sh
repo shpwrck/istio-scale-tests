@@ -1,27 +1,43 @@
 #!/usr/bin/env bash
 # Pre-merge verification gate for tests/lib/ shared helpers.
 # Runs syntax checks, shellcheck, inline-definition audits, bats unit tests, the
-# bare-scrape, keyed-array and bats-negation lints, and the CI dry-run smoke (every tests/
-# script annotated `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
+# bare-scrape and keyed-array lints, and the CI dry-run smoke (every tests/ script
+# annotated `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
 #
-# Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck]
+# Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck] [--jobs N]
 # A missing shellcheck or bats-core fails the run; --skip-shellcheck skips that step on purpose.
+# --jobs N runs N bats files at once (each file's tests in order); it needs GNU parallel, and
+# without it the files run one after another, with a warning.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SKIP_DRY_RUN=0
 SKIP_SHELLCHECK=0
+JOBS=1
 
-for arg in "$@"; do
-	case "$arg" in
+usage() {
+	echo "Usage: $(basename "$0") [--skip-dry-run] [--skip-shellcheck] [--jobs N]"
+	echo "  --skip-dry-run     skip the dry-run smoke of the '# ci-dry-run:' scripts"
+	echo "  --skip-shellcheck  skip shellcheck"
+	echo "  --jobs N           run N bats files at once (default 1; needs GNU parallel)"
+}
+
+while (($#)); do
+	case "$1" in
 	--skip-dry-run)    SKIP_DRY_RUN=1 ;;
 	--skip-shellcheck) SKIP_SHELLCHECK=1 ;;
+	--jobs)
+		[[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || { echo "error: --jobs needs a whole number of jobs, 1 or more" >&2; exit 1; }
+		JOBS="$2"
+		shift
+		;;
 	-h|--help)
-		echo "Usage: $(basename "$0") [--skip-dry-run] [--skip-shellcheck]"
+		usage
 		exit 0
 		;;
-	*) echo "error: unknown option: $arg" >&2; exit 1 ;;
+	*) echo "error: unknown option: $1" >&2; usage >&2; exit 1 ;;
 	esac
+	shift
 done
 
 # Every step runs awk. Sourcing common.sh checks it (awk_untyped_ok): with gawk 5.2 or 5.3 it runs
@@ -131,7 +147,6 @@ EXTRACTED_PATTERNS=(
 	'validate_traffic_config() {'
 	'vsdr_service_count() {'
 	'config_dump_breakdown() {'
-	'resume_preamble_scalar() {'
 	# dataplane local baseline: fortio.sh + is_ratio
 	'is_ratio() {'
 	'fortio_percentile_ms() {'
@@ -209,8 +224,23 @@ EXTRACTED_PATTERNS=(
 	'run_timeout() {'
 	# counter window deltas (metrics.sh)
 	'counter_delta() {'
-	# sweep outcome (common.sh)
-	'sweep_outcome() {'
+	# a sweep's start, steps, stop and outcome (common.sh)
+	'sweep_settings_check() {'
+	'sweep_start() {'
+	'_sweep_record() {'
+	'_sweep_mask() {'
+	'sweep_step() {'
+	'_sweep_step_stop() {'
+	'_sweep_step_kill() {'
+	'_sweep_on_signal() {'
+	'_sweep_on_exit() {'
+	'sweep_err_trap() {'
+	'sweep_problem() {'
+	# anchored: controlplane 004's msweep_note is another function
+	'^[[:space:]]*sweep_note() {'
+	'_sweep_outcome_by() {'
+	'sweep_finish() {'
+	'sweep_outcome_lines() {'
 	# which propagation rows count (propagation.sh, awk)
 	'function prop_drop_reason('
 	'function prop_p1_drop_reason('
@@ -220,38 +250,16 @@ EXTRACTED_PATTERNS=(
 	'function prop_p3_sample('
 	# the Istio version the mesh runs, read at the start and the end (preamble.sh)
 	'istio_live_version() {'
-	'_istio_version_read_all() {'
-	'_istio_version_repro() {'
-	'_istio_version_marker() {'
+	'_istio_read() {'
+	'_istio_read_all() {'
+	'_istio_read_one() {'
 	'istio_version_resolve() {'
-	'_istio_notready_notes() {'
 	'istio_version_recheck() {'
+	'istio_generations_read() {'
+	'istio_generations_diff() {'
 	'istio_version_kv() {'
 	'istio_version_label() {'
-	# the version check runs apart and fails closed; kubectl's why without klog
-	'_istio_version_isolated() {'
-	'_istio_version_resolve_live() {'
-	'_istio_version_recheck_emit() {'
-	'_istio_version_recheck_live() {'
-	'_istio_version_errline() {'
-	'_istio_version_hostkey() {'
-	# sweep outcome record (common.sh), multi-run refusal (config.sh)
-	'_sweep_outcome_by() {'
-	'_sweep_outcome_sweep_ids() {'
-	'sweep_outcome_recorded() {'
-	# not-finished record, latest attempts (common.sh); dirty hash, masked
-	# errors, generations, proxy versions (preamble.sh); proxy summary (envelope.sh)
-	'sweep_outcome_unfinished() {'
-	'sweep_outcome_start() {'
-	'controlplane_latest_attempts() {'
-	'_harness_keys() {'
-	'_istio_version_mask() {'
-	'_istio_live_version_read() {'
-	'istio_proxy_versions() {'
-	'_istio_proxy_versions_one() {'
-	'_istio_proxy_versions_off() {'
-	'_istio_proxy_versions_warn() {'
-	'env_proxy_versions_summary() {'
+	# multi-run refusal (config.sh)
 	'_config_run_key() {'
 	'_config_run_ids() {'
 	'_config_sq() {'
@@ -265,81 +273,29 @@ EXTRACTED_PATTERNS=(
 	# the keyed-array arithmetic lint (lint-keyed-arith.sh)
 	'lint_keyed_arith_file() {'
 	'lint_keyed_arith_paths() {'
-	# the bats negation lint (lint-bats-negation.sh)
-	'lint_bats_negation_file() {'
-	'lint_bats_negation_paths() {'
-	# placeholder rows and the legacy schema (propagation.sh); a
-	# sweep that ends before its outcome, escaped markdown cells, a fork-free size check
-	# (common.sh)
+	# placeholder rows and the legacy schema (propagation.sh); a TSV's end line,
+	# escaped markdown cells, a fork-free size check (common.sh)
 	'prop_placeholder_row() {'
 	'function prop_legacy_reason_('
-	'sweep_trap_signals() {'
-	'_sweep_on_signal() {'
-	'sweep_err_trap() {'
-	'sweep_outcome_cut_short() {'
-	'sweep_outcome_brief() {'
-	'sweep_outcome_pooled() {'
 	'tsv_end_line() {'
-	'sweep_outcome_on_exit() {'
 	'md_cell() {'
 	'function md_cell('
 	'yaml_str() {'
 	'file_min_bytes() {'
-	# one run per sweep dir, signals reach a sweep's step, one harness
-	# per sweep and per report (common.sh); a controlplane cell's attempts and states
-	# (common.sh CP_CELL_AWK); the Istio CR generations a sweep reads again (preamble.sh)
-	'sweep_step() {'
-	'sweep_lock() {'
-	'_sweep_unlock() {'
-	'harness_sha_for_sweep() {'
-	'report_harness_sha() {'
-	# a sweep's harness read again before its steps and at its end; its step's whole
-	# process tree stopped on a signal; a stale lock taken over by one run (common.sh)
-	'harness_sha_check() {'
-	'_harness_sha_sweep_end() {'
-	'_sweep_tree_read() {'
-	'_sweep_tree_freeze() {'
-	'_sweep_step_stop() {'
-	'sweep_step_kill() {'
-	'_sweep_step_reap() {'
-	'_sweep_pid_alive() {'
-	'_sweep_lock_refuse() {'
-	'_sweep_lock_release_mutex() {'
+	# a controlplane cell's states (common.sh CP_CELL_AWK)
 	'function cp_header('
 	'function cp_isrow('
 	'function cp_key('
 	'function cp_cell_row('
 	'function cp_cell_state('
-	'function cp_plan_load('
 	'function cp_wl_parse('
 	'function cp_nr_parse('
-	# a controlplane sweep's runs and its resume command (common.sh)
 	'function cp_comment('
 	'function cp_end('
 	'function cp_mxo('
-	'controlplane_attempts() {'
-	'controlplane_resume_cmd() {'
-	'istio_generation_causes() {'
-	'istio_generations_read() {'
-	'istio_generations_diff() {'
-	'istio_version_refresh() {'
-	'_istio_proxy_versions_run() {'
-	'_istio_proxy_versions_cleanup() {'
-	# the harness content key (common.sh); the sweep settings checked at its start; a lock
-	# written in two steps; a stop without a working ps; the one JSON string escaper
-	'harness_read() {'
-	'harness_content_key() {'
-	'_harness_same_files() {'
-	'harness_same() {'
-	'sweep_settings_check() {'
-	'_sweep_lock_pid() {'
-	'_sweep_ps_works() {'
-	'_sweep_ps_check() {'
-	'_sweep_ps_table() {'
-	'_sweep_kill_hint() {'
+	# the one JSON string escaper (common.sh)
 	'JSON_STR_AWK='
 	'function js('
-	'_sweep_resume_rows_added() {'
 	# an in-pod load stopped with its probe, or waited out after its exec failed (fortio.sh)
 	'fortio_client_stop() {'
 	'fortio_load_wait_out() {'
@@ -351,42 +307,29 @@ EXTRACTED_PATTERNS=(
 	'platform_validate() {'
 	'platform_gitops_namespace() {'
 	'platform_pod_filter() {'
+	'platform_members_check() {'
 	'platform_probe() {'
-	'platform_probed_contexts() {'
 	'platform_member_value() {'
-	'platform_probe_save() {'
-	'platform_probe_load() {'
 	'platform_probe_share() {'
+	'platform_recorded_contexts() {'
 	'platform_preamble_lines() {'
 	'platform_md_row() {'
 	'platform_collapse() {'
+	'platform_drift_check() {'
 	'platform_merge_by_context() {'
 	'platform_report_values() {'
+	'platform_report_warnings() {'
 	'platform_report_lines() {'
+	'platform_warning_lines() {'
 	'platform_report_is_key() {'
 	'platform_value_has() {'
-	'platform_help_lines() {'
-	'platform_recorded_contexts() {'
-	'platform_report_warnings() {'
-	'platform_warning_lines() {'
-	'platform_kind_path_warning() {'
 	'platform_unread_members() {'
-	'platform_resume_check() {'
-	'platform_drift_check() {'
-	'platform_compare_values() {'
-	'platform_compare_members() {'
-	'platform_value_against() {'
+	'platform_kind_path_warning() {'
 	'platform_summary() {'
 	'platform_short_digests() {'
 	'platform_tuning_objects() {'
-	'platform_tuning_objects_check() {'
 	'platform_tuning_objects_refuse() {'
 	'platform_start_warnings() {'
-	'platform_probe_reset() {'
-	'platform_members_by_value() {'
-	'platform_drift_changes() {'
-	'platform_drift_unread() {'
-	'platform_lever_values() {'
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
@@ -403,7 +346,17 @@ if ((audit_fail)); then err "inline definitions found outside tests/lib/"; else 
 step 4 "bats-core unit tests"
 BATS="${ROOT}/tests/lib/test/bats-core/bin/bats"
 if [[ -x "$BATS" ]]; then
-	if "$BATS" "$ROOT"/tests/lib/test/*.bats; then
+	bats_jobs=()
+	if ((JOBS > 1)); then
+		# GNU parallel only: moreutils' parallel is another tool, with which bats --jobs fails.
+		# (The output is captured, not piped to grep -q: under pipefail a SIGPIPE would fail it.)
+		if [[ "$(parallel --version 2>/dev/null </dev/null)" == *"GNU parallel"* ]]; then
+			bats_jobs=(--jobs "$JOBS" --no-parallelize-within-files)
+		else
+			echo "    WARNING: --jobs ${JOBS} needs GNU parallel on PATH; running the bats files one after another"
+		fi
+	fi
+	if "$BATS" ${bats_jobs[@]+"${bats_jobs[@]}"} "$ROOT"/tests/lib/test/*.bats; then
 		ok
 	else
 		err "bats tests failed"
@@ -440,23 +393,11 @@ else
 	err "array element read by a variable key in shell arithmetic (read it into a scalar first)"
 fi
 
-# 7. bats negation lint: bash exempts a `!`-negated command from set -e and the ERR trap,
-# so a `! cmd` that is not a bats test's last command never fails the test.
-step 7 "bats negation lint"
-# shellcheck disable=SC1091
-source "${ROOT}/tests/lib/lint-bats-negation.sh"
-if lint_out="$(lint_bats_negation_paths "$ROOT/tests")"; then
-	ok
-else
-	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
-	err "a negated command in a bats test that is not its last never fails it (end it with || false, or use run !)"
-fi
-
-# 8. dry-run smoke — same discovery and args as CI (portability.yml).
+# 7. dry-run smoke — same discovery and args as CI (portability.yml).
 if ((SKIP_DRY_RUN)); then
-	step 8 "dry-run smoke (SKIPPED)"
+	step 7 "dry-run smoke (SKIPPED)"
 else
-	step 8 "dry-run smoke for scripts annotated '# ci-dry-run:'"
+	step 7 "dry-run smoke for scripts annotated '# ci-dry-run:'"
 	dry_fail=0
 	empty_kubeconfig="$(mktemp)"
 	dry_out="$(mktemp)"

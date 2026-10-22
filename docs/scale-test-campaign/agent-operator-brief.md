@@ -21,7 +21,7 @@ provisioning, import, networking or credential work.
    whose log stops growing.
    - **Crash:** launch so the exit is observed — a harness-tracked background task, or poll `kill -0 "$PID"`.
    - **Stall:** flag a sweep whose log has not grown for **≥1200s**. Legitimate quiet stretches
-     add up: namespace cleanup up to the suite's `*_NS_DELETE_TIMEOUT_SEC` (240–300s by default),
+     add up: namespace cleanup up to the suite's `*_NS_DELETE_TIMEOUT_SEC` (180–300s by default),
      the same again while setup waits out a Terminating namespace, then deploy waits.
    - Do **not** detect liveness with `pgrep -f '<pattern>'` when the pattern is in the monitor's
      own command line; it matches itself. Track the PID.
@@ -29,8 +29,8 @@ provisioning, import, networking or credential work.
    and the sweep continues. If a whole suite fails after one recovery attempt, run its cleanup,
    mark it FAILED in `CAMPAIGN_STATUS.md` with a redacted error, and move to the next suite.
 4. **Investigate a breaking error before retrying.** Find the cause with evidence (log tail, pod
-   events, the failing construct in isolation). Then re-run only the remaining `--mesh-sizes`
-   (controlplane: `--resume <sweep-dir>`).
+   events, the failing construct in isolation). Then run the suite's cleanup and re-run only the
+   remaining `--mesh-sizes` (each run writes a new sweep dir).
 5. **Check the numbers, not just the exit code.** `status=OK` only means the probe finished.
    Spot-check that values make sense (local latency < remote latency; expected trends; gauges
    aggregate correctly across the pinned istiod replicas).

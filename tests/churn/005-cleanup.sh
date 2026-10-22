@@ -27,15 +27,19 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE    Run config of KEY=value lines (config/options.env keys; see
-                   tests/churn/README.md, "Run config"). Precedence: flag >
-                   --config > environment > default.
+Deletes the '$NS' namespace on every context.
+
+  --config FILE    Run config of KEY=value lines (config/options.env keys).
+                   Precedence: flag > --config > environment > default.
   --contexts CSV   Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --dry-run        Show what would be deleted without deleting.
   -h, --help       Show this help.
 
-Environment:
-  SETUP_CONTEXTS, CHURN_TEST_NAMESPACE.
+Environment (config/options.env describes each): SETUP_CONTEXTS, CHURN_TEST_NAMESPACE.
+
+Exit codes: 0 cleaned up (or printed); 1 an error or an unreachable context.
+
+See tests/churn/README.md.
 EOF
 }
 

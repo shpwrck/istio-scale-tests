@@ -3,7 +3,8 @@
 /.claude/settings.local.json
 /.claude/worktrees/
 # Editor swap and backup files, macOS Finder metadata (anywhere: a run's HARNESS_SHA
-# counts every untracked file that is not ignored: harness_sha in tests/lib/common.sh)
+# counts every untracked file under tests/, config/, charts/ and terraform/ that is not
+# ignored: harness_sha in tests/lib/common.sh)
 .DS_Store
 *.swp
 *.swo

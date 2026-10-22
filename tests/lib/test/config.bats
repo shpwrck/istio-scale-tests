@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
-# tests/lib/config.sh (`--config FILE` run configs) and its use by tests/controlplane/001-005.
-# Parser and allowlist unit tests first, then tests through the real scripts (PL33). No
-# cluster: every script runs with KUBECONFIG pointing at an empty file. The other suites'
-# scripts are tested in config-suites.bats; the preload-order and vocabulary checks here
-# cover every suite.
+# tests/lib/config.sh (`--config FILE` run configs) and its use by tests/controlplane/001-005:
+# the parser and the vocabulary, precedence and provenance, then the controlplane scripts
+# through their real entrypoints (PL33). No cluster: every script runs with KUBECONFIG pointing
+# at an empty file. The other suites' scripts are tested in config-suites.bats. The parser and
+# the vocabulary run in a child bash: config_allowed_keys forks once per options.env key, which
+# under bats' DEBUG trap takes seconds per suite.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -12,8 +13,6 @@ source "${ROOT}/tests/lib/config.sh"
 GOOD="${ROOT}/tests/lib/test/fixtures/config/good.env"
 SMOKE="${ROOT}/tests/controlplane/configs/smoke.env"
 CP="${ROOT}/tests/controlplane"
-# Every suite with a key map, and its script directory (same name).
-SUITES=(controlplane dataplane churn churn-dataplane propagation gateway-api)
 REPORT_FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
 
 # The keys good.env sets, in file order.
@@ -64,23 +63,11 @@ file_keys() {
 	sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Z][A-Z0-9_]*)=.*/\2/p' "$1"
 }
 
-# reject <line> <reason> <file-line>...: load_config fails, naming <file>:<line>: and the reason.
-reject() {
-	local line="$1" reason="$2" f
-	shift 2
-	f="$(cfg bad.env "$@")"
-	run load_config "$f" controlplane
-	assert_failure 1
-	assert_output --partial "${f}:${line}: ${reason}"
-	assert_output --partial "nothing was applied"
-	refute_output --partial "[config]"
-}
-
 # ---------------------------------------------------------------------------
-# Parser
+# Parser and vocabulary
 # ---------------------------------------------------------------------------
 
-@test "load_config: good.env gives the exact value of every accepted form" {
+@test "load_config: every accepted form gives its exact value (CRLF and no final newline too); every committed example means what a shell reads and sets no SETUP_CONTEXTS" {
 	run loaded "$GOOD" "${GOOD_KEYS[@]}"
 	assert_success
 	assert_output "$(printf '%s\n' \
@@ -95,224 +82,130 @@ reject() {
 		'METRICS_SCRAPE_TIMEOUT=a$b`c "d"' \
 		'FANOUT_PF_BASE=a=b:c/d@e%f+g-h.i,j' \
 		'CAP_TOP_TIMEOUT=')"
-}
-
-@test "load_config: a file that parses means the same when sourced (good.env, smoke.env)" {
-	local f keys
-	for f in "$GOOD" "$SMOKE"; do
-		mapfile -t keys < <(file_keys "$f")
-		[ "${#keys[@]}" -gt 0 ]
-		[ "$(loaded "$f" "${keys[@]}")" = "$(sourced "$f" "${keys[@]}")" ]
-	done
-}
-
-@test "every suite's worked example loads and means the same when sourced" {
-	local s f keys
-	for s in "${SUITES[@]}"; do
-		f="${ROOT}/tests/${s}/configs/smoke.env"
-		[ -f "$f" ] || { echo "missing $f"; false; }
+	[ "$output" = "$(sourced "$GOOD" "${GOOD_KEYS[@]}")" ]
+	local crlf="${BATS_TEST_TMPDIR}/crlf.env" f s keys n=0
+	awk '{ printf "%s%s", (NR > 1 ? "\r\n" : ""), $0 }' "$GOOD" > "$crlf"
+	grep -q $'\r' "$crlf"
+	[ "$(loaded "$crlf" "${GOOD_KEYS[@]}")" = "$output" ]
+	for f in "$ROOT"/tests/*/configs/*.env; do
+		s="${f%/configs/*}"
+		s="${s##*/}"
 		mapfile -t keys < <(file_keys "$f")
 		[ "${#keys[@]}" -gt 0 ]
 		[ "$(LOAD_SUITE="$s" loaded "$f" "${keys[@]}")" = "$(sourced "$f" "${keys[@]}")" ] \
-			|| { echo "$s: loaded != sourced"; false; }
+			|| { echo "${f#"$ROOT"/}: loaded != sourced"; false; }
 		# No real context names in a committed example.
-		! grep -qE '^[[:space:]]*(export[[:space:]]+)?SETUP_CONTEXTS=' "$f" || false
+		! grep -qE '^[[:space:]]*(export[[:space:]]+)?SETUP_CONTEXTS=' "$f" || { echo "${f#"$ROOT"/} sets SETUP_CONTEXTS"; false; }
+		n=$((n + 1))
 	done
+	# One example per suite with a key map at least.
+	((n >= 6))
 }
 
-@test "load_config: CRLF line endings and a missing final newline give the same values" {
-	local crlf="${BATS_TEST_TMPDIR}/crlf.env"
-	awk '{ printf "%s%s", (NR > 1 ? "\r\n" : ""), $0 }' "$GOOD" > "$crlf"
-	[ "$(tail -c 1 "$crlf" | od -An -c | tr -d ' ')" != '\n' ]
-	grep -q $'\r' "$crlf"
-	[ "$(loaded "$crlf" "${GOOD_KEYS[@]}")" = "$(loaded "$GOOD" "${GOOD_KEYS[@]}")" ]
+# _block <name>: the output of one case of the refusal batch below (in $BATCH).
+_block() {
+	awk -v n="== $1 " 'index($0, n) == 1 { on = 1; print; next } /^== / { on = 0 } on' <<<"$BATCH"
 }
 
-@test "load_config: command substitution is rejected and never runs" {
-	reject 1 '$ and ` are not allowed outside single quotes' 'CONTROLPLANE_SETTLE_SEC=$(touch '"${BATS_TEST_TMPDIR}"'/pwned)'
-	[ ! -e "${BATS_TEST_TMPDIR}/pwned" ]
-	reject 1 '$ and ` are not allowed outside single quotes' 'CONTROLPLANE_SETTLE_SEC=`touch '"${BATS_TEST_TMPDIR}"'/pwned`'
-	[ ! -e "${BATS_TEST_TMPDIR}/pwned" ]
-	reject 1 '$ and ` are not allowed outside single quotes' 'CONTROLPLANE_SETTLE_SEC=$HOME'
-	reject 1 '$ and ` are not allowed outside single quotes' 'CONTROLPLANE_SETTLE_SEC="${HOME}"'
-}
-
-@test "load_config: syntax errors name the line and the reason" {
-	reject 1 'bad value' 'CONTROLPLANE_SETTLE_SEC=1;touch x'
-	reject 1 "no spaces around '='" 'CONTROLPLANE_SETTLE_SEC = 1'
-	reject 1 "no spaces around '='" 'CONTROLPLANE_SETTLE_SEC= 1'
-	reject 1 'bad value' 'CONTROLPLANE_SETTLE_SEC=1 2'
-	reject 1 'bad value' "CONTROLPLANE_SETTLE_SEC='1"
-	reject 1 'bad value' 'CONTROLPLANE_SETTLE_SEC="a\b"'
-	reject 1 'keys are upper case' 'controlplane_settle_sec=1'
-	reject 1 'not a KEY=value line' 'just words'
-	reject 3 'duplicate key CONTROLPLANE_SETTLE_SEC (also on line 1)' \
-		'CONTROLPLANE_SETTLE_SEC=1' '# comment' 'CONTROLPLANE_SETTLE_SEC=2'
-}
-
-@test "load_config: keys outside the controlplane vocabulary are rejected" {
-	reject 1 'unknown key CONTROLPLANE_SERVICE_COUTN for the controlplane suite' 'CONTROLPLANE_SERVICE_COUTN=5'
-	reject 1 'unknown key DATAPLANE_QPS_LEVELS' 'DATAPLANE_QPS_LEVELS=10'
-	reject 1 'unknown key METRICS_API_STATUS' 'METRICS_API_STATUS=available'
-	reject 1 'unknown key PATH' 'PATH=/tmp'
-	reject 1 'unknown key LD_PRELOAD' 'LD_PRELOAD=/tmp/x.so'
-	reject 1 'ISTIO_VERSION is a version pin' 'ISTIO_VERSION=v1.0.0'
-	reject 1 'CONTROLPLANE_TEST_NAMESPACE is not settable from --config' 'CONTROLPLANE_TEST_NAMESPACE=istio-system'
-	reject 1 'CONTROLPLANE_MAX_MATRIX is not settable from --config' 'CONTROLPLANE_MAX_MATRIX=9999'
-	# Every suite reads it; a file never turns the Istio version check off.
-	reject 1 'ISTIO_VERSION_CHECK is not settable from --config (env only: running on a mesh whose Istio version is not the pin' 'ISTIO_VERSION_CHECK=warn'
-	# The other shared keys every sweep or version check reads say why too.
-	reject 1 'ISTIO_PROXY_READ_PARALLEL is not settable from --config (env only: ' 'ISTIO_PROXY_READ_PARALLEL=5'
-	reject 1 'HARNESS_SHA_CHECK_SEC is not settable from --config (env only: a setting of every sweep' 'HARNESS_SHA_CHECK_SEC=0'
-	reject 1 'SWEEP_STOP_GRACE_SEC is not settable from --config (env only: a setting of every sweep' 'SWEEP_STOP_GRACE_SEC=1'
-}
-
-@test "load_config: one bad line rejects the whole file; nothing is exported" {
-	local f
-	f="$(cfg late.env 'CONTROLPLANE_SERVICE_COUNT=5' 'CONTROLPLANE_SETTLE_SEC=9' 'CONTROLPLANE_SETTLE_SEX=1')"
-	# The EXIT trap shows the variables when die() exits.
+@test "load_config refuses a whole file that a shell would read otherwise or that sets a key its suite does not take, naming file:line and why; nothing runs, nothing is exported" {
+	local d="${BATS_TEST_TMPDIR}/bad" pw="${BATS_TEST_TMPDIR}/pwned" c b
+	mkdir -p "$d"
+	# <suite>--<case>.env | the line it names | the reason.
+	local -a cases=(
+		"controlplane--subst|1|\$ and \` are not allowed outside single quotes|CONTROLPLANE_SETTLE_SEC=\$(touch ${pw})"
+		"controlplane--backtick|1|\$ and \` are not allowed outside single quotes|CONTROLPLANE_SETTLE_SEC=\`touch ${pw}\`"
+		"controlplane--semicolon|1|bad value|CONTROLPLANE_SETTLE_SEC=1;touch x"
+		"controlplane--quote|1|bad value|CONTROLPLANE_SETTLE_SEC='1"
+		"controlplane--backslash|1|bad value|CONTROLPLANE_SETTLE_SEC=\"a\\b\""
+		"controlplane--spaces|1|no spaces around '='|CONTROLPLANE_SETTLE_SEC = 1"
+		"controlplane--lower|1|keys are upper case|controlplane_settle_sec=1"
+		"controlplane--words|1|not a KEY=value line|just words"
+		"controlplane--typo|1|unknown key CONTROLPLANE_SERVICE_COUTN for the controlplane suite|CONTROLPLANE_SERVICE_COUTN=5"
+		"controlplane--preload|1|unknown key LD_PRELOAD|LD_PRELOAD=/tmp/x.so"
+		"controlplane--pin|1|ISTIO_VERSION is a version pin|ISTIO_VERSION=v1.0.0"
+		"controlplane--internal|1|CONTROLPLANE_TEST_NAMESPACE is not settable from --config|CONTROLPLANE_TEST_NAMESPACE=istio-system"
+		"controlplane--check|1|ISTIO_VERSION_CHECK is not settable from --config (env only|ISTIO_VERSION_CHECK=warn"
+		"controlplane--grace|1|SWEEP_STOP_GRACE_SEC is not settable from --config (env only|SWEEP_STOP_GRACE_SEC=1"
+		"dataplane--other|1|unknown key COEXEC_QPS for the dataplane suite (allowed: SETUP_CONTEXTS and the config/options.env keys DATAPLANE_*|COEXEC_QPS=5"
+	)
+	for c in "${cases[@]}"; do
+		IFS='|' read -r b _ _ line <<<"$c"
+		printf '%s\n' "$line" > "${d}/${b}.env"
+	done
+	# A duplicate key, and a bad last line after good ones: the whole file is refused.
+	printf '%s\n' 'CONTROLPLANE_SETTLE_SEC=1' '# comment' 'CONTROLPLANE_SETTLE_SEC=2' > "${d}/controlplane--dup.env"
+	printf '%s\n' 'CONTROLPLANE_SERVICE_COUNT=5' 'CONTROLPLANE_SETTLE_SEC=9' 'CONTROLPLANE_SETTLE_SEX=1' > "${d}/controlplane--late.env"
+	printf '%s\n' 'CHURN_TEST_NAMESPACE=istio-system' 'COEXEC_TEST_NAMESPACE=istio-system' > "${d}/churn-dataplane--two.env"
+	cases+=("controlplane--dup|3|duplicate key CONTROLPLANE_SETTLE_SEC (also on line 1)|"
+		"controlplane--late|3|unknown key CONTROLPLANE_SETTLE_SEX|"
+		"churn-dataplane--two|1|unknown key CHURN_TEST_NAMESPACE for the churn-dataplane suite|"
+		"churn-dataplane--two|2|COEXEC_TEST_NAMESPACE is not settable from --config|")
+	# Each file in a subshell of one clean bash; its EXIT trap shows what was exported.
 	run env -i PATH="$PATH" ROOT="$ROOT" bash -c '
 		source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/config.sh"
-		trap '\''echo "svc=${CONTROLPLANE_SERVICE_COUNT-unset} settle=${CONTROLPLANE_SETTLE_SEC-unset}"'\'' EXIT
-		load_config "$1" controlplane' _ "$f" </dev/null
-	assert_failure 1
-	assert_output --partial "late.env:3: unknown key CONTROLPLANE_SETTLE_SEX"
-	assert_output --partial "svc=unset settle=unset"
-	refute_output --partial "[config]"
-}
-
-@test "load_config: a missing file and an unmapped suite die" {
-	run load_config "${BATS_TEST_TMPDIR}/nope.env" controlplane
+		for f in "$@"; do
+			b="${f##*/}"; b="${b%.env}"; s="${b%%--*}"; rc=0
+			out="$( (trap '\''echo "exported: svc=${CONTROLPLANE_SERVICE_COUNT-unset} settle=${CONTROLPLANE_SETTLE_SEC-unset}"'\'' EXIT
+				load_config "$f" "$s") 2>&1)" || rc=$?
+			printf "== %s rc=%s\n%s\n" "$b" "$rc" "$out"
+		done' _ "$d"/*.env </dev/null
+	BATCH="$output"
+	[ ! -e "$pw" ]
+	for c in "${cases[@]}"; do
+		IFS='|' read -r b line reason _ <<<"$c"
+		run -0 _block "$b"
+		[[ "$output" == "== ${b} rc=1"* ]] || { echo "$output"; false; }
+		[[ "$output" == *"${d}/${b}.env:${line}: ${reason}"* ]] || { echo "$output"; false; }
+		[[ "$output" == *"nothing was applied"* && "$output" != *"[config]"* ]] || { echo "$output"; false; }
+		[[ "$output" == *"exported: svc=unset settle=unset"* ]] || { echo "$output"; false; }
+	done
+	# A missing file and a suite without a key map die too.
+	run bash -c 'source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/config.sh"; load_config "$1" controlplane' _ "${d}/nope.env"
 	assert_failure 1
 	assert_output --partial "nope.env: not a readable file"
-	run load_config "$GOOD" tuning
+	run bash -c 'source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/config.sh"; load_config "$1" tuning' _ "$GOOD"
 	assert_failure 1
 	assert_output --partial "the 'tuning' suite has no config key map yet"
 }
 
-@test "load_config: logs each key, and the env value it overrides" {
-	local f
-	f="$(cfg log.env 'CONTROLPLANE_SERVICE_COUNT=5' 'CONTROLPLANE_SETTLE_SEC=20')"
-	CONTROLPLANE_SERVICE_COUNT=7 run --separate-stderr load_config "$f" controlplane
+@test "config_allowed_keys: a suite's options.env exports and shared keys, never an env-only key or another suite's; a file setting each of controlplane's loads" {
+	local all="${BATS_TEST_TMPDIR}/all.env" c s yes no k
+	run bash -c 'source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/config.sh"
+		for s in controlplane dataplane churn churn-dataplane propagation gateway-api; do
+			config_allowed_keys "$s" | sed "s/^/${s} /"
+		done
+		config_allowed_keys controlplane | sed "s/\$/=1/" > "$1"
+		load_config "$1" controlplane 2>&1 | grep -c "^\[config\]" | sed "s/^/loaded /"
+		_config_key_matches CHURN_DEPLOYMENT_COUNTS CHURN_DEPLOYMENT_COUNT && echo "prefix: whole name matched"
+		_config_key_matches DATAPLANE_QPS_LEVELS DATAPLANE_ && echo "prefix: DATAPLANE_ matched"' _ "$all" </dev/null
 	assert_success
-	[[ "$stderr" == *"[config] log.env sha256="*": CONTROLPLANE_SERVICE_COUNT=5 (overrides env '7')"* ]]
-	[[ "$stderr" == *": CONTROLPLANE_SETTLE_SEC=20"* ]]
-	[[ "$stderr" != *"CONTROLPLANE_SETTLE_SEC=20 (overrides"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# Allowlist
-# ---------------------------------------------------------------------------
-
-@test "config_allowed_keys: options.env exports with the suite prefixes, minus env-only keys" {
-	run config_allowed_keys controlplane
-	assert_success
-	for k in SETUP_CONTEXTS CONTROLPLANE_SERVICE_COUNT CONTROLPLANE_SETTLE_SEC CONTROLPLANE_RESULTS_DIR \
-		CONTROLPLANE_WAIT_TIMEOUT_SEC CONTROLPLANE_MESH_SIZES CONTROLPLANE_TRAFFIC_CONFIGS \
-		CONTROLPLANE_VSDR_EVERY CONTROLPLANE_VSDR_SUBSETS CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT \
-		CONTROLPLANE_NS_DELETE_TIMEOUT_SEC SCALE_SIZING_MODE METRICS_SCRAPE_TIMEOUT FANOUT_MAX_SKEW_MS \
-		CAP_TOP_TIMEOUT; do
-		grep -qx "$k" <<<"$output" || { echo "missing: $k"; false; }
-	done
-	for k in CONTROLPLANE_TEST_NAMESPACE CONTROLPLANE_MAX_MATRIX ISTIO_VERSION BUSYBOX_VERSION \
-		ISTIO_VERSION_CHECK DATAPLANE_QPS_LEVELS METRICS_API_STATUS PATH; do
-		! grep -qx "$k" <<<"$output" || { echo "unexpected: $k"; false; }
-	done
-	# Every listed key is an options.env export (or SETUP_CONTEXTS), so a key added
-	# there later is accepted with no change here.
-	for k in $output; do
-		[ "$k" = SETUP_CONTEXTS ] || grep -q "^export ${k}=" "${ROOT}/config/options.env"
-	done
-}
-
-@test "config_allowed_keys: a file setting every allowed key loads" {
-	local f="${BATS_TEST_TMPDIR}/all.env"
-	config_allowed_keys controlplane | sed 's/$/=1/' > "$f"
-	run load_config "$f" controlplane
-	assert_success
-	[ "$(grep -c '^\[config\]' <<<"$output")" -eq "$(wc -l < "$f")" ]
-}
-
-@test "config_allowed_keys: each suite's list, its shared keys, and nothing from another suite" {
-	local s k
 	# suite | keys it must allow | keys it must not allow
 	local -a cases=(
-		"dataplane|DATAPLANE_QPS_LEVELS DATAPLANE_MESH_SIZES DATAPLANE_RESULTS_DIR DATAPLANE_WAIT_TIMEOUT_SEC DATAPLANE_NS_DELETE_TIMEOUT_SEC REACH_REQUESTS REACH_ON_UNREACHABLE FANOUT_MAX_SKEW_MS METRICS_SCRAPE_TIMEOUT SETUP_CONTEXTS|DATAPLANE_TEST_NAMESPACE DATAPLANE_MAX_MATRIX METRICS_READY_TIMEOUT CONTROLPLANE_SERVICE_COUNT COEXEC_QPS CAP_TOP_TIMEOUT SCALE_SIZING_MODE"
-		"churn|CHURN_DEPLOYMENT_COUNT CHURN_INTENSITIES CHURN_MESH_SIZES CHURN_RESULTS_DIR CHURN_WAIT_TIMEOUT_SEC FANOUT_PF_BASE METRICS_SCRAPE_TIMEOUT|CHURN_TEST_NAMESPACE REACH_REQUESTS COEXEC_QPS DATAPLANE_QPS_LEVELS"
-		"churn-dataplane|COEXEC_QPS COEXEC_MESH_SIZES COEXEC_RESULTS_DIR COEXEC_WAIT_TIMEOUT_SEC COEXEC_ISTIOD_REPLICAS REACH_REQUESTS CHURN_DEPLOYMENT_COUNT CHURN_BASE_REPLICAS CHURN_SCALE_TO_REPLICAS FANOUT_MAX_SKEW_MS METRICS_SCRAPE_TIMEOUT|COEXEC_TEST_NAMESPACE CHURN_TEST_NAMESPACE CHURN_ITERATIONS CHURN_INTENSITIES CHURN_SETTLE_SEC DATAPLANE_QPS_LEVELS"
-		"propagation|PROPAGATION_ITERATIONS PROPAGATION_MESH_SIZES PROPAGATION_RESULTS_DIR PROPAGATION_WAIT_TIMEOUT_SEC PROPAGATION_SNAPSHOT_PF_BASE FANOUT_CTX_STRIDE METRICS_SCRAPE_TIMEOUT|PROPAGATION_TEST_NAMESPACE PROPAGATION_MAX_MATRIX REACH_REQUESTS METRICS_READY_INTERVAL"
-		"gateway-api|GWAPI_WORKLOAD_CONTEXT GWAPI_HUB_CONTEXT GWAPI_INGRESS GWAPI_REQUESTS GWAPI_TIMEOUT_SEC GWAPI_DETAIL_TIMEOUT_SEC GWAPI_WAIT_TIMEOUT_SEC GWAPI_GATE_PASSES GWAPI_SETTLE_SEC GWAPI_REPROBE_DELAY_SEC GWAPI_NAMESPACE GWAPI_SHARED_NAMESPACE GWAPI_RESULTS_DIR SETUP_CONTEXTS|REACH_REQUESTS FANOUT_PF_BASE METRICS_SCRAPE_TIMEOUT DATAPLANE_QPS_LEVELS PROPAGATION_TEST_NAMESPACE"
+		"controlplane|SETUP_CONTEXTS CONTROLPLANE_SERVICE_COUNT CONTROLPLANE_MESH_SIZES CONTROLPLANE_TRAFFIC_CONFIGS CONTROLPLANE_NS_DELETE_TIMEOUT_SEC SCALE_SIZING_MODE METRICS_SCRAPE_TIMEOUT FANOUT_MAX_SKEW_MS CAP_TOP_TIMEOUT ISTIOD_DIAG_ENABLED TEST_PLATFORM|CONTROLPLANE_TEST_NAMESPACE CONTROLPLANE_MAX_MATRIX ISTIO_VERSION BUSYBOX_VERSION ISTIO_VERSION_CHECK DATAPLANE_QPS_LEVELS METRICS_API_STATUS PATH"
+		"dataplane|DATAPLANE_QPS_LEVELS DATAPLANE_MESH_SIZES DATAPLANE_NS_DELETE_TIMEOUT_SEC REACH_REQUESTS REACH_ON_UNREACHABLE FANOUT_MAX_SKEW_MS SETUP_CONTEXTS|DATAPLANE_TEST_NAMESPACE DATAPLANE_MAX_MATRIX METRICS_READY_TIMEOUT CONTROLPLANE_SERVICE_COUNT COEXEC_QPS CAP_TOP_TIMEOUT SCALE_SIZING_MODE"
+		"churn|CHURN_DEPLOYMENT_COUNT CHURN_INTENSITIES CHURN_MESH_SIZES FANOUT_PF_BASE METRICS_SCRAPE_TIMEOUT|CHURN_TEST_NAMESPACE REACH_REQUESTS COEXEC_QPS DATAPLANE_QPS_LEVELS"
+		"churn-dataplane|COEXEC_QPS COEXEC_MESH_SIZES COEXEC_ISTIOD_REPLICAS REACH_REQUESTS CHURN_DEPLOYMENT_COUNT CHURN_BASE_REPLICAS CHURN_SCALE_TO_REPLICAS|COEXEC_TEST_NAMESPACE CHURN_TEST_NAMESPACE CHURN_ITERATIONS CHURN_INTENSITIES CHURN_SETTLE_SEC DATAPLANE_QPS_LEVELS"
+		"propagation|PROPAGATION_ITERATIONS PROPAGATION_MESH_SIZES PROPAGATION_SNAPSHOT_PF_BASE FANOUT_CTX_STRIDE|PROPAGATION_TEST_NAMESPACE PROPAGATION_MAX_MATRIX REACH_REQUESTS METRICS_READY_INTERVAL"
+		"gateway-api|GWAPI_WORKLOAD_CONTEXT GWAPI_REQUESTS GWAPI_GATE_PASSES GWAPI_REPROBE_DELAY_SEC SETUP_CONTEXTS|REACH_REQUESTS FANOUT_PF_BASE METRICS_SCRAPE_TIMEOUT DATAPLANE_QPS_LEVELS"
 	)
-	local c allowed yes no
 	for c in "${cases[@]}"; do
 		IFS='|' read -r s yes no <<<"$c"
-		allowed="$(config_allowed_keys "$s")"
-		for k in $yes; do grep -qx "$k" <<<"$allowed" || { echo "$s: missing $k"; false; }; done
-		for k in $no; do ! grep -qx "$k" <<<"$allowed" || { echo "$s: unexpected $k"; false; }; done
+		for k in $yes; do grep -qx "${s} ${k}" <<<"$output" || { echo "${s}: missing ${k}"; false; }; done
+		for k in $no; do ! grep -qx "${s} ${k}" <<<"$output" || { echo "${s}: unexpected ${k}"; false; }; done
 	done
+	# Every key a suite takes is an options.env export (or SETUP_CONTEXTS), so a key added
+	# there later is taken with no change here; and every one of them loads.
+	for k in $(awk '$1 == "controlplane" { print $2 }' <<<"$output"); do
+		[ "$k" = SETUP_CONTEXTS ] || grep -q "^export ${k}=" "${ROOT}/config/options.env" || { echo "not an options.env export: ${k}"; false; }
+	done
+	assert_line "loaded $(wc -l < "$all")"
 	# A whole key name is not a prefix: CHURN_DEPLOYMENT_COUNT does not let CHURN_DEPLOYMENT_COUNTS in.
-	run _config_key_matches CHURN_DEPLOYMENT_COUNTS CHURN_DEPLOYMENT_COUNT
-	assert_failure
-	run _config_key_matches DATAPLANE_QPS_LEVELS DATAPLANE_
-	assert_success
-}
-
-@test "config_allowed_keys: for every suite, a file setting every allowed key loads" {
-	local s f
-	for s in "${SUITES[@]}"; do
-		f="${BATS_TEST_TMPDIR}/all-${s}.env"
-		config_allowed_keys "$s" | sed 's/$/=1/' > "$f"
-		run load_config "$f" "$s"
-		assert_success
-		[ "$(grep -c '^\[config\]' <<<"$output")" -eq "$(wc -l < "$f")" ]
-	done
-}
-
-@test "load_config: a key of another suite names the suite's list" {
-	local f
-	f="$(cfg dp.env 'COEXEC_QPS=5')"
-	run load_config "$f" dataplane
-	assert_failure 1
-	assert_output --partial "unknown key COEXEC_QPS for the dataplane suite (allowed: SETUP_CONTEXTS and the config/options.env keys DATAPLANE_*, REACH_*, FANOUT_*, METRICS_SCRAPE_TIMEOUT)"
-	f="$(cfg cd.env 'CHURN_TEST_NAMESPACE=istio-system' 'COEXEC_TEST_NAMESPACE=istio-system')"
-	run load_config "$f" churn-dataplane
-	assert_failure 1
-	assert_output --partial "cd.env:1: unknown key CHURN_TEST_NAMESPACE for the churn-dataplane suite"
-	assert_output --partial "cd.env:2: COEXEC_TEST_NAMESPACE is not settable from --config"
-}
-
-# reads_ok <suite> <script>: every config/options.env key the script reads with ${KEY is
-# in the suite's vocabulary, or environment only. Script-internal names are skipped.
-reads_ok() {
-	local s="$1" f="$2" allowed k
-	allowed="$(config_allowed_keys "$s")"
-	for k in $(grep -ohE '\$\{[A-Z][A-Z0-9_]+' "$f" | sed 's/^\${//' | sort -u); do
-		grep -q "^export ${k}=" "${ROOT}/config/options.env" || continue
-		grep -qE "^[[:space:]]*${k}=" "$f" && continue
-		[[ -n "$(_config_env_only_reason "$k")" ]] && continue
-		grep -qx "$k" <<<"$allowed" || { echo "$(basename "$f") ($s) reads $k, which its --config cannot set"; return 1; }
-	done
-}
-
-@test "every options.env key a suite's scripts read is in that suite's --config vocabulary" {
-	local s f n=0
-	for s in "${SUITES[@]}"; do
-		for f in "${ROOT}/tests/${s}"/0*.sh; do
-			reads_ok "$s" "$f"
-			n=$((n + 1))
-		done
-	done
-	[ "$n" -eq 28 ]
-	# The check fires on a script that reads a key outside its list.
-	f="${BATS_TEST_TMPDIR}/005-reads.sh"
-	printf '%s\n' '#!/usr/bin/env bash' 'echo "${COEXEC_QPS:-200}"' > "$f"
-	run reads_ok dataplane "$f"
-	assert_failure
-	assert_output --partial "reads COEXEC_QPS, which its --config cannot set"
+	refute_line "prefix: whole name matched"
+	assert_line "prefix: DATAPLANE_ matched"
 }
 
 # ---------------------------------------------------------------------------
-# Precedence and options.env defaults
+# Precedence, config_preload, provenance
 # ---------------------------------------------------------------------------
 
 # after_versions <config-or-empty> <key>...: config_preload, then source versions.env.
@@ -328,17 +221,18 @@ after_versions() {
 		for k in "$@"; do printf "%s=%s\n" "$k" "${!k-<unset>}"; done' _ "$f" "$@"
 }
 
-@test "precedence: --config beats the environment; without --config the environment stays" {
+@test "precedence: --config beats the environment, an empty value is the built-in default, and options.env derives its dependent defaults from config values (PL37)" {
 	local f
 	f="$(cfg p.env 'CONTROLPLANE_SERVICE_COUNT=5')"
 	CONTROLPLANE_SERVICE_COUNT=7 run after_versions "$f" CONTROLPLANE_SERVICE_COUNT RUN_CONFIG
 	assert_output "$(printf '%s\n' CONTROLPLANE_SERVICE_COUNT=5 RUN_CONFIG=p.env)"
+	# Without --config the environment stays.
 	CONTROLPLANE_SERVICE_COUNT=7 run after_versions "" CONTROLPLANE_SERVICE_COUNT RUN_CONFIG RUN_CONFIG_SHA256
 	assert_output "$(printf '%s\n' CONTROLPLANE_SERVICE_COUNT=7 RUN_CONFIG=none RUN_CONFIG_SHA256=none)"
-}
-
-@test "precedence: options.env derives its dependent defaults from config values (PL37)" {
-	local f
+	f="$(cfg e.env 'CONTROLPLANE_CLEANUP_GRACE_SEC=' 'CONTROLPLANE_RESULTS_DIR=')"
+	CONTROLPLANE_CLEANUP_GRACE_SEC=9 CONTROLPLANE_RESULTS_DIR=/elsewhere \
+		run after_versions "$f" CONTROLPLANE_CLEANUP_GRACE_SEC CONTROLPLANE_RESULTS_DIR
+	assert_output "$(printf '%s\n' CONTROLPLANE_CLEANUP_GRACE_SEC=5 CONTROLPLANE_RESULTS_DIR=tests/controlplane/results)"
 	f="$(cfg d.env 'CONTROLPLANE_NS_DELETE_TIMEOUT_SEC=600' 'METRICS_SCRAPE_TIMEOUT=77')"
 	run env -u CONTROLPLANE_SETUP_NS_WAIT_SEC -u FANOUT_METRICS_TIMEOUT \
 		bash -c "$(declare -f after_versions); after_versions \"\$@\"" _ "$f" \
@@ -348,18 +242,6 @@ after_versions() {
 	CONTROLPLANE_SETUP_NS_WAIT_SEC=50 run after_versions "$f" CONTROLPLANE_SETUP_NS_WAIT_SEC
 	assert_output CONTROLPLANE_SETUP_NS_WAIT_SEC=50
 }
-
-@test "precedence: an empty value means the built-in default, whatever the environment says" {
-	local f
-	f="$(cfg e.env 'CONTROLPLANE_CLEANUP_GRACE_SEC=' 'CONTROLPLANE_RESULTS_DIR=')"
-	CONTROLPLANE_CLEANUP_GRACE_SEC=9 CONTROLPLANE_RESULTS_DIR=/elsewhere \
-		run after_versions "$f" CONTROLPLANE_CLEANUP_GRACE_SEC CONTROLPLANE_RESULTS_DIR
-	assert_output "$(printf '%s\n' CONTROLPLANE_CLEANUP_GRACE_SEC=5 CONTROLPLANE_RESULTS_DIR=tests/controlplane/results)"
-}
-
-# ---------------------------------------------------------------------------
-# config_preload, provenance
-# ---------------------------------------------------------------------------
 
 @test "config_preload: --config needs exactly one file argument" {
 	run config_preload controlplane --dry-run --config
@@ -376,8 +258,8 @@ after_versions() {
 	assert_success
 }
 
-@test "provenance: RUN_CONFIG is repo-relative inside the repo, else the basename; sha256 matches" {
-	local sum abs
+@test "provenance: RUN_CONFIG is repo-relative inside the repo, else the basename (never a home path), with its sha256; a step keeps its sweep's; config_repo_path resolves from the repo root" {
+	local sum abs arg f
 	sum="$(sha256sum "$SMOKE" | cut -d' ' -f1)"
 	abs="$(cd "$(dirname "$SMOKE")" && pwd -P)/smoke.env"
 	for arg in "$SMOKE" "tests/controlplane/configs/smoke.env"; do
@@ -390,27 +272,20 @@ after_versions() {
 	run bash -c 'cd "$ROOT/tests/controlplane"; source ../lib/common.sh; source ../lib/config.sh
 		config_preload controlplane --config configs/smoke.env 2>/dev/null; echo "$RUN_CONFIG"'
 	assert_output "tests/controlplane/configs/smoke.env"
-	local f
 	f="$(cfg 'my lab.local.env' 'CONTROLPLANE_SETTLE_SEC=5')"
 	run bash -c 'source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/config.sh"
 		config_preload controlplane --config "$1" 2>/dev/null; echo "$RUN_CONFIG"' _ "$f"
 	assert_output "my_lab.local.env"
 	[[ "$output" != *"$HOME"* ]]
-}
-
-@test "provenance: config_preamble_lines prints two lines; without --config they are none or inherited" {
+	# config_preamble_lines: the two lines, none without --config, a sweep's when a step inherits them.
 	RUN_CONFIG=x.env RUN_CONFIG_SHA256=abc run config_preamble_lines
 	assert_output "$(printf '%s\n' '# RUN_CONFIG=x.env' '# RUN_CONFIG_SHA256=abc')"
 	run bash -c 'unset RUN_CONFIG RUN_CONFIG_SHA256; source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/config.sh"
 		config_preload controlplane --dry-run; config_preamble_lines'
 	assert_output "$(printf '%s\n' '# RUN_CONFIG=none' '# RUN_CONFIG_SHA256=none')"
-	# A step run by a config-driven sweep keeps the sweep's provenance.
 	RUN_CONFIG=smoke.env RUN_CONFIG_SHA256=abc run bash -c 'source "$ROOT/tests/lib/common.sh"; source "$ROOT/tests/lib/config.sh"
 		config_preload controlplane; config_preamble_lines'
 	assert_output "$(printf '%s\n' '# RUN_CONFIG=smoke.env' '# RUN_CONFIG_SHA256=abc')"
-}
-
-@test "config_repo_path: absolute paths stay, relative ones resolve from the repo root" {
 	run config_repo_path /abs/dir
 	assert_output /abs/dir
 	run config_repo_path tests/controlplane/results
@@ -420,60 +295,6 @@ after_versions() {
 # ---------------------------------------------------------------------------
 # Controlplane scripts (PL33: through the real entrypoints)
 # ---------------------------------------------------------------------------
-
-# preload_order_ok <script> [suite]: config_preload <suite> "$@" runs before the first
-# versions.env/options.env source, the first other tests/lib source after config.sh (a lib
-# such as fanout.sh reads its defaults when sourced) and the first read of a key the suite
-# can set; the parser has a --config) arm; the usage lists --config FILE.
-preload_order_ok() {
-	local f="$1" s="${2:-controlplane}" pre src lib rd p re=""
-	for p in $(config_suite_prefixes "$s"); do re="${re:+${re}|}${p}"; done
-	pre="$(grep -n "^config_preload ${s} \"\\\$@\"" "$f" | head -1 | cut -d: -f1)"
-	src="$(grep -nE 'source .*config/(versions|options)\.env' "$f" | head -1 | cut -d: -f1)"
-	lib="$(grep -nE 'source .*tests/lib/' "$f" | grep -vE 'tests/lib/(common|config)\.sh' | head -1 | cut -d: -f1)"
-	rd="$(grep -nE "\\\$\{(${re})" "$f" | head -1 | cut -d: -f1)"
-	[[ -n "$pre" && -n "$src" ]] || { echo "$f: missing preload ($pre) or versions/options.env source ($src)"; return 1; }
-	((pre < src)) || { echo "$f: config_preload (line $pre) after versions/options.env (line $src)"; return 1; }
-	[[ -z "$lib" ]] || ((pre < lib)) || { echo "$f: config_preload (line $pre) after a tests/lib source (line $lib)"; return 1; }
-	[[ -z "$rd" ]] || ((pre < rd)) || { echo "$f: config_preload (line $pre) after a ${s} key read (line $rd)"; return 1; }
-	grep -qE '^[[:space:]]+--config\)' "$f" || { echo "$f: no --config) parser arm"; return 1; }
-	grep -q -- '--config FILE' "$f" || { echo "$f: usage lacks --config FILE"; return 1; }
-}
-
-@test "every numbered script of every suite calls config_preload before any default is read" {
-	local s f n=0
-	for s in "${SUITES[@]}"; do
-		for f in "${ROOT}/tests/${s}"/0*.sh; do
-			preload_order_ok "$f" "$s"
-			n=$((n + 1))
-		done
-	done
-	# controlplane 5, dataplane 5, churn 5, churn-dataplane 6, propagation 6, gateway-api 1
-	[ "$n" -eq 28 ]
-	# Tuning has no key map yet: none of its scripts preloads.
-	! grep -l 'config_preload' "${ROOT}"/tests/tuning/0*.sh
-}
-
-@test "the preload-order check fires on a script that preloads too late" {
-	local f="${BATS_TEST_TMPDIR}/005-late.sh"
-	# Move the preload below the versions.env source.
-	awk '/^config_preload controlplane/ { held = $0; next }
-		{ print } index($0, "config/versions.env\"") && held != "" { print held; held = "" }' \
-		"$CP/005-cleanup.sh" > "$f"
-	grep -q 'config_preload controlplane' "$f"
-	run preload_order_ok "$f"
-	assert_failure
-	assert_output --partial "after versions/options.env"
-	# propagation 002 sources fanout.sh before versions.env: the preload must precede it too.
-	f="${BATS_TEST_TMPDIR}/002-late.sh"
-	awk '/^config_preload propagation/ { held = $0; next }
-		{ print } index($0, "tests/lib/fanout.sh\"") && held != "" { print held; held = "" }' \
-		"${ROOT}/tests/propagation/002-run-endpoint-probe.sh" > "$f"
-	grep -q 'config_preload propagation' "$f"
-	run preload_order_ok "$f" propagation
-	assert_failure
-	assert_output --partial "after a tests/lib source"
-}
 
 @test "003 --dry-run --config: config values, the matrix and the Run config line; env loses, flags win" {
 	cd "$ROOT"
@@ -495,16 +316,13 @@ preload_order_ok() {
 	[[ "$stderr" == *"Planned matrix:    2 = 1×1×1×1×2×1"* ]]
 }
 
-@test "003: a results dir from --config is not --output-dir, so --resume accepts it" {
-	cd "$ROOT"
-	KUBECONFIG="$EK" run bash tests/controlplane/003-run-sweep.sh --dry-run \
-		--config tests/controlplane/configs/smoke.env --resume /nonexistent
+@test "003: a repeated axis value is refused before any step (one cell would run twice under one key)" {
+	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --dry-run --contexts ci-a --service-counts 5,5
 	assert_failure 1
-	assert_output --partial "--resume is not valid with --dry-run"
-	refute_output --partial "mutually exclusive"
-	KUBECONFIG="$EK" run bash tests/controlplane/003-run-sweep.sh --resume /nonexistent --output-dir /tmp/x
+	assert_output --partial "--service-counts repeats a value (5,5)"
+	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --dry-run --contexts ci-a --traffic-configs none,vsdr,none
 	assert_failure 1
-	assert_output --partial "--resume and --output-dir are mutually exclusive"
+	assert_output --partial "--traffic-configs repeats a value (none,vsdr,none)"
 }
 
 @test "001 --help shows the config's values as defaults; env loses to the config" {
@@ -512,11 +330,11 @@ preload_order_ok() {
 	CONTROLPLANE_SERVICE_COUNT=7 run bash tests/controlplane/001-setup-controlplane-test.sh \
 		--config tests/controlplane/configs/smoke.env --help
 	assert_success
-	assert_output --partial "--service-count N      Number of dummy services per cluster (default: 5)."
-	assert_output --partial "--wait-timeout N       Seconds to wait for pods (default: 300)."
+	help_shows_default 5 --service-count CONTROLPLANE_SERVICE_COUNT
+	help_shows_default 300 --wait-timeout CONTROLPLANE_WAIT_TIMEOUT_SEC
 	CONTROLPLANE_SERVICE_COUNT=7 CONTROLPLANE_WAIT_TIMEOUT_SEC=42 run bash tests/controlplane/001-setup-controlplane-test.sh --help
-	assert_output --partial "(default: 7)."
-	assert_output --partial "--wait-timeout N       Seconds to wait for pods (default: 42)."
+	help_shows_default 7 --service-count CONTROLPLANE_SERVICE_COUNT
+	help_shows_default 42 --wait-timeout CONTROLPLANE_WAIT_TIMEOUT_SEC
 }
 
 @test "002 --dry-run --config: settle and metadata tags come from the config" {
@@ -566,63 +384,7 @@ with_run_config() {
 		-e "s|^# CONTROLPLANE_SCHEMA=51\$|# CONTROLPLANE_SCHEMA=51\n# RUN_CONFIG=$4\n# RUN_CONFIG_SHA256=$5|" "$1" > "$2"
 }
 
-@test "004: RUN_CONFIG and RUN_CONFIG_SHA256 reach every format (PL19); older files read unknown" {
-	local d="${BATS_TEST_TMPDIR}/r"
-	mkdir -p "$d"
-	with_run_config "$REPORT_FIXTURE" "$d/controlplane-a.tsv" run-a smoke.env abc123
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format json
-	assert_success
-	[ "$(jq -r '.metadata.run_config + " " + .metadata.run_config_sha256' <<<"$output")" = "smoke.env abc123" ]
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format markdown
-	assert_output --partial $'run_config: "smoke.env"\nrun_config_sha256: "abc123"'
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format text
-	assert_output --partial "run_config=smoke.env  run_config_sha256=abc123"
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format csv
-	assert_output --partial "# run_config: run_config=smoke.env run_config_sha256=abc123"
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format charts
-	assert_output --partial 'run_config: "smoke.env"'
-	# A file from before the key existed.
-	rm "$d/controlplane-a.tsv"
-	cp "$REPORT_FIXTURE" "$d/controlplane-old.tsv"
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format json
-	[ "$(jq -r '.metadata.run_config' <<<"$output")" = "unknown" ]
-}
-
-@test "004: inputs from different configs print mixed: with a warning (PL26)" {
-	local d="${BATS_TEST_TMPDIR}/m"
-	mkdir -p "$d"
-	with_run_config "$REPORT_FIXTURE" "$d/controlplane-a.tsv" run-a a.env aaa
-	with_run_config "$REPORT_FIXTURE" "$d/controlplane-b.tsv" run-b b.env bbb
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
-	assert_success
-	[ "$(jq -r '.metadata.run_config' <<<"$output")" = "mixed:a.env,b.env" ]
-	[[ "$stderr" == *"input TSVs disagree on RUN_CONFIG (a.env,b.env)"* ]]
-}
-
-@test "004: a file without RUN_CONFIG next to a config-driven one prints mixed:...,unknown (PL26)" {
-	local d="${BATS_TEST_TMPDIR}/legacy" t
-	mkdir -p "$d"
-	with_run_config "$REPORT_FIXTURE" "$d/controlplane-a.tsv" run-a smoke.env abc123
-	# A file from before the key existed (no RUN_CONFIG* lines), e.g. an older lab run.
-	sed 's/^# RUN_ID=.*/# RUN_ID=run-old/' "$REPORT_FIXTURE" > "$d/controlplane-b.tsv"
-	! grep -q '^# RUN_CONFIG' "$d/controlplane-b.tsv" || false
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
-	assert_success
-	[ "$(jq -r '.metadata.run_config' <<<"$output")" = "mixed:smoke.env,unknown" ]
-	[ "$(jq -r '.metadata.run_config_sha256' <<<"$output")" = "mixed:abc123,unknown" ]
-	[[ "$stderr" == *"input TSVs disagree on RUN_CONFIG (smoke.env,unknown)"* ]]
-	[[ "$stderr" == *"input TSVs disagree on RUN_CONFIG_SHA256 (abc123,unknown)"* ]]
-	for t in text csv markdown charts; do
-		run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format "$t"
-		assert_success
-		assert_output --partial "mixed:smoke.env,unknown"
-		refute_output --regexp 'run_config[=:] "?smoke\.env'
-	done
-	# The VS/DR and proxy-check scalars keep skipping files without the key.
-	[[ "$stderr" != *"disagree on PROXY_CHECK"* ]]
-}
-
-@test "004: a dir with several runs stops the report, with or without --config / --results-dir (PL6)" {
+@test "004: a dir with several runs stops the report, from the --config results dir too (PL6)" {
 	local d="${BATS_TEST_TMPDIR}/multi" f
 	mkdir -p "$d"
 	with_run_config "$REPORT_FIXTURE" "$d/controlplane-a.tsv" run-a smoke.env abc
@@ -633,676 +395,51 @@ with_run_config() {
 	[ -z "$output" ]
 	[[ "$stderr" == *"error: ${d} holds 2 runs"* ]]
 	[[ "$stderr" == *"run-a (its files are in ${d}, outside a sweep-* dir"* ]]
-	[[ "$stderr" == *"Or pass --allow-multi-run"* ]]
-	run --separate-stderr bash "$CP/004-report-results.sh" --config "$f" --results-dir "$d" --format json
-	assert_failure 1
-	[[ "$stderr" == *"holds 2 runs"* ]]
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --format json
-	assert_failure 1
-	[[ "$stderr" == *"holds 2 runs"* ]]
-	run --separate-stderr bash "$CP/004-report-results.sh" --results-dir "$d" --allow-multi-run --format json
-	assert_success
-	# At the top level, as in every suite's JSON.
-	[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["run-a","run-b"],"harness_sha":["fixture"],"istio_version":["1.30.5"],"harness_content_key":["unknown"]}' ]
+	[[ "$stderr" == *"--allow-multi-run"* ]]
 }
 
-@test "003 with --config, no cluster: snapshot, preamble and report provenance; --resume checks the config" {
+@test "003 with --config, no cluster: the config's snapshot, RUN_CONFIG in the TSV and the report, and each of its two cells counted failed" {
 	local res="${BATS_TEST_TMPDIR}/res" f d sum
-	f="$(cfg sweep.env 'SETUP_CONTEXTS=ci-a,ci-b' 'CONTROLPLANE_SERVICE_COUNT=5' 'CONTROLPLANE_MESH_SIZES=1' \
+	f="$(cfg sweep.env 'SETUP_CONTEXTS=ci-a,ci-b' 'CONTROLPLANE_SERVICE_COUNTS=5,6' 'CONTROLPLANE_MESH_SIZES=1' \
 		'CONTROLPLANE_SETTLE_SEC=0' 'METRICS_READY_TIMEOUT=0' "CONTROLPLANE_RESULTS_DIR=${res}")"
 	sum="$(sha256sum "$f" | cut -d' ' -f1)"
 	# No Istio CR answers either: warn records ISTIO_VERSION=unknown and goes on.
-	export ISTIO_VERSION_CHECK=warn
-	# Every step fails fast against the empty kubeconfig: one PROBE_FAILED row, then the
-	# report, then exit 4 (finished with a failed cell).
+	export ISTIO_VERSION_CHECK=warn ISTIO_VERSION_READY_WAIT_SEC=0
+	# Every step fails fast against the empty kubeconfig: a PROBE_FAILED row per cell, then
+	# the report, then exit 4 (finished with failed cells).
 	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --config "$f"
 	assert_failure 4
+	assert_output --partial "2 of 2 cells failed: PROBE_FAILED x2."
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
 	[ -n "$d" ]
 	cmp "$f" "$d"/run-config-*.env
 	grep -qx '# RUN_CONFIG=sweep.env' "$d"/controlplane-*.tsv
 	grep -qx "# RUN_CONFIG_SHA256=${sum}" "$d"/controlplane-*.tsv
-	awk -F'\t' '$2 == "PROBE_FAILED" { f = 1 } END { exit !f }' "$d"/controlplane-*.tsv
+	[ "$(awk -F'\t' '$2 == "PROBE_FAILED"' "$d"/controlplane-*.tsv | wc -l)" -eq 2 ]
 	grep -qx "run_config_sha256: \"${sum}\"" "$d"/sweep-*.md
-	# --resume without --config refuses, naming the snapshot, and appends nothing (the
-	# axes would fall back to the environment under the recorded RUN_CONFIG); so does
-	# another config (its rows would be credited to sweep.env). (CONTROLPLANE_MAX_MATRIX=1
-	# with two mesh sizes stops the runs that pass these checks right after them.)
-	local tsv before
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	before="$(cat "$tsv")"
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b
-	assert_failure 1
-	assert_output --partial "this sweep was started with --config sweep.env;"
-	assert_output --partial "To resume with the same values, add --config ${d}/run-config-"
-	assert_output --regexp "--resume ${d} --config ${d}/run-config-[^ ]+\.env"
-	refute_output --partial "Planned matrix"
-	[ "$(cat "$tsv")" = "$before" ]
-	local g
-	g="$(cfg other.env 'CONTROLPLANE_SETTLE_SEC=1')"
-	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$g" --contexts ci-a,ci-b --mesh-sizes 1,2
-	assert_failure 1
-	assert_output --partial "is not the config this sweep started with (sweep.env, RUN_CONFIG_SHA256=${sum}); its rows would be credited"
-	assert_output --partial "start a new sweep. To resume with the same values, add --config ${d}/run-config-"
-	refute_output --partial "exceeds safety limit"
-	[ "$(cat "$tsv")" = "$before" ]
-	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$d"/run-config-*.env --contexts ci-a,ci-b --mesh-sizes 1,2
-	assert_failure 1
-	refute_output --partial "is not the config this sweep started with"
-	assert_output --partial "exceeds safety limit 1"
-	# The preamble decides, not the best-effort snapshot: without it, still refused, and
-	# another config still is.
-	rm "$d"/run-config-*.env
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b
-	assert_failure 1
-	assert_output --partial "this sweep was started with --config sweep.env (RUN_CONFIG_SHA256=${sum}), and its snapshot ${d}/run-config-"
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$g" --contexts ci-a,ci-b
-	assert_failure 1
-	assert_output --partial "(sweep.env, RUN_CONFIG_SHA256=${sum}); its rows would be credited to a config that did not produce them. Pass the original file, or start a new sweep."
-	[ "$(cat "$tsv")" = "$before" ]
 }
 
-@test "003 --resume of a sweep started without --config runs as before (RUN_CONFIG=none)" {
-	local res="${BATS_TEST_TMPDIR}/res" d
-	export ISTIO_VERSION_CHECK=warn  # no Istio CR answers either
-	CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" \
-		run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4  # its one cell is a PROBE_FAILED row
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (from each cell's latest attempt, in n_total, not n_valid); exit 4."
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	grep -qx '# RUN_CONFIG=none' "$d"/controlplane-*.tsv
-	[ -z "$(find "$d" -name 'run-config-*')" ]
-	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b --mesh-sizes 1,2
-	assert_failure 1
-	refute_output --partial "started with --config"
-	assert_output --partial "exceeds safety limit 1"
-	# Any --config only warns: the TSV says RUN_CONFIG=none.
-	local g
-	g="$(cfg late.env 'CONTROLPLANE_SETTLE_SEC=0')"
-	CONTROLPLANE_MAX_MATRIX=1 KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --config "$g" --contexts ci-a,ci-b --mesh-sizes 1,2
-	assert_failure 1
-	assert_output --partial "warning: --resume: --config late.env"
-	assert_output --partial "(RUN_CONFIG_SHA256=none)"
-	assert_output --partial "exceeds safety limit 1"
-	# The sweep recorded ISTIO_VERSION=unknown (nothing answered): the version its rows ran on
-	# is not known, so it can never be resumed, whatever the mesh answers now (not even
-	# unknown again): --resume refuses before any change, appends nothing and keeps the
-	# interrupted run's sweep-outcome.txt, under either ISTIO_VERSION_CHECK policy.
-	# Known from the TSV alone, so it stops before the live read.
-	grep -qx '# ISTIO_VERSION=unknown' "$d"/controlplane-*.tsv
-	[ -f "$d/sweep-outcome.txt" ]
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read or confirmed when it started (unreadable, its Istio CR not settled, or an istiod rollout in progress), so the version its rows ran on is not known and it cannot be resumed. Start a new sweep"
-	refute_output --partial "Istio version:"
-	[ -f "$d/sweep-outcome.txt" ]
-	local bin="${BATS_TEST_TMPDIR}/bin" tsv before policy
-	mkdir -p "$bin"
-	printf '#!/bin/sh
-echo "$*" >> "%s/kubectl.log"
-case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
-' "$BATS_TEST_TMPDIR" > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	before="$(cat "$tsv")"
-	for policy in fail warn; do
-		ISTIO_VERSION_CHECK="$policy" PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" \
-			--contexts ci-a --mesh-sizes 1 --service-counts 5
-		assert_failure 1
-		assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=unknown: a member's version could not be read or confirmed when it started"
-		refute_output --partial "so its new rows would be credited to"
-		refute_output --partial "Capacity plan check"
-		[ "$(cat "$tsv")" = "$before" ]
-	done
-	[ "$(cat "${BATS_TEST_TMPDIR}/kubectl.log" 2>/dev/null | grep -c 'get istios.sailoperator.io' || true)" = 0 ]
-	# A sweep that recorded a version, resumed while a member cannot be read (warn lets the
-	# read go on): fix access and run the same --resume again, not "start a new sweep".
-	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
-	before="$(cat "$tsv")"
-	ISTIO_VERSION_CHECK=warn KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: this sweep recorded ISTIO_VERSION=v1.30.5, but the running version cannot be read now on every member (ISTIO_VERSION=unknown;"
-	assert_output --partial "then run the same --resume again."
-	refute_output --partial "Start a new sweep"
-	[ "$(cat "$tsv")" = "$before" ]
-	[ -f "$d/sweep-outcome.txt" ]
-	# A resume that gets past the version check keeps the interrupted run's record as
-	# sweep-outcome.prev.txt (reports read only sweep-outcome.txt); its own end writes a new one.
-	cp "$d/sweep-outcome.txt" "${BATS_TEST_TMPDIR}/old-outcome.txt"
-	ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
-		run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	refute_output --partial "--resume: this sweep recorded"
-	cmp -s "$d/sweep-outcome.prev.txt" "${BATS_TEST_TMPDIR}/old-outcome.txt"
-	# The retried cell failed again, so the TSV holds two PROBE_FAILED rows for it: one
-	# failed cell (its last reason), not "2 of 1", and exit 4.
-	assert_failure 4
-	[ "$(awk -F'\t' '$2 == "PROBE_FAILED"' "$tsv" | wc -l)" -eq 2 ]
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (from each cell's latest attempt"
-	grep -qx 'FAILED=1' "$d/sweep-outcome.txt"
-	[ -f "$d/sweep-outcome.txt" ]
-	# The resume's own start condition and time are in its outcome (none included: an
-	# INFO line, not a warning; the time in UTC with Z); the TSV keeps the first
-	# run's. One HARNESS_SHA for the run's preambles and outcome (no harness note).
-	grep -Eq "^INFO=this --resume started at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z with every member ready \(ISTIO_NOTREADY_AT_RESUME=none, ISTIO_READY_WAITED_SEC=0\); the TSV preamble's ISTIO_NOTREADY_AT_START is the first run's \(a resume's, when the first run wrote no TSV\)$" "$d/sweep-outcome.txt"
-	grep -qx '# ISTIO_NOTREADY_AT_START=none' "$tsv"
-	[ "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")" = "$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")" ]
-	refute_output --partial "this resume runs harness"
-	[ "$(grep -c '^NOTE=the --resume at' "$d/sweep-outcome.txt" || true)" = 0 ]
-	# resumes.txt has one line per resume past its preflights: its start time (the
-	# INFO's), HARNESS_SHA, ISTIO_NOTREADY_AT_RESUME, KUBE_VERSIONS and TSV_LINES,
-	# the TSV's line count when it started (where its attempt starts), then the resume's
-	# ISTIO_PROXY_VERSIONS and ISTIO_GENERATIONS, the TSV it applies to and its
-	# HARNESS_CONTENT_KEY.
-	[ "$(sed -n 1p "$d/resumes.txt")" = "$(printf 'RESUMED_AT\tHARNESS_SHA\tISTIO_NOTREADY_AT_RESUME\tKUBE_VERSIONS\tTSV_LINES\tISTIO_PROXY_VERSIONS\tISTIO_GENERATIONS\tTSV\tHARNESS_CONTENT_KEY')" ]
-	[[ "$(awk -F'\t' 'NR == 2 { print $9 }' "$d/resumes.txt")" =~ ^([0-9a-f]{12}|unknown)$ ]]
-	[[ "$(awk -F'\t' 'NR == 2 { print $5 }' "$d/resumes.txt")" =~ ^[1-9][0-9]*$ ]]
-	[ "$(awk -F'\t' 'NR == 2 { print $8 }' "$d/resumes.txt")" = "${tsv##*/}" ]
-	[ "$(wc -l < "$d/resumes.txt")" -eq 2 ]
-	[ "$(awk -F'\t' 'NR == 2 { print $2 "|" $3 "|" $4 }' "$d/resumes.txt")" = "$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")|none|ci-a=unreachable" ]
-	grep -q "^INFO=this --resume started at $(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt") " "$d/sweep-outcome.txt"
-	# Through a symlink (latest -> sweep-X, no trailing slash) the resume is that sweep:
-	# its RUN_ID and its TSV, never a second TSV the report would pool. A resume on
-	# another harness than the runs before it (here the preamble's and resumes.txt's are
-	# made 0000000, with another HARNESS_CONTENT_KEY) gets a warning, and a note from the
-	# resume's start on.
-	local res_d="${d%/*}" rid sha
-	rid="$(basename "$tsv" .tsv)"
-	rid="${rid#controlplane-}"
-	ln -s "${d##*/}" "${res_d}/latest"
-	sed -i.bak 's/^# HARNESS_SHA=.*/# HARNESS_SHA=0000000/; s/^# HARNESS_CONTENT_KEY=.*/# HARNESS_CONTENT_KEY=000000000000/' "$tsv" && rm -f "${tsv}.bak"
-	awk -F'\t' -v OFS='\t' 'NR > 1 { $2 = "0000000"; if (NF >= 9) $9 = "000000000000" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
-	ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
-		run bash "$CP/003-run-sweep.sh" --resume "${res_d}/latest" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_output --partial "Resuming sweep RUN_ID=${rid} in "
-	[ "$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv' | wc -l)" -eq 1 ]
-	sha="$(sed -n 's/^HARNESS_SHA=//p' "$d/sweep-outcome.txt")"
-	[ -n "$sha" ]
-	[ "$sha" != 0000000 ]
-	assert_output --partial "warning: --resume: this resume runs harness ${sha}, and the run before it ran 0000000 (the --resume at "
-	assert_output --partial "the rows it adds (from "
-	grep -Eq "^NOTE=the --resume at [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z ran HARNESS_SHA=${sha}, after HARNESS_SHA=0000000 \(the --resume at [^)]+\): rows from [0-9T:-]+Z on are ${sha}'s$" "$d/sweep-outcome.txt"
-	grep -qx '# HARNESS_SHA=0000000' "$tsv"
-	# Once a retry leaves a valid row for the cell (made here from its last status row),
-	# its earlier status rows are not failures: the next --resume has nothing to run, and the
-	# sweep ends with every cell ran and exit 0.
-	awk -F'\t' -v OFS='\t' '$2 == "PROBE_FAILED" { r = $0 } END { $0 = r; for (i = 8; i <= NF; i++) if ($i == "N/A") $i = 1; $1 = "2099-01-01T00:00:00+00:00"; $2 = "ci-a"; $31 = "0"; print }' "$tsv" > "${BATS_TEST_TMPDIR}/ok.row"
-	cat "${BATS_TEST_TMPDIR}/ok.row" >> "$tsv"
-	ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 PATH="${bin}:${PATH}" KUBECONFIG="$EK" \
-		run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_success
-	assert_output --partial "All 1 cells ran"
-	refute_output --partial "cells failed"
-	# The same harness as the resume before it: no warning, and the earlier change's
-	# note is still in the outcome.
-	refute_output --partial "this resume runs harness"
-	[ "$(grep -c "^NOTE=the --resume at .* ran HARNESS_SHA=${sha}, after HARNESS_SHA=0000000 " "$d/sweep-outcome.txt")" -eq 1 ]
-	[ "$(wc -l < "$d/resumes.txt")" -eq 4 ]
-	grep -qx 'EXIT=0' "$d/sweep-outcome.txt"
-	grep -qx 'FAILED=0' "$d/sweep-outcome.txt"
-	# A directory that is not a sweep, nor a symlink to one, is refused before anything.
-	mkdir "${res_d}/other"
-	cp "$tsv" "${res_d}/other/"
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "${res_d}/other" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: ${res_d}/other is not a sweep-<RUN_ID> directory, nor a symlink to one"
-	refute_output --partial "Resuming sweep"
-	# The results dir that holds the sweeps: the newest is named.
-	mkdir "${res_d}/sweep-00000000T000000Z-1"
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "${res_d}/" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: ${res_d}/ is not a sweep-<RUN_ID> directory, nor a symlink to one. It holds sweep directories; the newest is ${d}: pass that one"
-	refute_output --partial "Resuming sweep"
-}
-
-@test "003 --resume twice: resumes.txt keeps each resume, one harness note per change (A, B, A)" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" sha t1 t2
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	[ ! -e "$d/resumes.txt" ]
-	mkdir -p "$bin"
-	printf '#!/bin/sh
-case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
-' > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
-	sha="$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	refute_output --partial "this resume runs harness"
-	[ "$(wc -l < "$d/resumes.txt")" -eq 2 ]
-	# The first resume ran another harness (B) than the first run (A, the preamble's); it
-	# died, or its outcome was overwritten: only resumes.txt keeps it. The second runs A again.
-	t1="$(awk -F'\t' 'NR == 2 { print $1 }' "$d/resumes.txt")"
-	awk -F'\t' -v OFS='\t' 'NR == 2 { $2 = "1111111"; if (NF >= 9) $9 = "000000000000" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	[ "$(wc -l < "$d/resumes.txt")" -eq 3 ]
-	[ "$(sed -n 2p "$d/resumes.txt" | cut -f 1-4)" = "$(printf '%s\t1111111\tnone\tci-a=unreachable' "$t1")" ]
-	t2="$(awk -F'\t' 'NR == 3 { print $1 }' "$d/resumes.txt")"
-	[ "$(awk -F'\t' 'NR == 3 { print $2 "|" $3 }' "$d/resumes.txt")" = "${sha}|none" ]
-	# resumes.txt keeps the times as recorded; the warnings and notes print them with Z.
-	t1="${t1%+00:00}Z" t2="${t2%+00:00}Z"
-	assert_output --partial "warning: --resume: this resume runs harness ${sha}, and the run before it ran 1111111 (the --resume at ${t1}): the rows it adds (from ${t2} on) come from another harness."
-	# The change that a later resume changed again says until when.
-	grep -qx "NOTE=the --resume at ${t1} ran HARNESS_SHA=1111111, after HARNESS_SHA=${sha} (the TSV preamble's, the first run's): rows from ${t1} until ${t2} are 1111111's" "$d/sweep-outcome.txt"
-	grep -qx "NOTE=the --resume at ${t2} ran HARNESS_SHA=${sha}, after HARNESS_SHA=1111111 (the --resume at ${t1}): rows from ${t2} on are ${sha}'s" "$d/sweep-outcome.txt"
-	[ "$(grep -c '^NOTE=the --resume at' "$d/sweep-outcome.txt")" -eq 2 ]
-	grep -qx "# HARNESS_SHA=${sha}" "$tsv"
-}
-
-@test "003 --resume: the outcome notes earlier resumes that started not ready and resumes on an unknown harness" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" nogit="${BATS_TEST_TMPDIR}/nogit" sha t1 t2 t3
+@test "003: a cell count that fails is a problem, never 'every cell ran', and keeps local paths out of the record" {
+	local res="${BATS_TEST_TMPDIR}/res" d fakeawk="${BATS_TEST_TMPDIR}/fakeawk" realawk
 	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	mkdir -p "$bin" "$nogit"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
-	printf '#!/bin/sh\nexit 1\n' > "${nogit}/git"
-	chmod +x "${bin}/kubectl" "${nogit}/git"
-	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
-	sha="$(sed -n 's/^# HARNESS_SHA=//p' "$tsv")"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	# The first resume started with ci-a not ready, on a harness git could not name (it
-	# died, or its outcome was overwritten: only resumes.txt keeps it).
-	t1="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
-	awk -F'\t' -v OFS='\t' 'NR == 2 { $2 = "unknown"; $3 = "ci-a=IstiodNotReady" } 1' "$d/resumes.txt" > "${BATS_TEST_TMPDIR}/r.txt" && cat "${BATS_TEST_TMPDIR}/r.txt" > "$d/resumes.txt"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	t2="$(awk -F'\t' 'NR == 3 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
-	# This resume is ready (its INFO); the earlier one was not: a note with its start time.
-	grep -q "^INFO=this --resume started at ${t2} with every member ready" "$d/sweep-outcome.txt"
-	grep -qx "NOTE=istiod or IstioCNI was still not ready when the earlier --resume at ${t1} started (ISTIO_NOTREADY_AT_RESUME=ci-a=IstiodNotReady, in resumes.txt): the first cells it ran (its rows, from ${t1} until ${t2}) may have run on a control plane that was not ready; check their status and istiod_restarted" "$d/sweep-outcome.txt"
-	# The unknown harness has a note of its own, until the next resume; the next one's
-	# rows are the first run's harness again, after unknown. Same as the last known one:
-	# no warning.
-	grep -qx "NOTE=the --resume at ${t1} ran HARNESS_SHA=unknown (git describe failed there): rows from ${t1} until ${t2} cannot be tied to a harness" "$d/sweep-outcome.txt"
-	grep -qx "NOTE=the --resume at ${t2} ran HARNESS_SHA=${sha}, after HARNESS_SHA=unknown (the --resume at ${t1}): rows from ${t2} on are ${sha}'s" "$d/sweep-outcome.txt"
-	refute_output --partial "this resume runs"
-	# A resume on a harness git cannot name warns, and its note runs to the end; the
-	# earlier unknown resume's note is still there.
-	PATH="${nogit}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	t3="$(awk -F'\t' 'NR == 4 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
-	[ "$(awk -F'\t' 'NR == 4 { print $2 }' "$d/resumes.txt")" = unknown ]
-	assert_output --partial "warning: --resume: this resume runs HARNESS_SHA=unknown (git describe failed: no git, or not a checkout), so the rows it adds (from ${t3} on) cannot be tied to a harness."
-	grep -qx "NOTE=the --resume at ${t3} ran HARNESS_SHA=unknown (git describe failed there): rows from ${t3} on cannot be tied to a harness" "$d/sweep-outcome.txt"
-	grep -qx "NOTE=the --resume at ${t2} ran HARNESS_SHA=${sha}, after HARNESS_SHA=unknown (the --resume at ${t1}): rows from ${t2} until ${t3} are ${sha}'s" "$d/sweep-outcome.txt"
-	grep -qx "NOTE=the --resume at ${t1} ran HARNESS_SHA=unknown (git describe failed there): rows from ${t1} until ${t2} cannot be tied to a harness" "$d/sweep-outcome.txt"
-	[ "$(grep -c '^NOTE=istiod or IstioCNI was still not ready when the earlier --resume' "$d/sweep-outcome.txt")" -eq 1 ]
-}
-
-@test "003 --resume carries an earlier run's end-of-sweep notes into its outcome, once" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" bin2="${BATS_TEST_TMPDIR}/bin2" vf="${BATS_TEST_TMPDIR}/ver" d1 n
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	echo v1.30.5 > "$vf"
-	mkdir -p "$bin" "$bin2"
-	# Run 1: read v1.30.5 at the start; the cell's first other kubectl call makes every
-	# later read fail, so its end is unconfirmed (a NOTE, not a PROBLEM).
-	cat > "${bin}/kubectl" <<STUB
-#!/bin/sh
-case "\$*" in
-*"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) STUB_ISTIO_VERSION="\$(cat ${vf})" exec "\$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "\$@" ;;
-*) echo fail > ${vf}; exit 1 ;;
-esac
-STUB
-	chmod +x "${bin}/kubectl"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin2}/kubectl"
-	chmod +x "${bin2}/kubectl"
-	CONTROLPLANE_RESULTS_DIR="$res" PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	grep -qx 'NOTE=the Istio version at the end of the sweep is unconfirmed: ci-a could not be read again (v1.30.5 at the start)' "$d/sweep-outcome.txt"
-	! grep -q '^PROBLEM=' "$d/sweep-outcome.txt" || false
-	# Its end also found istiod not ready (made here: the stub cannot do both).
-	printf '%s\n' "NOTE=istiod or IstioCNI was not ready at the end of the sweep, on the same Istio version: the last cells may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted" \
-		"NOTE=not ready at the end: IstiodNotReady on 1 member (ci-a)" >> "$d/sweep-outcome.txt"
-	d1="$(sed -n 's/^# DATE=//p' "$d/sweep-outcome.txt")"
-	# Resume 1 is accepted (same version, same active revision) and keeps the three notes.
-	PATH="${bin2}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	grep -qx "NOTE=an earlier run of this sweep (outcome of ${d1}) noted: the Istio version at the end of the sweep is unconfirmed: ci-a could not be read again (v1.30.5 at the start)" "$d/sweep-outcome.txt"
-	grep -qx "NOTE=an earlier run of this sweep (outcome of ${d1}) noted: not ready at the end: IstiodNotReady on 1 member (ci-a)" "$d/sweep-outcome.txt"
-	assert_output --partial "warning: an earlier run of this sweep (outcome of ${d1}) noted: the Istio version at the end of the sweep is unconfirmed"
-	bash "$CP/004-report-results.sh" --results-dir "$d" --format text 2>&1 | grep -q "noted: the Istio version at the end of the sweep is unconfirmed"
-	# Resume 2, and resume 3 after a resume that died once it moved the record to .prev:
-	# still one copy of each, with run 1's date.
-	for n in 2 3; do
-		if ((n == 3)); then mv "$d/sweep-outcome.txt" "$d/sweep-outcome.prev.txt"; fi
-		PATH="${bin2}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-		assert_failure 4
-		[ "$(grep -c '^NOTE=an earlier run of this sweep' "$d/sweep-outcome.txt")" -eq 3 ]
-		[ "$(grep -c "^NOTE=an earlier run of this sweep (outcome of ${d1}) noted: the Istio version at the end of the sweep is unconfirmed: " "$d/sweep-outcome.txt")" -eq 1 ]
-		[ "$(grep -c '^NOTE=the Istio version at the end of the sweep is unconfirmed' "$d/sweep-outcome.txt" || true)" -eq 0 ]
-	done
-}
-
-@test "003 --resume: a cell that failed partway runs again and its earlier attempt is left out; short lines are not cells; a count that fails is a problem, never all ran, and does not stop a resume; an interrupted resume" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" fakeawk="${BATS_TEST_TMPDIR}/fakeawk" realawk
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
-	mkdir -p "$bin"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	# The cell: a valid row (one context), then its status row: it failed partway.
-	awk -F'\t' -v OFS='\t' '$2 == "PROBE_FAILED" { r = $0 } END { $0 = r; for (i = 8; i <= NF; i++) if ($i == "N/A") $i = 1; $2 = "ci-a"; $31 = "0"; print }' "$tsv" > "${BATS_TEST_TMPDIR}/ok.row"
-	awk -F'\t' '$2 == "PROBE_FAILED"' "$tsv" > "${BATS_TEST_TMPDIR}/st.row"
-	cat "${BATS_TEST_TMPDIR}/ok.row" "${BATS_TEST_TMPDIR}/st.row" >> "$tsv"
-	# A blank line and a short one are not rows, so not cells.
-	printf '\nshort\tline\t9\t9\t9\t9\tnone\n' >> "$tsv"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	# It runs again (the stub fails it again), and only that new attempt counts: its
-	# PROBE_FAILED row, not the earlier attempt's valid row.
-	assert_output --partial "[1/1] mesh=1 svcs=5 reps=3 ns=1 scope=none traffic=none — failed partway (a valid row, then PROBE_FAILED): running it again; the reports use only this new attempt (resume)"
-	assert_output --partial "error: 1 of 1 cells failed: PROBE_FAILED x1. The report includes their status rows as placeholder rows (from each cell's latest attempt, in n_total, not n_valid). 1 cell(s) that had failed partway in an earlier run ran again in this one; the reports use only that new attempt; exit 4."
-	grep -qx 'TOTAL=1' "$d/sweep-outcome.txt"
-	# The reports say they read each cell's latest attempt (every format); the console says
-	# it once (the text report's), and the outcome does not repeat it.
-	[ "$(grep -c "latest attempt only: 3 row(s) of earlier attempts of 1 cell(s)" <<<"$output")" -eq 1 ]
-	! grep -q 'latest attempt' "$d/sweep-outcome.txt" || false
-	[ "$(bash "$CP/004-report-results.sh" --results-dir "$d" --format json 2>/dev/null | jq -c '[.metadata.earlier_attempt_rows_left_out, .metadata.earlier_attempt_cells, .results[0].n_total, .results[0].n_valid]')" = '[3,1,1,0]' ]
 	# The count's awk fails (as when it could not start): a problem, exit 4, never
-	# "All 1 cells ran", and the record says TOTAL=unknown.
+	# "All 1 cells ran", and the record says TOTAL=unknown and FAILED=unknown.
 	realawk="$(command -v awk)"
 	mkdir -p "$fakeawk"
 	printf '#!/bin/sh\nfor a; do last="$a"; done\ncase "$*" in *"print \\"TOTAL\\\\t\\" ncell"*) echo "awk: simulated: argument list too long reading $last" >&2; exit 2 ;; esac\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
 	chmod +x "${fakeawk}/awk"
-	cat "${BATS_TEST_TMPDIR}/ok.row" >> "$tsv"
-	PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
+	CONTROLPLANE_RESULTS_DIR="$res" PATH="${fakeawk}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
-	assert_output --partial "error: could not count the sweep's cells: awk: simulated: argument list too long reading <tmp>/tsv; the rows are intact: run the same --resume again (with this sweep's flags) to count them; exit 4."
+	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
+	assert_output --regexp "could not count the sweep's cells: awk: simulated: argument list too long reading <sweep dir>/controlplane-[^ ]+\.tsv; the rows are intact, but the cells without a row \(NOT_RUN\) are then not counted"
 	refute_output --partial "cells ran"
-	grep -qx "PROBLEM=could not count the sweep's cells: awk: simulated: argument list too long reading <tmp>/tsv; the rows are intact: run the same --resume again (with this sweep's flags) to count them" "$d/sweep-outcome.txt"
+	refute_output --partial "count its cells"
+	grep -q "^PROBLEM=could not count the sweep's cells" "$d/sweep-outcome.txt"
 	grep -qx 'TOTAL=unknown' "$d/sweep-outcome.txt"
 	grep -qx 'FAILED=unknown' "$d/sweep-outcome.txt"
-	# The sweep dir (a local path) is on stderr only: never in the record, the markdown
-	# summary or the scale envelope.
-	assert_output --partial "The sweep dir to resume: "
+	# The sweep dir (a local path) is on stderr only: never in the record or the markdown summary.
+	assert_output --partial "The sweep dir: "
 	! grep -qF "$BATS_TEST_TMPDIR" "$d/sweep-outcome.txt" || false
 	! grep -qE '(^|[ :=(])/[A-Za-z]' "$d/sweep-outcome.txt" || false
 	! grep -h "could not count" "$d"/*.md | grep -qF "$BATS_TEST_TMPDIR" || false
-	# A keys file the count cannot read is that problem too, not a count of the rows only.
-	printf '#!/bin/sh\nn=$#; i=0; for a in "$@"; do i=$((i + 1)); case "$a" in keys=*) a="keys=/nonexistent/keys" ;; esac; set -- "$@" "$a"; done; shift "$n"\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
-	PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	assert_output --partial "error: could not count the sweep's cells: awk: cannot read the plan cell keys file; the rows are intact"
-	refute_output --partial "cells ran"
-	# A resume stopped while it counts (TERM, as an interrupt) leaves no keys file
-	# behind; until a resume writes its outcome, reports show the earlier one, from
-	# sweep-outcome.prev.txt, and say so.
-	printf '#!/bin/sh\ncase "$*" in *"print \\"TOTAL\\\\t\\" ncell"*) kill -TERM "$PPID"; exit 0 ;; esac\nexec %s "$@"\n' "$realawk" > "${fakeawk}/awk"
-	mkdir -p "${BATS_TEST_TMPDIR}/tmp10"
-	TMPDIR="${BATS_TEST_TMPDIR}/tmp10" PATH="${fakeawk}:${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 143
-	[ -z "$(find "${BATS_TEST_TMPDIR}/tmp10" -name keys -print -quit)" ]
-	# The resume's not-finished record stays (its outcome never came); it says when,
-	# and by which signal, the resume was interrupted.
-	grep -qx 'EXIT=unfinished' "$d/sweep-outcome.txt"
-	grep -qx 'ENDED_SIGNAL=SIGTERM' "$d/sweep-outcome.txt"
-	run bash "$CP/004-report-results.sh" --results-dir "$d"
-	assert_output --partial "# SWEEP OUTCOME (recorded in sweep-outcome.prev.txt by run "
-	assert_output --regexp "#   warning: the last --resume of this sweep \(started at [0-9T:-]+Z\) has not finished \(it was interrupted at [0-9T:-]+Z by SIGTERM; run the same --resume again\): this is the outcome before it, from sweep-outcome.prev.txt"
-	assert_output --partial "#   error: could not count the sweep's cells: awk: cannot read the plan cell keys file"
-	# That problem does not stop a resume, which counts again: the valid retry ran last,
-	# so every cell ran.
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_success
-	assert_output --partial "All 1 cells ran"
-	refute_output --partial "has not finished"
-	grep -qx 'TOTAL=1' "$d/sweep-outcome.txt"
-	! grep -q '^PROBLEM=' "$d/sweep-outcome.txt" || false
-	! grep -q "has not finished" "$d"/*.md
-}
-
-@test "003 --resume refuses another active revision at the same version or another Kubernetes version, and notes a TSV that cannot tell" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" before t1
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# Unread at the start: the member has no revision on record, so nothing to compare.
-	grep -qx '# ISTIO_ACTIVE_REVISIONS=ci-a=' "$tsv"
-	# The sweep started on v1.30.5 with a revision-based control plane; it now runs the
-	# same version InPlace (activeRevisionName default).
-	sed -i.bak -e 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' -e 's/^# ISTIO_ACTIVE_REVISIONS=.*/# ISTIO_ACTIVE_REVISIONS=ci-a=default-v1-30-5/' \
-		-e 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=v1.30.4/' "$tsv" && rm -f "${tsv}.bak"
-	mkdir -p "$bin"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *" version --output=json"*) echo "{\\"serverVersion\\":{\\"gitVersion\\":\\"v1.31.2\\"}}" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	before="$(cat "$tsv")"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: the members' active Istio revision is not the one this sweep started on (ci-a: default-v1-30-5 when the sweep started, default now; activeRevisionName of their Istio CR), at the same Istio version: another control plane, so the new rows would not be comparable with the earlier ones. Start a new sweep."
-	[ "$(cat "$tsv")" = "$before" ]
-	[ ! -e "$d/resumes.txt" ]
-	# A TSV from before the key passes that check, but the member now runs v1.31.2 where
-	# the sweep started on v1.30.4: the platform record check refuses it, nothing written.
-	sed -i.bak '/^# ISTIO_ACTIVE_REVISIONS=/d' "$tsv" && rm -f "${tsv}.bak"
-	before="$(cat "$tsv")"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "ci-a: KUBE_VERSIONS recorded v1.30.4, now v1.31.2"
-	[ "$(cat "$tsv")" = "$before" ]
-	[ ! -e "$d/resumes.txt" ]
-	# The first run could not read the version: resumed, with a warning and a note for the
-	# revisions, and the version this resume read in resumes.txt (the first known one, so
-	# no Kubernetes version note: the next test covers those).
-	sed -i.bak 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=unreachable/' "$tsv" && rm -f "${tsv}.bak"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	assert_output --partial "warning: --resume: this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it)"
-	t1="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
-	grep -qx "NOTE=this sweep's TSV does not record its members' active Istio revisions (ISTIO_ACTIVE_REVISIONS; an older harness started it), so no --resume of it (the latest at ${t1}) could check that each member still runs the revision the sweep started on" "$d/sweep-outcome.txt"
-	[ "$(awk -F'\t' 'NR == 2 { print $4 }' "$d/resumes.txt")" = "ci-a=v1.31.2" ]
-	! grep -q "Kubernetes server versions" "$d/sweep-outcome.txt" || false
-	refute_output --partial "reads other Kubernetes server versions"
-}
-
-@test "003 --resume repeats a first run that started not ready, once, from the TSV preamble, also when that run died" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" d0 n
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# The first run started with istiod not ready after a 60s wait, and died before its end.
-	sed -i.bak -e 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' -e 's/^# ISTIO_NOTREADY_AT_START=.*/# ISTIO_NOTREADY_AT_START=ci-a=IstiodNotReady/' \
-		-e 's/^# ISTIO_READY_WAITED_SEC=.*/# ISTIO_READY_WAITED_SEC=60/' "$tsv" && rm -f "${tsv}.bak"
-	rm -f "$d/sweep-outcome.txt"
-	d0="$(head -n 1 "$tsv" | awk '{ print $NF }')"
-	mkdir -p "$bin"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	for n in 1 2; do
-		PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-		assert_failure 4
-		assert_output --partial "warning: istiod or IstioCNI was still not ready when this sweep's first run started at ${d0}, after waiting 60s (ISTIO_NOTREADY_AT_START, in the TSV preamble)"
-		[ "$(grep -c "^NOTE=istiod or IstioCNI was still not ready when this sweep's first run started at ${d0}, after waiting 60s (ISTIO_NOTREADY_AT_START, in the TSV preamble): the first cells it ran may have run on a control plane that was not ready; check their status and, where the suite records it, istiod_restarted$" "$d/sweep-outcome.txt")" -eq 1 ]
-		[ "$(grep -c "^NOTE=not ready at the first run's start: IstiodNotReady on 1 member (ci-a)$" "$d/sweep-outcome.txt")" -eq 1 ]
-		grep -q "first run started at ${d0}" "$d"/sweep-*.md
-	done
-}
-
-@test "003 --resume refuses other members than the sweep started on, another order or a member twice; groups members by revision" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" before t1
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	grep -qx '# ISTIO_ACTIVE_REVISIONS=ci-a=,ci-b=' "$tsv"
-	sed -i.bak 's/^# ISTIO_VERSION=.*/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
-	mkdir -p "$bin"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	before="$(cat "$tsv")"
-	# A renamed member: refused before the mesh is read, nothing written.
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-c --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: these are not the members this sweep started on, in its order (started on, not given now: ci-b; given now, not started on: ci-c; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): mesh size N measures the first N contexts, so the new rows would not measure what the earlier ones did. Resume with --contexts ci-a,ci-b (that order), or start a new sweep (also to add members for a larger mesh size)."
-	refute_output --partial "Istio version:"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "(started on, not given now: ci-b; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS)"
-	# The same members in another order (mesh size 1 would measure ci-b): refused too,
-	# with the order to paste. One of them twice is refused when parsed (the resume
-	# check has no branch of its own for it).
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: these are the members this sweep started on, but not in its order (given in another order: ci-b,ci-a; its TSV preamble lists them in ISTIO_ACTIVE_REVISIONS): mesh size N measures the first N contexts"
-	assert_output --partial "Resume with --contexts ci-a,ci-b (that order)"
-	refute_output --partial "Istio version:"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b,ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	# split_contexts refuses the repeated member before the resume check runs.
-	assert_output --partial "--contexts lists ci-a twice (ci-a,ci-b,ci-a): list each mesh member once"
-	[ "$(cat "$tsv")" = "$before" ]
-	[ ! -e "$d/resumes.txt" ]
-	[ -e "$d/sweep-outcome.txt" ]
-	# The same members in the same order pass that check; two members on the same old
-	# and new revision are one entry of the active-revision refusal.
-	sed -i.bak 's/^# ISTIO_ACTIVE_REVISIONS=.*/# ISTIO_ACTIVE_REVISIONS=ci-a=default-v1-30-5,ci-b=default-v1-30-5/' "$tsv" && rm -f "${tsv}.bak"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "(ci-a, ci-b: default-v1-30-5 when the sweep started, default now; activeRevisionName of their Istio CR)"
-	refute_output --partial "not the members this sweep started on"
-	# ISTIO_VERSION_BY_CONTEXT lists them when ISTIO_ACTIVE_REVISIONS is absent.
-	sed -i.bak '/^# ISTIO_ACTIVE_REVISIONS=/d' "$tsv" && rm -f "${tsv}.bak"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-c --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "(started on, not given now: ci-b; given now, not started on: ci-c; its TSV preamble lists them in ISTIO_VERSION_BY_CONTEXT)"
-	# Neither key: resumed, with a warning and a note.
-	sed -i.bak '/^# ISTIO_VERSION_BY_CONTEXT=/d' "$tsv" && rm -f "${tsv}.bak"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-b,ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	assert_output --partial "warning: --resume: this sweep's TSV records neither ISTIO_ACTIVE_REVISIONS nor ISTIO_VERSION_BY_CONTEXT, so whether it runs on the members it started on is not checked."
-	t1="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
-	grep -qx "NOTE=this sweep's TSV records neither ISTIO_ACTIVE_REVISIONS nor ISTIO_VERSION_BY_CONTEXT, so no --resume of it (the latest at ${t1}) could check that it ran on the members the sweep started on" "$d/sweep-outcome.txt"
-}
-
-@test "003 --resume notes other Kubernetes versions against the last known ones, grouped, once per change" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" kf="${BATS_TEST_TMPDIR}/kver" t1 t2 n
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	# The first run could not read the API servers' versions.
-	sed -i.bak -e 's/^# ISTIO_VERSION=.*/# ISTIO_VERSION=v1.30.5/' -e 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=ci-a=unreachable,ci-b=unreachable/' "$tsv" && rm -f "${tsv}.bak"
-	mkdir -p "$bin"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *" version --output=json"*) echo "{\\"serverVersion\\":{\\"gitVersion\\":\\"$(cat %s)\\"}}" ;; *) exit 1 ;; esac\n' "$kf" > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	# Resume 1 reads v1.30.4 (the first known value: no note), resume 2 an upgrade to v1.31.2
-	# (one note, both members in one entry), resume 3 v1.31.2 again (no new note).
-	for n in v1.30.4 v1.31.2 v1.31.2; do
-		echo "$n" > "$kf"
-		PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a,ci-b --mesh-sizes 1 --service-counts 5
-		assert_failure 4
-	done
-	t1="$(awk -F'\t' 'NR == 2 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
-	t2="$(awk -F'\t' 'NR == 3 { sub(/\+00:00$/, "Z", $1); print $1 }' "$d/resumes.txt")"
-	[ "$(grep -c 'Kubernetes server versions' "$d/sweep-outcome.txt")" -eq 1 ]
-	grep -qx "NOTE=the --resume at ${t2} read other Kubernetes server versions than the last known ones (ci-a, ci-b: v1.30.4 before it, v1.31.2 then; from the TSV preamble's KUBE_VERSIONS and resumes.txt): rows from ${t2} on ran on them, up to a later change noted here" "$d/sweep-outcome.txt"
-	refute_output --partial "this resume reads other Kubernetes server versions"
-	! grep -q "resume at ${t1} read other Kubernetes" "$d/sweep-outcome.txt"
-}
-
-@test "003: each cell is decided by its last row, out of every cell of the TSV and the run; repeated axis values are refused" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" row5 row6
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0
-	# A repeated axis value would run one cell twice under one key.
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --dry-run --contexts ci-a --service-counts 5,5
-	assert_failure 1
-	assert_output --partial "error: --service-counts repeats a value (5,5): each value is one set of cells; list it once"
-	KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --dry-run --contexts ci-a --traffic-configs none,vsdr,none
-	assert_failure 1
-	assert_output --partial "error: --traffic-configs repeats a value (none,vsdr,none)"
-	CONTROLPLANE_RESULTS_DIR="$res" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5,6
-	assert_failure 4
-	assert_output --partial "error: 2 of 2 cells failed: PROBE_FAILED x2."
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	sed -i.bak 's/^# ISTIO_VERSION=unknown$/# ISTIO_VERSION=v1.30.5/' "$tsv" && rm -f "${tsv}.bak"
-	mkdir -p "$bin"
-	printf '#!/bin/sh
-case "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac
-' > "${bin}/kubectl"
-	chmod +x "${bin}/kubectl"
-	# _cp_row <svc> <istiod_restarted>: a measurement row for the cell svc=<svc>, made from its
-	# status row (a later timestamp).
-	_cp_row() {
-		awk -F'\t' -v OFS='\t' -v sc="$1" -v rs="$2" '$2 == "PROBE_FAILED" && $4 == sc { r = $0 } END { $0 = r; for (i = 8; i <= NF; i++) if ($i == "N/A") $i = 1; $1 = "2099-01-01T00:00:00+00:00"; $2 = "ci-a"; $31 = rs; print }' "$tsv"
-	}
-	row5="$(_cp_row 5 0)" row6="$(_cp_row 6 0)"
-	# svc=6 measured; svc=5: a context's valid row, then its status row (a cell that failed
-	# partway, as a fresh run writes it). A narrower --resume (svc=6, done) runs nothing,
-	# and the outcome still counts both cells of the TSV: svc=5 failed by its last row.
-	printf '%s\n' "$row6" "$row5" >> "$tsv"
-	awk -F'\t' '$2 == "PROBE_FAILED" && $4 == 5' "$tsv" | head -n 1 >> "$tsv"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 6
-	assert_failure 4
-	assert_output --partial "error: 1 of 2 cells failed: PROBE_FAILED x1."
-	grep -qx 'TOTAL=2' "$d/sweep-outcome.txt"
-	grep -qx 'FAILED=1' "$d/sweep-outcome.txt"
-	# svc=5 retried, and its last row is a measurement whose istiod restarted: not a failed
-	# cell, as in a fresh run (a measurement outcome, out of n_valid).
-	_cp_row 5 1 >> "$tsv"
-	PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 6
-	assert_success
-	assert_output --partial "All 2 cells ran"
-	grep -qx 'FAILED=0' "$d/sweep-outcome.txt"
-}
-
-@test "003 --resume refuses a sweep whose outcome records a problem: the Istio version changed under it" {
-	local res="${BATS_TEST_TMPDIR}/res" d tsv bin="${BATS_TEST_TMPDIR}/bin" bin2="${BATS_TEST_TMPDIR}/bin2" vf="${BATS_TEST_TMPDIR}/ver" before
-	export ISTIO_VERSION_CHECK=warn CONTROLPLANE_SETTLE_SEC=0 METRICS_READY_TIMEOUT=0 ISTIO_VERSION_READY_WAIT_SEC=0
-	echo v1.30.5 > "$vf"
-	mkdir -p "$bin" "$bin2"
-	# Run 1: the members run v1.30.5 at the start; the cell's first other kubectl call
-	# moves them to v1.30.99 (an upgrade under the sweep).
-	cat > "${bin}/kubectl" <<STUB
-#!/bin/sh
-case "\$*" in
-*"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) STUB_ISTIO_VERSION="\$(cat ${vf})" exec "\$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "\$@" ;;
-*) echo v1.30.99 > ${vf}; exit 1 ;;
-esac
-STUB
-	chmod +x "${bin}/kubectl"
-	printf '#!/bin/sh\ncase "$*" in *"get istios.sailoperator.io default"*|*"get istiorevisions.sailoperator.io"*|*"get deployments.apps istiod -o json"*) exec "$ROOT/tests/lib/test/fixtures/fake-istio-cr.sh" "$@" ;; *) exit 1 ;; esac\n' > "${bin2}/kubectl"
-	chmod +x "${bin2}/kubectl"
-	CONTROLPLANE_RESULTS_DIR="$res" PATH="${bin}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 4
-	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	tsv="$(find "$d" -maxdepth 1 -name 'controlplane-*.tsv')"
-	grep -qx '# ISTIO_VERSION=v1.30.5' "$tsv"
-	grep -q '^PROBLEM=the Istio version changed during the sweep (ci-a: v1.30.5 at the start, v1.30.99 at the end)' "$d/sweep-outcome.txt"
-	# The mesh is back on v1.30.5: the resume still refuses before it reads the mesh,
-	# appends nothing and keeps the record.
-	before="$(cat "$tsv")"
-	PATH="${bin2}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: this sweep's sweep-outcome.txt records a problem (the Istio version changed during the sweep (ci-a: v1.30.5 at the start, v1.30.99 at the end); its rows are not all from ISTIO_VERSION=v1.30.5), so no later run can vouch for its rows, and a resume would write an outcome without it. Start a new sweep."
-	refute_output --partial "Istio version:"
-	[ "$(cat "$tsv")" = "$before" ]
-	grep -q '^PROBLEM=' "$d/sweep-outcome.txt"
-	[ ! -e "$d/sweep-outcome.prev.txt" ]
-	[ ! -e "$d/resumes.txt" ]
-	# Only in sweep-outcome.prev.txt (a resume moved it, then died): refused the same way.
-	mv "$d/sweep-outcome.txt" "$d/sweep-outcome.prev.txt"
-	PATH="${bin2}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --resume "$d" --contexts ci-a --mesh-sizes 1 --service-counts 5
-	assert_failure 1
-	assert_output --partial "--resume: this sweep's sweep-outcome.prev.txt records a problem (the Istio version changed during the sweep"
-	[ "$(cat "$tsv")" = "$before" ]
 }

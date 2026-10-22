@@ -20,31 +20,32 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    `pilot.autoscaleEnabled: false`, `pilot.replicaCount: <K>` (default 3). An autoscaling istiod
    changes topology mid-sweep and corrupts the xDS deltas.
 3. **Enough CPU for the workload** — see [Capacity planning](#capacity-planning).
-4. **A kubeconfig with every mesh-member context.** Set `SETUP_CONTEXTS` in `config/versions.env`
-   or pass `--contexts`: mesh members only, never the hub. Token/OAuth credentials must stay
-   valid for the whole multi-hour run.
+4. **A kubeconfig with every mesh-member context.** Pass `--contexts`, or set `SETUP_CONTEXTS` in
+   a `tests/<suite>/configs/<name>.local.env` run config (git ignores it; an edit of
+   `config/versions.env` changes `HARNESS_SHA`): mesh members only, never the hub. Token/OAuth
+   credentials must stay valid for the whole multi-hour run.
 5. **Tools:** `kubectl`/`oc`, `helm`, `jq`, `curl`, `awk`, and GNU `timeout` (macOS: `brew install
    coreutils` for `gtimeout`; the controlplane suite stops at startup without one).
 6. **The `ISTIO_VERSION` pin matches the mesh.** Every suite but gateway-api reads the version
    each member runs (its active IstioRevision) before its first change and stops when it differs
    from `ISTIO_VERSION` (`config/versions.env`), when members differ, or when one cannot be read;
    gateway-api, a read-only check, records it and goes on. Fix the pin (or the mesh);
-   `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs. A member whose istiod
-   or IstioCNI is not ready, or whose istiod is rolling out, is read again for up to
-   `ISTIO_VERSION_READY_WAIT_SEC` (60 s), then recorded with a warning (a rollout still going
-   on reads as unknown); the members still not ready are in `ISTIO_NOTREADY_AT_START` in every
-   TSV preamble and report. A sweep reads it again at the end and exits 4 when the version or the
-   active revision changed during the sweep, or when the generation of a member's Istio CR or
-   active IstioRevision went up with the same version (an edit of the Istio CR, an OSSM operator
-   upgrade, a TLS profile change; a tuning sweep's own apply and revert do not count), and
-   when its harness (`HARNESS_SHA`: a file under `tests/`, `config/`, `charts/` or `terraform/`)
-   changed during it. Every sweep ends by writing `sweep-outcome.txt` to its results dir (exit
-   code, failed cells, the version recheck), and its reports repeat those errors and warnings.
-   Until then the file holds a not-finished record, which says when the sweep stopped on an
-   error (`STOPPED=1`, `STOP_REASON`) or was interrupted (`ENDED_AT`, `ENDED_SIGNAL`); one
-   killed outright leaves it as it was. A sweep dir without that file is from a sweep that
-   stopped before its start (nothing ran) or from an older harness. Do not edit, check out or
-   pull the checkout a sweep runs from until it ends.
+   `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs. A member that is not
+   ready (its Istio CR not Healthy or not reconciled, a revision migration, an istiod rollout) is
+   read again every 5 s, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s), and stops the run too when it
+   is still not ready. A sweep reads it again at the end and exits 4 when the version or the active
+   revision changed during the sweep, or when the generation of a member's Istio CR or active
+   IstioRevision moved with the same version (an edit of the Istio CR, or Sail rendering it again;
+   a tuning sweep, whose profiles move them on purpose, checks them around each pass and at its
+   end only when no profile was applied), when a member's platform record changed, and when its
+   harness (`HARNESS_SHA`: a file under `tests/`, `config/`, `charts/` or `terraform/`) changed
+   during it ([How a sweep ends](../../README.md#how-a-sweep-ends)). Every sweep ends by writing
+   `sweep-outcome.txt` to its results dir (exit code, failed cells, the version recheck), and its
+   reports repeat those errors and warnings. Until then the file says `STATUS=running`; a sweep
+   that stops on an error records `STATUS=stopped` with its reason, one interrupted
+   `STATUS=interrupted` with the signal, and one killed outright leaves `STATUS=running`. A sweep
+   dir without that file is from a sweep that stopped before its start (nothing ran) or from an
+   older harness. Do not edit, check out or pull the checkout a sweep runs from until it ends.
 
 ## Capacity planning
 
@@ -155,8 +156,8 @@ tests/churn-dataplane/004-run-sweep.sh --contexts "$CONTEXTS" --mesh-sizes "$MES
 Between suites, confirm the previous suite's `*-test` namespaces are gone and repeat Stage 0.
 Check each sweep's exit code: `4` means it finished and wrote its reports but some cells
 failed (the last stderr line says how many, by reason; their placeholder rows are in the
-report), or the mesh changed under it (the Istio version, the active revision, or the
-generation of an Istio CR or active IstioRevision; or that end-of-sweep check failed), or its
+report), or the mesh changed under it (the Istio version, the active revision, the
+generation of an Istio CR or active IstioRevision, or a member's platform record), or its
 harness did (`HARNESS_SHA`); `3` a reachability stop; `1` it stopped; `130`, `143` or `129` it
 was interrupted (Ctrl-C, SIGTERM, a closed terminal). `sweep-outcome.txt` in each sweep dir
 keeps the outcome. Each suite README lists its codes.
@@ -213,7 +214,7 @@ done
 - **Failures mid-sweep:** a failed probe is recorded as a `PROBE_FAILED` row and the sweep
   continues. A hung port-forward still shows as a live process with no log growth, so keep
   watching the log. If a sweep process dies, run that suite's cleanup and re-run the remaining
-  `--mesh-sizes` (controlplane: `--resume <sweep-dir>`).
+  `--mesh-sizes` (each run writes a new sweep dir).
 - **Credentials:** rotate after the campaign, not during it.
 - **Runtime:** several hours in total; churn-dataplane is the longest. More nodes shorten pod
   scheduling without affecting results.

@@ -39,22 +39,24 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE         Run config of KEY=value lines (config/options.env keys; see
-                        tests/propagation/README.md, "Run config"). Precedence: flag >
-                        --config > environment > default.
+Deploys the watcher pods and the pre-warmed backer pod on every context, and waits for them.
+
+  --config FILE         Run config of KEY=value lines (config/options.env keys).
+                        Precedence: flag > --config > environment > default.
   --contexts CSV        Kube contexts to target (default: \$SETUP_CONTEXTS).
-  --watcher-replicas N  Watcher pod replicas per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
+  --watcher-replicas N  Watcher pods per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --dry-run             Pass --dry-run=client to kubectl apply.
   --wait-timeout N      Seconds to wait for the watcher and backer pods to become
                         Ready (default: $WAIT_TIMEOUT).
   -h, --help            Show this help.
 
-Environment:
-  SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_WATCHER_REPLICAS,
-  BUSYBOX_VERSION, HTTP_ECHO_VERSION,
-  PROPAGATION_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
-  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
+Environment (config/options.env describes each): SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE,
+PROPAGATION_WATCHER_REPLICAS, PROPAGATION_WAIT_TIMEOUT_SEC, TEST_PLATFORM (${TEST_PLATFORM:-auto});
+BUSYBOX_VERSION and HTTP_ECHO_VERSION (config/versions.env).
+
+Exit codes: 0 deployed and ready (or the --dry-run apply passed); 1 an error or a timeout.
+
+See tests/propagation/README.md.
 EOF
 }
 
@@ -142,8 +144,6 @@ done
 for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the propagation-test apply"
 done
-# Under a sweep, a chart file changed for these renders reaches its outcome (harness_read).
-harness_read _hs _hk
 
 if ((DRY_RUN)); then
 	echo "Dry-run complete."

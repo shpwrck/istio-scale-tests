@@ -1,23 +1,11 @@
 #!/usr/bin/env bats
-# tests/lib/lint-keyed-arith.sh: it flags an array key that bash 4.3-5.1 expand twice (((
-# )), $(( )), let, [[ -gt ]] and -v on name[$k] and name["$k"]), and the tree is clean.
+# tests/lib/lint-keyed-arith.sh, which verify.sh step 6 runs on the tree: it flags an array key
+# that bash 4.3-5.1 expand twice ((( )), $(( )), let, [[ -gt ]] and -v on name[$k] and name["$k"]).
 
 load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
-source "${ROOT}/tests/lib/timestamp.sh"
-source "${ROOT}/tests/lib/metrics.sh"
-source "${ROOT}/tests/lib/fanout.sh"
-source "${ROOT}/tests/lib/config.sh"
 
-setup() {
-	RES="${BATS_TEST_TMPDIR}/res"
-	mkdir -p "$RES"
-	KC="${BATS_TEST_TMPDIR}/empty.kubeconfig"
-	: > "$KC"
-	export TMPDIR="$BATS_TEST_TMPDIR"
-}
-
-@test "the lint flags (( )), \$(( )), let, [[ -gt ]] and -v on name[\$k] and name[\"\$k\"]; the tree is clean" {
+@test "the lint flags (( )), \$(( )), let, [[ -gt ]] and -v on name[\$k] and name[\"\$k\"]; the safe forms pass; verify.sh's entrypoint reaches a .sh in a subdirectory (PL33)" {
 	source "${ROOT}/tests/lib/lint-keyed-arith.sh"
 	local f="${BATS_TEST_TMPDIR}/bad.sh" g="${BATS_TEST_TMPDIR}/good.sh"
 	cat > "$f" <<'EOF'
@@ -54,7 +42,11 @@ EOF
 	run lint_keyed_arith_file "$g"
 	assert_success
 	assert_output ""
-	run lint_keyed_arith_paths "${ROOT}/tests" "${ROOT}/terraform"
-	assert_success
-	assert_output ""
+	# What verify.sh step 6 runs: the files under a directory, a subdirectory's too.
+	mkdir -p "${BATS_TEST_TMPDIR}/tree/suite"
+	mv "$f" "$g" "${BATS_TEST_TMPDIR}/tree/suite/"
+	run lint_keyed_arith_paths "${BATS_TEST_TMPDIR}/tree"
+	assert_failure
+	[ "${#lines[@]}" -eq 8 ]
+	assert_line --partial "suite/bad.sh:8: arithmetic (( ))"
 }

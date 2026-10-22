@@ -704,7 +704,6 @@ gateway resets are now listed at the top of
   "take precedence", but Router proxies (gateways) never select a Sidecar in Istio 1.30.5
   (`pilot/pkg/model/push_context.go:1178-1195`), so the two exemption Sidecars are inert and PL38's
   premise needs re-checking against the deployed version (found by the Gateway API check's review).
-- controlplane `--resume` treats two `unknown` config hashes (no sha256 tool) as equal.
 
 ## Follow-ups found while making Kubernetes the default
 

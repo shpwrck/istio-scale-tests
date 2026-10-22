@@ -6,7 +6,7 @@
 load test_helper
 
 setup() {
-	STUB_DIR="$(mktemp -d)"
+	STUB_DIR="${BATS_TEST_TMPDIR}/stub"
 	STUB_LOG="${STUB_DIR}/calls.log"
 	export STUB_DIR STUB_LOG
 	mkdir -p "${STUB_DIR}/bin" "${STUB_DIR}/window" "${STUB_DIR}/tf/scripts"
@@ -133,11 +133,6 @@ EOF
 	SNS="arn:aws:sns:us-east-2:000000000000:rosa-window"
 	unset AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE TF_WORKSPACE STUB_SNS_FAIL STUB_SNS_CONFIRMED
 }
-
-teardown() {
-	rm -rf "${STUB_DIR}"
-}
-
 endpoint_json() {
 	cat >"${STUB_DIR}/eps.json" <<'EOF'
 {"VpcEndpoints": [
@@ -148,7 +143,7 @@ EOF
 
 # --- 002: where the VPC ids come from ---
 
-@test "002 reads the VPCs from the saved copy once the by_cluster output is empty" {
+@test "002 takes the VPCs from the saved copy once the by_cluster output is empty, merges the ones only the state knows (flagging the stale copy), dies with none, and calls a missing VPC an error when the region is only a guess" {
 	echo '{}' >"${STUB_DIR}/output.json"
 	run bash "$S002" --dry-run --by-cluster-json "${STUB_DIR}/window/by_cluster.json"
 	assert_success
@@ -156,16 +151,10 @@ EOF
 	assert_output --partial "VPCs:    2 (saved copy: 2, terraform output: 0, state: 0)"
 	assert_output --partial "--- cluster-001 (vpc-aaa; from saved) ---"
 	assert_output --partial "already deleted (not found in us-east-2)"
-}
-
-@test "002 without a saved copy or state still dies with no VPCs" {
-	echo '{}' >"${STUB_DIR}/output.json"
+	# Without a saved copy or state: no VPCs.
 	run bash "$S002" --dry-run
 	assert_failure
 	assert_output --partial "no VPCs found"
-}
-
-@test "002 merges VPCs that only the state knows and flags the stale copy" {
 	cat >"${STUB_DIR}/state.json" <<'EOF'
 {"values": {"root_module": {"child_modules": [{"resources": [
  {"address": "module.vpc[\"cluster-003\"].aws_vpc.this[0]", "type": "aws_vpc",
@@ -177,9 +166,7 @@ EOF
 	assert_output --partial "VPCs:    3 (saved copy: 2, terraform output: 0, state: 1)"
 	assert_output --partial "warning: vpc-ccc (cluster-003) is in terraform state but not in the saved copy"
 	assert_output --partial "note: vpc-aaa (cluster-001) is in the saved copy but not in terraform state"
-}
-
-@test "002 calls a missing VPC an error when the region is only a guess and nothing was found" {
+	rm -f "${STUB_DIR}/state.json"
 	echo '{"cluster-001": {"vpc_id": "vpc-aaa"}}' >"${STUB_DIR}/window/old.json"
 	: >"${STUB_DIR}/live_vpcs"
 	run env AWS_REGION=us-west-2 bash "$S002" --dry-run --by-cluster-json "${STUB_DIR}/window/old.json"
@@ -190,26 +177,21 @@ EOF
 
 # --- 002: interface endpoints ---
 
-@test "002 only reports interface endpoints without --delete-interface-endpoints" {
+@test "002 only reports interface endpoints without --delete-interface-endpoints, keeps them while instances are left in the VPC, and deletes unmanaged ones in an empty VPC, never Terraform's" {
 	endpoint_json
 	run bash "$S002" --dry-run --by-cluster-json "${STUB_DIR}/window/by_cluster.json"
 	assert_success
 	assert_output --partial "note: interface endpoint vpce-111"
 	refute_output --partial "would delete interface endpoint"
-}
-
-@test "002 keeps interface endpoints while instances are left in the VPC" {
-	endpoint_json
+	: >"${STUB_LOG}"
 	echo '["i-0001"]' >"${STUB_DIR}/instances.json"
 	run bash "$S002" --by-cluster-json "${STUB_DIR}/window/by_cluster.json" --delete-interface-endpoints
 	assert_success
 	assert_output --partial "skip endpoint vpce-111 (com.amazonaws.vpce.us-east-2.vpce-svc-router): 1 instance(s) still in the VPC"
 	run grep -c "delete-vpc-endpoints" "${STUB_LOG}"
 	assert_output "0"
-}
-
-@test "002 deletes unmanaged interface endpoints in an empty VPC, never Terraform's" {
-	endpoint_json
+	rm -f "${STUB_DIR}/instances.json"
+	: >"${STUB_LOG}"
 	cat >"${STUB_DIR}/state.json" <<'EOF'
 {"values": {"root_module": {"resources": [
  {"address": "aws_vpc_endpoint.sts", "type": "aws_vpc_endpoint", "values": {"id": "vpce-222"}}]}}}
@@ -274,7 +256,7 @@ EOF
 	assert_output "1"
 }
 
-@test "003 --dry-run destroys and deletes nothing" {
+@test "003 --dry-run destroys and deletes nothing, and with only the quota resources in state and no saved copy skips 002" {
 	printf 'module.vpc["cluster-001"]\n' >"${STUB_DIR}/state.list"
 	endpoint_json
 	run bash "$S003" --dry-run --state-dir "${STUB_DIR}/window"
@@ -285,16 +267,8 @@ EOF
 	run grep -cE ' destroy |delete-|sns publish' "${STUB_LOG}"
 	assert_output "0"
 	[ ! -e "${STUB_DIR}/window/teardown.log" ]
-}
-
-@test "003 --dry-run fails when the rosa login is gone" {
-	run env STUB_ROSA_FAIL=1 bash "$S003" --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2
-	assert_failure
-	assert_output --partial "FAIL  rosa token --refresh failed"
-}
-
-@test "003 --dry-run with only the quota resources in state and no saved copy skips 002" {
 	# P0 applies the service quotas a day early; by_cluster.json is only saved after apply.
+	: >"${STUB_LOG}"
 	rm -f "${STUB_DIR}/window/by_cluster.json"
 	printf 'data.aws_servicequotas_service_quota.vpc\naws_servicequotas_service_quota.vpc[0]\n' >"${STUB_DIR}/state.list"
 	run bash "$S003" --dry-run --state-dir "${STUB_DIR}/window"
@@ -305,6 +279,18 @@ EOF
 	refute_output --partial "cannot read"
 	run grep -c "describe-vpcs" "${STUB_LOG}"
 	assert_output "0"
+}
+
+@test "003 --dry-run fails when the rosa login is gone, or while rosa-hcp state sits in another workspace" {
+	run env STUB_ROSA_FAIL=1 bash "$S003" --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2
+	assert_failure
+	assert_output --partial "FAIL  rosa token --refresh failed"
+	mkdir -p "${STUB_DIR}/tf/terraform.tfstate.d/rosa"
+	echo '{"resources": [{"mode": "managed", "type": "rhcs_cluster_rosa_hcp"}, {"mode": "data", "type": "aws_region"}]}' \
+		>"${STUB_DIR}/tf/terraform.tfstate.d/rosa/terraform.tfstate"
+	run bash "$S003" --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2
+	assert_failure
+	assert_output --partial "FAIL  resources in other rosa-hcp workspaces: rosa(1)"
 }
 
 @test "003 cleans the VPCs only the state knows when no copy was saved" {
@@ -351,15 +337,6 @@ EOF
 	assert_output --partial "VPCs:    1 (saved copy: 0, terraform output: 0, state: 1)"
 }
 
-@test "003 --dry-run fails while rosa-hcp state sits in another workspace" {
-	mkdir -p "${STUB_DIR}/tf/terraform.tfstate.d/rosa"
-	echo '{"resources": [{"mode": "managed", "type": "rhcs_cluster_rosa_hcp"}, {"mode": "data", "type": "aws_region"}]}' \
-		>"${STUB_DIR}/tf/terraform.tfstate.d/rosa/terraform.tfstate"
-	run bash "$S003" --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2
-	assert_failure
-	assert_output --partial "FAIL  resources in other rosa-hcp workspaces: rosa(1)"
-}
-
 @test "003 destroys nothing without --now: no mode, or --fire-after/--unit without --arm" {
 	run bash "$S003" --state-dir "${STUB_DIR}/window" --region us-east-2
 	assert_failure
@@ -384,7 +361,7 @@ EOF
 
 # --- 003: arming the timer ---
 
-@test "003 --arm --dry-run aims both triggers at T0 + --fire-after" {
+@test "003 --arm aims both triggers at T0 + --fire-after (default 8h15m, the window plan's Tier C deadline), refuses a deadline that has passed, then arms the timer and publishes an armed message to SNS" {
 	t0=$(($(date -u +%s) - 3600))
 	echo "$t0" >"${STUB_DIR}/window/t0"
 	expected="$(date -u -d "@$((t0 + 7200))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -r "$((t0 + 7200))" '+%Y-%m-%d %H:%M:%S')"
@@ -401,6 +378,26 @@ EOF
 	assert_output --partial "would publish to SNS: ROSA auto-teardown armed: fires at ${expected} UTC"
 	run grep -cE "^systemd-run |sns publish" "${STUB_LOG}"
 	assert_output "0"
+	# No --fire-after: T0 + 8h15m.
+	expected="$(date -u -d "@$((t0 + 29700))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -r "$((t0 + 29700))" '+%Y-%m-%d %H:%M:%S')"
+	run bash "$S003" --arm --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2 --sns-topic-arn "$SNS"
+	assert_success
+	assert_output --partial "fires at ${expected} UTC (T0 from"
+	assert_output --partial "+ 8h15m;"
+	# A T0 so old that T0 + 8h15m has passed.
+	echo "$(($(date -u +%s) - 36000))" >"${STUB_DIR}/window/t0"
+	run bash "$S003" --arm --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2 --fire-after 8h15m
+	assert_failure
+	assert_output --partial "has passed or is under a minute away"
+	# Armed for real.
+	echo "$t0" >"${STUB_DIR}/window/t0"
+	: >"${STUB_LOG}"
+	run bash "$S003" --arm --state-dir "${STUB_DIR}/window" --region us-east-2 --fire-after 2h --sns-topic-arn "$SNS"
+	assert_success
+	run grep -c "^systemd-run --user --unit=rosa-autoteardown " "${STUB_LOG}"
+	assert_output "1"
+	run grep "sns publish" "${STUB_LOG}"
+	assert_output --partial "--region us-east-2 sns publish --topic-arn ${SNS} --subject ROSA auto-teardown armed: fires at "
 }
 
 @test "003 --arm refuses without an SNS topic that has a confirmed subscription" {
@@ -428,26 +425,6 @@ EOF
 	assert_output "0"
 }
 
-@test "003 --arm arms the timer, then publishes an armed message to SNS" {
-	echo "$(($(date -u +%s) - 3600))" >"${STUB_DIR}/window/t0"
-	run bash "$S003" --arm --state-dir "${STUB_DIR}/window" --region us-east-2 --fire-after 2h --sns-topic-arn "$SNS"
-	assert_success
-	run grep -c "^systemd-run --user --unit=rosa-autoteardown " "${STUB_LOG}"
-	assert_output "1"
-	run grep "sns publish" "${STUB_LOG}"
-	assert_output --partial "--region us-east-2 sns publish --topic-arn ${SNS} --subject ROSA auto-teardown armed: fires at "
-}
-
-@test "003 --arm defaults to the window plan's Tier C deadline, T0 + 8h15m" {
-	t0=$(($(date -u +%s) - 3600))
-	echo "$t0" >"${STUB_DIR}/window/t0"
-	expected="$(date -u -d "@$((t0 + 29700))" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -r "$((t0 + 29700))" '+%Y-%m-%d %H:%M:%S')"
-	run bash "$S003" --arm --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2 --sns-topic-arn "$SNS"
-	assert_success
-	assert_output --partial "fires at ${expected} UTC (T0 from"
-	assert_output --partial "+ 8h15m;"
-}
-
 @test "003 --arm on WSL needs instanceIdleTimeout=-1 in .wslconfig" {
 	echo "Linux version 5.15.167.4-microsoft-standard-WSL2" >"${STUB_DIR}/proc_version"
 	run bash "$S003" --arm --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2 --fire-after 2h --sns-topic-arn "$SNS"
@@ -463,11 +440,4 @@ EOF
 	run bash "$S003" --arm --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2 --fire-after 2h --sns-topic-arn "$SNS"
 	assert_success
 	assert_output --partial "OK    WSL: instanceIdleTimeout=-1"
-}
-
-@test "003 --arm refuses a deadline that has passed" {
-	echo "$(($(date -u +%s) - 36000))" >"${STUB_DIR}/window/t0"
-	run bash "$S003" --arm --dry-run --state-dir "${STUB_DIR}/window" --region us-east-2 --fire-after 8h15m
-	assert_failure
-	assert_output --partial "has passed or is under a minute away"
 }

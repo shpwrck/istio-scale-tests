@@ -4,8 +4,8 @@
 # each profile (apply -> settle -> probe -> revert), writes sweep-comparison.md,
 # runs the suite's cleanup and resumes Argo CD. It refuses to start while a member
 # holds a tuning profile's objects or marker (a profile left applied). Each pass reads
-# its own platform record before its probes and again after them, so a profile undone
-# or istiod's settings put back during the pass show in its comparison.
+# its own platform record before its probes and again after them: a build or istiod
+# setting that changed during the pass is a problem of the sweep's outcome.
 #
 # Usage:
 #   ./tests/tuning/003-run-tuning-sweep.sh --suite SUITE --gitops-context CTX [options]
@@ -19,14 +19,12 @@ source "${ROOT}/config/versions.env"
 source "${ROOT}/tests/lib/common.sh"
 # Loud ERR trap for unexpected aborts.
 # sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
-# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+# aborts after its start records (the EXIT trap sweep_start sets).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe: masked addresses)
-# shellcheck disable=SC1091
-source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits (platform_drift_check: istiod's limits)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM), platform_tuning_objects_refuse, each pass's record
 # shellcheck disable=SC1091
@@ -51,10 +49,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --suite SUITE --gitops-context CTX [options]
 
-For the baseline and each profile: apply, wait --settle seconds, run the suite's
-probe, revert. Writes sweep-comparison.md into the sweep directory. Refuses to start
-while a profile is left applied: its state under the results directory, or its objects
-or marker on a member (./tests/tuning/005-cleanup.sh undoes both).
+For the baseline and each profile: apply, wait --settle seconds, run the suite's probe,
+revert; then writes sweep-comparison.md (004). Refuses to start while a profile is left
+applied (./tests/tuning/005-cleanup.sh undoes it).
 
 Options:
   --suite SUITE          propagation | controlplane | dataplane | churn |
@@ -78,79 +75,17 @@ Options:
                          own --dry-run, and exit. Touches no cluster.
   -h, --help             Show this help.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE,
-  TUNING_ROLLOUT_TIMEOUT.
-  006-gitops-pause.sh, which pauses Argo CD, reads TUNING_GITOPS_NAMESPACE (the Argo CD
-  namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
-  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET}).
-  TEST_PLATFORM (config/options.env; auto, kubernetes or openshift; now ${TEST_PLATFORM:-auto}):
-  kubernetes or openshift is taken as the platform instead of asking each cluster, for the probe
-  suite's chart overlay and, with TUNING_GITOPS_NAMESPACE empty, for the hub whose Argo CD
-  namespace 006 pauses in (TUNING_GITOPS_NAMESPACE overrides that). The platform record of each
-  pass still asks every member what it serves.
-  HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
-  step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
-  processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
-  are read at once. Environment only (config/options.env).
-$(platform_help_lines reads)
+Environment (config/options.env describes each): SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT,
+TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE, TUNING_ROLLOUT_TIMEOUT, TUNING_GITOPS_NAMESPACE,
+TUNING_GITOPS_APPSET (${TUNING_GITOPS_APPSET}), the probe suite's keys, TEST_PLATFORM (${TEST_PLATFORM:-auto}),
+PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}), PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}), ISTIO_VERSION_CHECK,
+ISTIO_VERSION_READY_WAIT_SEC, SWEEP_STOP_GRACE_SEC. Requires python3 with PyYAML.
 
-Exit codes:
-  0  every pass (baseline and each profile) ran its probe
-  1  the sweep stopped: a bad flag or precondition (also another live run that holds
-     the sweep dir's .sweep.lock: nothing was changed), the suite setup failed, a
-     profile could not be reverted (REVERT_FAILED; later passes skipped), or an
-     unexpected error; after its start, sweep-outcome.txt records the stop and its
-     reason (STOPPED=1, STOP_REASON, CUT_SHORT=1), after the active profile is reverted,
-     with what the generation checks found until then
-  4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
-     passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
-     non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason), or the
-     mesh changed under it (each an "error:" line on stderr):
-       - the Istio version or active revision changed during the sweep (read again at
-         its end), or a member's Istio CR or active IstioRevision generation went up
-         after the last revert (at the same version: an edit of the Istio CR, an OSSM
-         operator upgrade, or a change of the cluster's TLS security profile);
-       - the Istio CR changed while the sweep changed nothing: during a pass, after its
-         profile's apply settled and not by that profile, or between an apply that
-         failed and its revert (002-revert-profile.sh compares the generations before
-         its revert), during the suite setup, the baseline pass or a profile that leaves
-         the Istio CR alone (istio_cr_patch: {}), between 001's record once an apply
-         settled and the sweep's read after it, or between one pass's revert and the
-         next pass's apply (read before each apply);
-       - a member's Istio CR generation rose by more than 1, or fell, across a
-         profile's apply or revert (its merge patch raises it by exactly 1: something
-         else edited it, or deleted and created it, during that step);
-       - the harness (a file under tests/, config/, charts/ or terraform/) changed
-         during the sweep (HARNESS_SHA read before the steps, by each step, at the end);
-       - a member's Istio CR spec after the last revert differs from the sweep's start
-         (an incomplete revert, or, when a check above found one, an edit by
-         something else that no revert undid: they restore only the profiles' keys;
-         the paths that differ are named).
-     The sweep's own apply and revert raise the generations too: the sweep reads them
-     again after each, so those never count. A member whose generations could not be
-     read for one of these checks is a note (not ruled out), not a problem. The outcome
-     is also in sweep-outcome.txt and sweep-comparison.md.
-  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM); the active profile is reverted
-     first, then sweep-outcome.txt stays "not finished" and says when and by which
-     signal (ENDED_AT, ENDED_SIGNAL), with what the generation checks found until then
-     (each problem as a note: a not-finished record counts nothing). A signal sent to
-     the sweep's process alone reaches the step that runs (an apply, a revert, a probe)
-     and every process under it at once (any still running SWEEP_STOP_GRACE_SEC later
-     get SIGKILL). For a sweep in a terminal's foreground, a kill -INT or -HUP skips
-     the processes in that foreground (a Ctrl-C reaches them itself): they get SIGKILL
-     with no cleanup, so stop such a sweep from elsewhere with SIGTERM. The sweep's own
-     commands between steps (the --settle wait and the proxy reads after it, the
-     generation reads around each apply and revert, the end-of-sweep recheck) finish
-     first, each bounded. Stopping the step's tree needs a ps that lists start times
-     (procps, or macOS's), or Linux's /proc in its place: without either, the sweep
-     warns at its start (a --dry-run too), and a stop reaches only the step's own
-     process.
+Exit codes: 0 every pass ran its probe; 1 stopped (a bad flag or precondition, a failed setup,
+REVERT_FAILED, an error); 4 failed passes or a problem (sweep-outcome.txt); 129, 130, 143 a
+signal (the active profile is reverted and Argo CD resumed first).
+
+See tests/tuning/README.md.
 EOF
 }
 
@@ -181,6 +116,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 platform_validate
+sweep_settings_check
 case "$SUITE" in
 propagation | controlplane | dataplane | churn | churn-dataplane) ;;
 "") die "--suite is required (propagation, controlplane, dataplane, churn, churn-dataplane)" ;;
@@ -236,9 +172,12 @@ PASSES+=("${PROFILES[@]}")
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_BASE}/sweep-${RUN_ID}"
 # The harness at the sweep's start (sweep-metadata.txt, sweep-outcome.txt); its results
-# under the output dir do not count (harness_sha_for_sweep exports that dir, so each probe
-# records the harness it runs). A harness that changes during the sweep is a problem.
-harness_sha_for_sweep "$OUTPUT_BASE"
+# under the output dir do not count, for its steps either (HARNESS_SHA_EXCLUDE).
+# sweep_finish reads it again: a harness that changed during the sweep is a problem.
+HARNESS_SHA_EXCLUDE="$OUTPUT_BASE"
+[[ "$HARNESS_SHA_EXCLUDE" == /* ]] || HARNESS_SHA_EXCLUDE="${PWD%/}/${HARNESS_SHA_EXCLUDE}"
+export HARNESS_SHA_EXCLUDE
+HARNESS_SHA="$(harness_sha)"
 PAUSE_STATE="${SWEEP_DIR}/gitops-pause.json"
 TUNING_BASELINE="unknown"
 SIDECAR_EGRESS_HOSTS="unknown"
@@ -327,9 +266,11 @@ if ((DRY_RUN)); then
 		fi
 		echo "sleep ${SETTLE_SEC}"
 		show "# read the platform record of every member into ${SWEEP_DIR}/${p}/platform-record.txt, and the tuning levers on ${SOURCE_CTX}"
+		[[ "$p" != baseline ]] || echo "# read the Istio CR generations of every member"
 		n=1
 		while probe_argv "$n" "$p" "${SWEEP_DIR}/${p}"; do show "${PROBE_ARGV[@]}"; n=$((n + 1)); done
-		show "# read it again; what changed during the pass, and what it could not compare, goes to ${SWEEP_DIR}/${p}/platform-drift.txt"
+		show "# read the platform record again: a value that changed during the pass is a problem of the outcome"
+		[[ "$p" != baseline ]] || echo "# read the generations again: a move during the pass is a problem of the outcome"
 		if [[ "$p" != baseline ]]; then
 			show "${TUNING_DIR}/002-revert-profile.sh" --state-dir "${SWEEP_DIR}/${p}/state" \
 				--rollout-timeout "$ROLLOUT_TIMEOUT"
@@ -379,39 +320,31 @@ echo "    Istio:     $(istio_version_label)"
 ACTIVE_STATE_DIR=""
 GITOPS_PAUSED=0
 
-# EXIT trap: revert a profile left applied, then resume Argo CD, then (PL32; only
-# after the revert) a sweep that ends before its outcome says how in that record: stopped
-# with its reason (die, an unexpected abort), or interrupted (Ctrl-C, SIGTERM), with what
-# the Istio CR generation checks found so far (ISTIO_EDITS: a stop record keeps a problem
-# as a PROBLEM, the interrupted record as a NOTE) and a note for a revert or resume that
-# failed here. Never aborts.
-# shellcheck disable=SC2329  # invoked by the EXIT trap below
-on_exit() {
-	local rc=$? sd="$ACTIVE_STATE_DIR" prof
-	local -a notes=()
-	# A step a second signal left running (an apply): killed before the revert.
-	sweep_step_kill
+# tuning_cleanup: revert a profile left applied (a failed revert, or one the sweep did not
+# reach: PL32), then resume Argo CD auto-sync when the sweep paused it; each that fails is a
+# note of the outcome (the console names the command). The sweep runs it at its end, and the
+# EXIT trap when the sweep ends before (die, an unexpected abort, Ctrl-C), after it recorded
+# how (tests/lib/common.sh, sweep_start).
+tuning_cleanup() {
+	local sd="$ACTIVE_STATE_DIR" prof
 	if [[ -n "$sd" && -f "${sd}/active-profile" ]]; then
 		prof="$(<"${sd}/active-profile")"
 		echo ">>> reverting ${prof} before exit" >&2
 		if ! "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$sd" --rollout-timeout "$ROLLOUT_TIMEOUT" >&2; then
 			echo "warn: revert failed; re-run: ./tests/tuning/002-revert-profile.sh --state-dir ${sd}" >&2
-			notes+=(--note "REVERT_FAILED: profile ${prof} is still applied (its revert on exit failed): run 002-revert-profile.sh --state-dir on its pass dir's state before any other run")
+			sweep_note "REVERT_FAILED: profile ${prof} is still applied (its revert on exit failed): run 002-revert-profile.sh --state-dir on its pass dir's state before any other run"
 		fi
 	fi
-	if ((GITOPS_PAUSED)); then
+	ACTIVE_STATE_DIR=""
+	# No record: the pause failed before its first window (006 records each before adding it).
+	if ((GITOPS_PAUSED)) && [[ -f "$PAUSE_STATE" ]]; then
+		GITOPS_PAUSED=0
 		if ! "${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$PAUSE_STATE" >&2; then
 			echo "warn: Argo CD still paused; run: ./tests/tuning/006-gitops-pause.sh --resume --state-file ${PAUSE_STATE}" >&2
-			notes+=(--note "Argo CD auto-sync is still paused (its resume on exit failed): run 006-gitops-pause.sh --resume")
+			sweep_note "Argo CD auto-sync is still paused (its resume on exit failed): run 005-cleanup.sh with this sweep's members as --contexts and its dir as --results-dir, which resumes the pause recorded there"
 		fi
 	fi
-	sweep_outcome_on_exit "$rc" ${ISTIO_EDITS[@]+"${ISTIO_EDITS[@]}"} ${notes[@]+"${notes[@]}"} || true
 }
-# `|| true`: set -e off inside, so an echo to a terminal that closed (SIGHUP) cannot
-# stop the trap before the revert.
-trap 'on_exit || true' EXIT
-# Ctrl-C, SIGTERM and SIGHUP: trapped by sweep_outcome_start below (sweep_trap_signals),
-# which runs this trap and dies of the signal; before it, bash runs this trap on them too.
 
 mkdir -p "$SWEEP_DIR"
 {
@@ -422,15 +355,18 @@ mkdir -p "$SWEEP_DIR"
 	echo "# SETTLE_SEC=${SETTLE_SEC}"
 	if [[ "$SUITE" == churn-dataplane ]]; then echo "# CHURN_RATE=${CHURN_RATE}"; fi
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
-	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY:-unknown}"
 	istio_version_kv | sed 's/^/# /'
 } >"${SWEEP_DIR}/sweep-metadata.txt"
-# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
-# so the comparison of a sweep that died says so.
-sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --unit passes --next "if it died, check that no profile is still applied (005-cleanup.sh) and Argo CD auto-sync is resumed (006-gitops-pause.sh --resume), then run the sweep again into a new dir"
-# The cleanup a step cut short by SIGKILL left undone (console only: _sweep_kill_hint); the
-# EXIT trap still reverts the active profile and resumes Argo CD.
-SWEEP_CLEANUP_CMD="./$(show "${CLEANUP_CMD[@]}")"
+# What the console names when the sweep ends before its end, one command to paste each: the
+# profile cleanup, which also resumes Argo CD from any pause record left under the results
+# dir (the EXIT trap does both, unless it fails or a second signal cuts it short), then the
+# suite's cleanup (the trap leaves its resources).
+_tc=("${TUNING_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV")
+[[ "$OUTPUT_BASE" == "${TUNING_DIR}/results" ]] || _tc+=(--results-dir "$OUTPUT_BASE")
+SWEEP_CLEANUP_CMD="./$(show "${_tc[@]}"); ./$(show "${CLEANUP_CMD[@]}")"
+# sweep-outcome.txt says the sweep runs until sweep_finish writes its outcome; one that ends
+# before records how, then runs tuning_cleanup.
+sweep_start "$SWEEP_DIR" "$RUN_ID" --unit passes --cleanup tuning_cleanup
 
 if ((GITOPS_PAUSE)); then
 	# Set first: a partial pause is still undone by the EXIT trap.
@@ -438,114 +374,6 @@ if ((GITOPS_PAUSE)); then
 	sweep_step "${TUNING_DIR}/006-gitops-pause.sh" --gitops-context "$GITOPS_CTX" --pause --state-file "$PAUSE_STATE" \
 		|| die "could not pause Argo CD auto-sync"
 fi
-
-# The sweep edits the Istio CR itself (each profile's apply and revert raise the Istio CR's
-# and the active IstioRevision's generations), so it reads them again around each of its
-# own edits (istio_version_refresh: the probes that follow record what they run on, and
-# the end recheck covers only the span after the last revert). ISTIO_EDITS: the
-# sweep_outcome --problem arguments for an edit that was not the sweep's, and --note ones
-# for a span the sweep could not check. PASSES_SINCE_READ: the passes run since the last
-# read of the generations (run_pass adds each, istio_checkpoint clears it).
-ISTIO_EDITS=()
-PASSES_SINCE_READ=""
-# istio_checkpoint <from> <edits 0|1|-> <next> [<record> <record_from>]: read the generations again
-# (not the proxies: right after an apply or a revert, old istiod pods may still be
-# terminating; run_pass reads those after its settle), named <from> ("after the revert of
-# pass 02-x") in the end recheck's messages. <edits>: the sweep's own merge patches of each
-# Istio CR since the last read. 0 (it changed nothing): a generation that moved is an edit
-# by something else, a problem. 1 (a profile's apply or revert, whose merge patch raises the
-# Istio CR's generation by exactly 1; Sail moves the IstioRevision's as it likes): an Istio
-# CR generation that rose by more than 1, or fell, is a problem too. - (002 already reported
-# an edit in this span): no check. A member it could not compare (a read failed on either
-# side: istio_generations_diff --unchecked; with edits 1, of its Istio CR generations) is a
-# note: an edit in that span is not ruled out. <record> <record_from>: a step's own read in
-# this span (001's istio-generations-applied, once its apply settled), named <record_from>:
-# the span is split there, <edits> up to it and 0 after it (the sweep changed nothing
-# since), so an edit after the apply settled is compared in full, the IstioRevision too; a
-# member the sweep's read missed after it keeps 001's record, which 002 compares from. A
-# problem names the passes an edit may have changed: those run since the last read
-# (PASSES_SINCE_READ), and <next>, the pass that runs next (empty: none), with the passes
-# after it while the edit stays (pass_may_measure).
-istio_checkpoint() {
-	local from="$1" edits="$2" next="$3" before="${ISTIO_GENERATIONS:-}" prev="${_ISTIO_GENERATIONS_FROM:-}"
-	local ran="${PASSES_SINCE_READ# }" effect="" cfg="its profile's"
-	[[ -n "$prev" ]] || prev="at the sweep's start"
-	istio_version_refresh --generations-only "$from" "$CONTEXTS_CSV" "${KUBECTL[@]}"
-	PASSES_SINCE_READ=""
-	[[ "$edits" != - ]] || return 0
-	[[ -z "$ran" ]] || effect="the passes run since that first read (${ran// /, }) may have measured another configuration"
-	if [[ -n "$next" ]]; then
-		[[ "$next" != baseline ]] || cfg="the baseline's"
-		effect="${effect:+${effect}, and }$(pass_may_measure "$next" "$cfg")"
-	fi
-	[[ -n "$effect" ]] || effect="no pass ran since that first read, and none runs after it"
-	if (($# > 4)); then
-		istio_span_check "$prev" "$before" "$5" "$4" "$edits" "$effect"
-		istio_span_check "$5" "$4" "$from" "${ISTIO_GENERATIONS:-}" 0 "$effect" \
-			"002 compares it from 001's record up to its revert, which covers this span"
-		return 0
-	fi
-	istio_span_check "$prev" "$before" "$from" "${ISTIO_GENERATIONS:-}" "$edits" "$effect"
-}
-
-# pass_may_measure <next> <cfg>: "pass <next> (and the passes after it, while the edit
-# stays) may measure another configuration than <cfg>", the parenthesis left out when
-# <next> is the sweep's last pass.
-pass_may_measure() {
-	local after=" (and the passes after it, while the edit stays)"
-	[[ "$1" != "${PASSES[${#PASSES[@]} - 1]}" ]] || after=""
-	printf 'pass %s%s may measure another configuration than %s' "$1" "$after" "$2"
-}
-
-# istio_span_check <prev> <before> <from> <after> <edits 0|1> <effect> [<unchecked>]:
-# istio_checkpoint's check of the span from the read named <prev> (generations <before>) to
-# the one named <from> (<after>). <effect>: the passes an edit in it may have changed.
-# <unchecked>: what follows for a member it could not compare (default: an edit in that span
-# is not ruled out).
-istio_span_check() {
-	local prev="$1" before="$2" from="$3" after="$4" edits="$5" effect="$6" moved un tab=$'\t'
-	local unchecked="${7:-an edit of its Istio CR in that span by something other than the sweep is not ruled out}"
-	local -a cr=()
-	[[ "$edits" == 0 ]] || cr=(--cr-over "$edits")
-	un="$(istio_generations_diff ${cr[@]+"${cr[@]}"} --unchecked "$before" "$after")"
-	if [[ -n "$un" ]]; then
-		ISTIO_EDITS+=(--note "the Istio CR generations of a member could not be compared between the sweep's read ${prev} and its read ${from} (a read failed): ${un}; ${unchecked}")
-		echo "warning: ${ISTIO_EDITS[${#ISTIO_EDITS[@]}-1]}" >&2
-	fi
-	moved="$(istio_generations_diff ${cr[@]+"${cr[@]}"} "$before" "$after")"
-	[[ -n "$moved" ]] || return 0
-	if [[ "$edits" == 0 ]]; then
-		ISTIO_EDITS+=(--problem "the Istio CR changed while the sweep changed nothing, between its read ${prev} and its read ${from}: ${moved#*"$tab"}; likely: $(istio_generation_causes "${moved%%"$tab"*}"); ${effect}")
-	else
-		ISTIO_EDITS+=(--problem "the Istio CR changed beyond the sweep's own edit, between its read ${prev} and its read ${from}: ${moved#*"$tab"}, not the rise of at most ${edits} its merge patch accounts for; likely: $(istio_generation_causes 1); ${effect}")
-	fi
-	echo "WARNING: ${ISTIO_EDITS[${#ISTIO_EDITS[@]}-1]}" >&2
-}
-
-# generations_merge <sweep_read> <record>: the generations to keep for 002, member by
-# member (ctx=<cr>/<rev>,...): the sweep's read where it has no unknown part, else the
-# record's where that has none, else the sweep's.
-generations_merge() {
-	_GM_A="$1" _GM_B="$2" awk 'BEGIN {
-		n = split(ENVIRON["_GM_B"], y, ",")
-		for (i = 1; i <= n; i++) { if (y[i] !~ /=/) continue; k = y[i]; sub(/=[^=]*$/, "", k); v = y[i]; sub(/^.*=/, "", v); rec[k] = v }
-		m = split(ENVIRON["_GM_A"], x, ","); out = ""
-		for (i = 1; i <= m; i++) {
-			e = x[i]; k = e; sub(/=[^=]*$/, "", k); v = e; sub(/^.*=/, "", v)
-			if (e ~ /=/ && v ~ /unknown/ && (k in rec) && rec[k] !~ /unknown/) e = k "=" rec[k]
-			out = out (out == "" ? "" : ",") e
-		}
-		print out
-	}'
-}
-
-# profile_edits_cr <state_dir>: false when the pass's profile leaves the Istio CR alone
-# (001 saved its istio_cr_patch as {} in patch.json), so its apply and revert raise no
-# generation and a checkpoint after them compares as one with edits 0; true otherwise,
-# also when patch.json is missing (001 stopped before it saved it).
-profile_edits_cr() {
-	[[ "$(cat "${1}/patch.json" 2>/dev/null)" != "{}" ]]
-}
 
 # The members' Istio CR spec before the first profile, to check at the end that the last
 # revert restored it (an incomplete revert): istio-spec/start-<ctx>.json.
@@ -566,14 +394,11 @@ fi
 if ((RUN_SETUP)); then
 	echo "--- Suite setup ---"
 	sweep_step "${SETUP_CMD[@]}" || die "suite setup failed"
-	# The setup changes no Istio CR (its sidecars' proxy versions: run_pass reads them).
-	istio_checkpoint "after the suite setup" 0 "${PASSES[0]:-}"
 fi
 
 # Run one pass's probe(s) into its result directory.
 run_pass() {
-	local label="$1" dir="${SWEEP_DIR}/$1" n=1 rc
-	PASSES_SINCE_READ+=" ${label}"
+	local label="$1" dir="${SWEEP_DIR}/$1" n=1 rc gens="" moved
 	mkdir -p "$dir"
 	if [[ "$SUITE" == churn-dataplane ]]; then
 		# A churn phase leaves churn-target replicas mixed; start each pass from base.
@@ -585,15 +410,9 @@ run_pass() {
 	fi
 	echo "--- Settle ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"
-	# The proxies connected now (the pass's sidecars, once old istiod pods are gone): what
-	# its probes record as ISTIO_PROXY_VERSIONS.
-	istio_version_refresh --proxies-only "after the settle of pass ${label}" "$CONTEXTS_CSV" "${KUBECTL[@]}"
-	# This pass's own platform record (a profile changes istiod's env and its objects), read once
-	# for its probes, which reuse it (platform-record.txt in the pass dir), and its tuning levers,
-	# which its TSVs record; both read again after the probes: a profile undone, istiod's
-	# settings put back, a lever, an istiod limit or a Kubernetes version changed during the pass
-	# go to its platform-drift.txt, which 004 reads for the pass.
-	platform_probe_reset
+	# This pass's own platform record (a profile changes istiod's env), read once for its probes,
+	# which reuse it (platform-record.txt in the pass dir), and read again after them
+	# (platform_drift_check); and its tuning levers, which its TSVs record.
 	platform_probe "$CONTEXTS_CSV"
 	platform_probe_share "$dir"
 	while IFS= read -r kv; do
@@ -602,6 +421,9 @@ run_pass() {
 		SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${kv#*=}" ;;
 		esac
 	done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
+	# The baseline has no apply and revert to bracket it (001 and 002 do for a profile pass): its
+	# generations before its first probe and after its last.
+	[[ "$label" != baseline ]] || gens="$(istio_generations_read "$CONTEXTS_CSV" "${KUBECTL[@]}")"
 	while probe_argv "$n" "$label" "$dir"; do
 		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
 		rc=0
@@ -615,10 +437,17 @@ run_pass() {
 		fi
 		n=$((n + 1))
 	done
-	platform_drift_check "$dir" "$CONTEXTS_CSV" pass
+	if [[ "$label" == baseline ]]; then
+		moved="$(istio_generations_diff "$gens" "$(istio_generations_read "$CONTEXTS_CSV" "${KUBECTL[@]}")")"
+		[[ -z "$moved" ]] || sweep_problem "pass baseline: the Istio CR changed during the pass: ${moved}; its probes may have measured another configuration"
+	fi
+	platform_drift_check "$CONTEXTS_CSV" "${label} pass"
 }
 
 ABORTED=0 ABORT_REASON=""
+# An apply that got as far as its state (active-profile) may have patched the Istio CR, and its
+# revert does: the end's read then cannot compare the generations.
+patched=0
 step=0
 for p in "${PASSES[@]}"; do
 	step=$((step + 1))
@@ -629,84 +458,31 @@ for p in "${PASSES[@]}"; do
 		continue
 	fi
 	state_dir="${SWEEP_DIR}/${p}/state"
-	# Nothing the sweep did since its last read (a baseline pass, the last revert) moved the
-	# generations: one that moved now is an edit by something else.
-	istio_checkpoint "before the apply of pass ${p}" 0 "$p"
 	ACTIVE_STATE_DIR="$state_dir"
-	applied=1 what=apply
+	applied=1
 	if ! sweep_step "${TUNING_DIR}/001-apply-profile.sh" --profile "$p" --contexts "$CONTEXTS_CSV" \
 		--state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT"; then
 		echo "warn: applying ${p} failed; marking SETUP_FAILED" >&2
 		# 001 can fail before it creates the state dir, so the pass dir may not exist yet.
 		mkdir -p "${SWEEP_DIR}/${p}"
 		echo "SETUP_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/SETUP_FAILED"
-		applied=0 what="failed apply"
+		applied=0
 	fi
-	# The apply raised the generations by its merge patch (edits 1), unless its profile
-	# leaves the Istio CR alone or it failed before its first patch (001 writes
-	# active-profile just before it): read again, so the probes record the new ones and the
-	# revert's checkpoint counts its own patch only. When 001 recorded every member's
-	# generations once its apply settled (istio-generations-applied), the span is split
-	# there: an edit after that record is compared in full and reported once, here. This
-	# read then replaces 001's record member by member, so 002 compares from it and does not
-	# report such an edit again; a member this read missed keeps 001's record, which 002
-	# compares it from. An apply that failed before its record (its rollout may still go
-	# on) gets none: 002 notes that span unchecked. Next: the pass, or after a failed apply
-	# the one after it.
-	edits=0 rec="" next="$p"
-	((applied)) || next="${PASSES[step]:-}"
-	if [[ -f "${state_dir}/active-profile" ]] && profile_edits_cr "$state_dir"; then edits=1; fi
-	[[ ! -s "${state_dir}/istio-generations-applied" ]] || rec="$(<"${state_dir}/istio-generations-applied")"
-	if [[ "$edits" == 1 && "$rec" == *=* && "$rec" != *unknown* ]]; then
-		istio_checkpoint "after the ${what} of pass ${p}" 1 "$next" "$rec" "once the apply of pass ${p} settled (001's istio-generations-applied)"
-	else
-		istio_checkpoint "after the ${what} of pass ${p}" "$edits" "$next"
+	if ((applied)); then
+		# The apply raised the generations: the pass's probes record the ones 001 read once
+		# it settled (unknown when it could not).
+		ISTIO_GENERATIONS=unknown
+		[[ ! -s "${state_dir}/istio-generations-applied" ]] || ISTIO_GENERATIONS="$(<"${state_dir}/istio-generations-applied")"
+		export ISTIO_GENERATIONS
+		run_pass "$p"
 	fi
-	if ((applied)) || [[ -n "$rec" ]]; then
-		gens="$(generations_merge "${ISTIO_GENERATIONS:-}" "$rec")"
-		if [[ "$gens" == *=* ]]; then
-			printf '%s\n' "$gens" >"${state_dir}/istio-generations-applied" \
-				|| echo "warn: could not write ${state_dir}/istio-generations-applied; 002 compares from 001's read" >&2
-		fi
-	fi
-	if ((applied)); then run_pass "$p"; fi
 	if [[ -f "${state_dir}/active-profile" ]]; then
+		patched=1
 		revert_ok=1
 		sweep_step "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT" || revert_ok=0
-		# The revert raised them again (a failed one too): the end recheck starts here. A
-		# profile that leaves the Istio CR alone raised nothing: an edit since the apply's
-		# read is something else's. When 002 named one already (istio-edited-during-pass),
-		# this span is not checked again.
-		edits=1
+		# 002 found an edit of the Istio CR by something else during the pass.
 		if [[ -s "${state_dir}/istio-edited-during-pass" ]]; then
-			edits=-
-		elif ! profile_edits_cr "$state_dir"; then
-			edits=0
-		fi
-		# The pass that runs next: none after a failed revert (the sweep stops below).
-		next="${PASSES[step]:-}"
-		((revert_ok)) || next=""
-		istio_checkpoint "after the revert of pass ${p}" "$edits" "$next"
-		# 002's span: the pass, or for an apply that failed (no probe ran), up to its revert.
-		# 002 reverts only the profile's keys, so such an edit stays for the passes after it,
-		# and no later check reports it again: name them here.
-		span="during pass ${p}" settled=", after its apply settled and" in_span="during the pass"
-		effect="its probes may have measured another configuration"
-		if ((applied == 0)); then
-			span="between the failed apply of pass ${p} and its revert" settled="," in_span="in that span"
-			effect="its probes did not run"
-		fi
-		if [[ -n "$next" ]]; then
-			effect+=", and $(pass_may_measure "$next" "its profile's")"
-		elif ((applied == 0)); then
-			effect+=", and no pass runs after it"
-		fi
-		if [[ -s "${state_dir}/istio-edited-during-pass" ]]; then
-			edit="$(<"${state_dir}/istio-edited-during-pass")" tab=$'\t'
-			ISTIO_EDITS+=(--problem "the Istio CR changed ${span}${settled} not by its profile: ${edit#*"$tab"}; likely: $(istio_generation_causes "${edit%%"$tab"*}"); ${effect} (002-revert-profile.sh, istio-edited-during-pass in its state dir)")
-		fi
-		if [[ -s "${state_dir}/istio-generations-unchecked" ]]; then
-			ISTIO_EDITS+=(--note "the Istio CR generations of a member could not be compared ${span} (002-revert-profile.sh, istio-generations-unchecked in its state dir): $(<"${state_dir}/istio-generations-unchecked"); an edit of its Istio CR ${in_span} by something other than its profile is not ruled out")
+			sweep_problem "pass ${p}: the Istio CR changed during the pass, after its apply settled and not by its profile: $(<"${state_dir}/istio-edited-during-pass"); its probes may have measured another configuration (002-revert-profile.sh, istio-edited-during-pass in its state dir)"
 		fi
 		if ((revert_ok == 0)); then
 			echo "REVERT_FAILED $(date -u +%Y-%m-%dT%H:%M:%SZ)" >"${SWEEP_DIR}/${p}/REVERT_FAILED"
@@ -719,21 +495,17 @@ for p in "${PASSES[@]}"; do
 done
 
 echo ""
-# The Istio version again, after the last pass and its revert, before the comparison
-# (read-only).
-IV_END=()
-istio_version_recheck IV_END "${KUBECTL[@]}"
-# An incomplete revert: a member's Istio CR spec now, against the start's. Or, when a check
-# above found an edit by something else (a problem: during a pass, between passes, after the
-# last revert), that edit: the reverts restore only the profiles' keys.
+# The Istio version and active revision again, after the last pass and its revert, before
+# the comparison (read-only); the generations too when no profile was applied (every apply
+# stopped before its first change), since then nothing of the sweep's raised them.
+if ((patched)); then
+	istio_version_recheck --no-generations "${KUBECTL[@]}"
+else
+	istio_version_recheck "${KUBECTL[@]}"
+fi
+# An incomplete revert, or an edit by something else that no revert undid (they restore
+# only the profiles' keys): a member's Istio CR spec now, against the start's.
 if ((has_profile)); then
-	spec_why="an incomplete revert"
-	for ie_arg in ${ISTIO_EDITS[@]+"${ISTIO_EDITS[@]}"} ${IV_END[@]+"${IV_END[@]}"}; do
-		if [[ "$ie_arg" == --problem ]]; then
-			spec_why+=", or an edit by something else that no revert undid: they restore only the profiles' keys"
-			break
-		fi
-	done
 	for ctx in "${CONTEXTS[@]}"; do
 		start_spec="${SPEC_DIR}/start-$(ctx_key "$ctx").json"
 		[[ -s "$start_spec" ]] || continue
@@ -741,7 +513,7 @@ if ((has_profile)); then
 		if ! "${KUBECTL[@]}" --context="$ctx" get istio.sailoperator.io default -o json 2>/dev/null \
 			| jq -S '.spec' >"$end_spec" 2>/dev/null; then
 			rm -f "$end_spec"
-			IV_END+=(--note "could not read ${ctx}'s Istio CR spec at the end, so no check that the last revert restored it")
+			sweep_note "could not read ${ctx}'s Istio CR spec at the end, so no check that the last revert restored it"
 			continue
 		fi
 		cmp -s "$start_spec" "$end_spec" && continue
@@ -750,29 +522,18 @@ if ((has_profile)); then
 			| ([$x, $y] | map([paths(scalars)]) | add | unique)
 			| map(. as $p | select(($x | try getpath($p) catch null) != ($y | try getpath($p) catch null)) | map(tostring) | join("."))
 			| join(", ")' 2>/dev/null)" || spec_paths=""
-		IV_END+=(--problem "${ctx}'s Istio CR spec after the last revert differs from the sweep's start (${spec_why}): ${spec_paths:-see istio-spec/ in the sweep dir}; the mesh is not as the sweep found it")
+		sweep_problem "${ctx}'s Istio CR spec after the last revert differs from the sweep's start (an incomplete revert, or an edit by something else that no revert undid: they restore only the profiles' keys): ${spec_paths:-see istio-spec/ in the sweep dir}; the mesh is not as the sweep found it"
 	done
 fi
-# The outcome is written after the comparison: it says so (a line that sweep_outcome
-# --md replaces).
-export _SWEEP_OUTCOME_PENDING=1
-"${TUNING_DIR}/004-compare-profiles.sh" --results-dir "$SWEEP_DIR" --format markdown \
-	--output "${SWEEP_DIR}/sweep-comparison.md" || echo "warn: comparison failed" >&2
-
 if ((RUN_CLEANUP)); then
 	echo "--- Suite cleanup ---"
 	sweep_step "${CLEANUP_CMD[@]}" || echo "warn: suite cleanup failed; re-run: $(show "${CLEANUP_CMD[@]}")" >&2
 fi
-
-_end_word="finished"
-if ((ABORTED)); then _end_word="STOPPED (revert failed)"; fi
-echo "=== Sweep ${RUN_ID} ${_end_word} ==="
-echo "    Results:    ${SWEEP_DIR}/"
-echo "    Comparison: ${SWEEP_DIR}/sweep-comparison.md"
+tuning_cleanup
 
 # A pass whose profile did not apply or whose probe exited non-zero has its marker
 # file (run_pass and the loop above never abort on one, so every profile was reverted
-# first, PL32). Count them by reason, also in sweep-outcome.txt and the comparison;
+# first, PL32). Count them by reason, before the comparison (it reads sweep-outcome.txt);
 # a failed revert (exit 1) wins over 4.
 FAILED_CELLS=()
 for p in "${PASSES[@]}"; do
@@ -782,8 +543,15 @@ for p in "${PASSES[@]}"; do
 done
 outcome_rc=0 stop_args=()
 ((ABORTED == 0)) || stop_args=(--stopped 1 --stop-reason "$ABORT_REASON")
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} ${ISTIO_EDITS[@]+"${ISTIO_EDITS[@]}"} --run-id "$RUN_ID" --unit passes \
+sweep_finish ${stop_args[@]+"${stop_args[@]}"} \
 	--where "Each has its marker file in its pass directory, and its Pass status in sweep-comparison.md names it" \
-	--record "$SWEEP_DIR" --md "${SWEEP_DIR}/sweep-comparison.md" "${#PASSES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
-if ((ABORTED)); then exit 1; fi
+	"${#PASSES[@]}" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
+"${TUNING_DIR}/004-compare-profiles.sh" --results-dir "$SWEEP_DIR" --format markdown \
+	--output "${SWEEP_DIR}/sweep-comparison.md" || echo "warn: comparison failed" >&2
+
+_end_word="finished"
+if ((ABORTED)); then _end_word="STOPPED (revert failed)"; fi
+echo "=== Sweep ${RUN_ID} ${_end_word} ==="
+echo "    Results:    ${SWEEP_DIR}/"
+echo "    Comparison: ${SWEEP_DIR}/sweep-comparison.md"
 exit "$outcome_rc"

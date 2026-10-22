@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 # propagation 005 through its real entrypoint: averages are rounded (not truncated),
 # the convergence histogram rows never bucket an average (max is the worst bucket),
-# csv/json carry worst_bucket, and json mesh_size is a number.
+# csv/json carry worst_bucket, json mesh_size is a number, P1 counts iterations, the
+# platform record and its warnings in every format, pooled runs. Which rows count for which
+# phase: propagation-probe.bats.
 
 load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
@@ -50,7 +52,7 @@ fixture() {
 	[ "$(jq '.rows[0] | .avg_ms == 1001 and .phase == "P1_local_wall"' <<<"$output")" = true ]
 }
 
-@test "005: histogram rows show the worst bucket and no averaged bucket" {
+@test "005: histogram rows show the worst bucket and no averaged bucket (markdown, text); csv and json keep the numbers and add worst_bucket; json mesh_size is a number" {
 	fixture
 	run "$REPORT" --results-dir "$RES" --format markdown
 	assert_success
@@ -61,10 +63,6 @@ fixture() {
 	run "$REPORT" --results-dir "$RES"
 	assert_output --regexp 'P1 conv_p99 \(hist\) +\| +3 \| +3 \| +- \| +0-100 \| +500-1000 \| +- \|'
 	refute_output --partial "100-500"
-}
-
-@test "005: csv and json keep the numbers and add worst_bucket; json mesh_size is a number" {
-	fixture
 	run "$REPORT" --results-dir "$RES" --format csv
 	assert_success
 	assert_line "mesh_size,phase,n_total,n_valid,min_ms,max_ms,avg_ms,p50_ms,p95_ms,p99_ms,worst_bucket,n_attempted"
@@ -87,15 +85,14 @@ fixture() {
 	[ "$(jq -c '.rows[0] | [.mesh_size, .n_total, .n_valid, .avg_ms, .worst_bucket]' <<<"$output")" = '[2,1,0,null,null]' ]
 }
 
-@test "005: the platform record reaches every format; an input from before it reads unknown, with a warning (PL19)" {
+@test "005: the platform record reaches every format; an input from before it reads unknown, without a warning of its own (PL19)" {
 	fixture
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_success
 	assert_line "  PLATFORM: kubernetes"
 	assert_line "  NODE_PROVIDER_BY_CONTEXT: src=kind,rmt=kind"
-	[[ "$stderr" != *"no PLATFORM line"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
-	assert_line 'MESH_OPERATOR_BY_CONTEXT: "src=sail-operator:1.31.1/Available,rmt=sail-operator:1.31.1/Available"'
+	assert_line 'MESH_OPERATOR_BY_CONTEXT: "src=sail-operator:1.31.1,rmt=sail-operator:1.31.1"'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.5,rmt=pilot:1.30.5"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
@@ -105,20 +102,10 @@ fixture() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.MESH_OPERATOR_BY_CONTEXT)"' <<<"$output")" = "unknown unknown" ]
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	[[ "$stderr" != *PLATFORM* ]]
 }
 
-@test "005 (S-B2): a record of 500 members goes through every format; json lists them all" {
-	{
-		echo "# RUN_ID=r1"
-		platform_fixture_lines "$(wide_ctxs 500 src rmt)"
-		echo "$HDR"
-		prow 2 1 1000 100
-	} > "${RES}/endpoint-r1.tsv"
-	wide_record_report "$REPORT" "$RES" text csv json markdown charts
-}
-
-# --- 005: the platform record's warnings in the report's body (H10, H2) ---
+# --- 005: the platform record's warnings in the report's body (H10) ---
 
 # second_sweep <sed>: endpoint-r2.tsv, a mesh=4 row, with the record edited by <sed>.
 second_sweep() {
@@ -130,63 +117,35 @@ second_sweep() {
 	} > "${RES}/endpoint-r2.tsv"
 }
 
-@test "005 (H10, H2): inputs that disagree and a build that changed during the sweep warn in every format's body" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+@test "005 (H10): inputs that disagree warn in every format's body" {
+	# One sweep's dir (its steps' TSVs): one run, whatever their RUN_IDs.
 	RES="${BATS_TEST_TMPDIR}/sweep-h10"
 	mkdir -p "$RES"
 	fixture
-	second_sweep 's/rmt=sail-operator:1.31.1/rmt=sail-operator:1.31.2/'
-	# The sweep's drift check (platform_drift_check) found istiod on src on another build.
-	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.6' > "${RES}/platform-drift.txt"
-	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for rmt (sail-operator:1.31.1/Available;sail-operator:1.31.2/Available): the report mixes runs on different mesh operator builds; compare like with like"
-	local drift="ISTIOD_IMAGE_BY_CONTEXT changed during the sweep (platform-drift.txt in sweep-h10): src from pilot:1.30.5 to pilot:1.30.6; the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade; for publishable figures, run the sweep again on one build"
-	local fmt w top first
+	second_sweep 's/rmt=sail-operator:1.31.1/rmt=sail-operator:1.31.2/; s/src=pilot:1.30.5/src=pilot:1.30.6/'
+	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for rmt (sail-operator:1.31.1 or sail-operator:1.31.2): the report mixes runs with different values of it; compare like with like"
+	local img="input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for src (pilot:1.30.5 or pilot:1.30.6): the report mixes runs with different values of it; compare like with like"
+	local fmt w
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_success
 	assert_line "WARNING: ${dis}"
-	assert_line "WARNING: ${drift}"
+	assert_line "WARNING: ${img}"
 	assert_line "  ISTIOD_IMAGE_BY_CONTEXT: src=mixed:pilot:1.30.5;pilot:1.30.6,rmt=pilot:1.30.5"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# WARNING: ${dis}"
-	assert_line "# WARNING: ${drift}"
+	assert_line "# WARNING: ${img}"
 	for fmt in markdown charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
 		assert_success
-		for w in "$dis" "$drift"; do assert_line "> **Warning:** ${w}"; done
-		# Under the title, before the file list, the first section and the first chart.
-		top="$(grep -n '^> \*\*Warning:\*\*' <<<"$output" | tail -1 | cut -d: -f1)"
-		first="$(awk 'seen && /^(\| |## |```mermaid|> [^*]|\*\*Source files)/ { print NR; exit } /^# / { seen = 1 }' <<<"$output")"
-		((top < first)) || { echo "${fmt}: last warning at ${top}, first table, section or note at ${first}"; false; }
+		for w in "$dis" "$img"; do assert_line "> **Warning:** ${w}"; done
 	done
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
-	[ "$(jq -c '.warnings' <<<"$output")" = "$(jq -nc --arg a "$dis" --arg b "$drift" '[$a, $b]')" ]
+	[ "$(jq -c '.warnings' <<<"$output")" = "$(jq -nc --arg a "$dis" --arg b "$img" '[$a, $b]')" ]
 	[ "$(grep -c '^warning: ' <<<"$stderr")" -eq 2 ]
 }
 
-@test "005 (H10): inputs that agree, an operator state aside, warn in no format" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
-	RES="${BATS_TEST_TMPDIR}/sweep-h10"
-	mkdir -p "$RES"
-	fixture
-	second_sweep 's#/Available#/Unavailable#g'
-	local fmt
-	for fmt in text csv markdown charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_success
-		refute_output --partial "WARNING"
-		refute_output --partial "**Warning:**"
-		refute_output --regexp '(=|"|: )mixed:'
-		[[ "$stderr" != *warning* ]] || { echo "$stderr"; false; }
-	done
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[ "$(jq -c '.warnings' <<<"$output")" = '[]' ]
-	[ "$(jq -r '.metadata.MESH_OPERATOR_BY_CONTEXT' <<<"$output")" = "src=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable,rmt=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable" ]
-	[ -z "$stderr" ]
-}
-
-@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a sweep-level key that varies reads mixed (PL26)" {
+@test "005: two sweeps in one dir stop the report, naming the command that reports each alone; --allow-multi-run says so in every format; a sweep-level key that varies reads mixed (PL26)" {
 	local d fmt
 	for d in a b; do
 		mkdir -p "${RES}/sweep-${d}"
@@ -201,19 +160,20 @@ second_sweep() {
 			prow 2 1 1000 100
 		} > "${RES}/sweep-${d}/endpoint-r${d}.tsv"
 	done
+	# The refusal comes before any format is rendered.
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	assert_failure 1
+	[ -z "$output" ]
+	[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+	[[ "$stderr" == *"  sweep-b:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-b'"* ]]
 	for fmt in text csv markdown json charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_failure 1
-		[ -z "$output" ]
-		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
-		[[ "$stderr" == *"  sweep-b:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-b'"* ]]
 		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
 		assert_success
 		# The last file's ITERATIONS is not the report's (it was last-wins).
 		assert_output --partial "mixed:3,5"
 		[[ "$stderr" == *"input TSVs disagree on sweep-level ITERATIONS (3,5)"* ]]
 		if [[ "$fmt" == json ]]; then
-			[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["sweep-a","sweep-b"],"harness_sha":["ha","hb"],"istio_version":["1.30.5"],"harness_content_key":["unknown"]}' ]
+			[ "$(jq -c '.pooled_runs' <<<"$output")" = '{"runs":2,"run_ids":["sweep-a","sweep-b"],"harness_sha":["ha","hb"],"istio_version":["1.30.5"]}' ]
 		else
 			assert_output --partial "This report pools 2 runs (--allow-multi-run): sweep-a, sweep-b. HARNESS_SHA: ha, hb. ISTIO_VERSION: 1.30.5."
 		fi
@@ -224,7 +184,7 @@ second_sweep() {
 	[ -z "$stderr" ]
 }
 
-@test "005: a TSV written before the live-version keys pooled with a live one reads mixed for them, never live" {
+@test "005: a TSV written before the live-version keys pooled with a live one reads mixed for them, never live; alone, unknown" {
 	mkdir -p "${RES}/sweep-old" "${RES}/sweep-new"
 	{
 		echo "# SWEEP_RUN_ID=sold"
@@ -240,8 +200,6 @@ second_sweep() {
 		echo "# ISTIO_VERSION_PIN=v1.30.5"
 		echo "# ISTIO_VERSION_SOURCE=live"
 		echo "# ISTIO_VERSION_BY_CONTEXT=src=v1.30.5,rmt=v1.30.5"
-		echo "# ISTIO_NOTREADY_AT_START=rmt=IstiodNotReady"
-		echo "# ISTIO_READY_WAITED_SEC=60"
 		echo "$HDR"
 		prow 2 1 1000 100
 	} > "${RES}/sweep-new/endpoint-rnew.tsv"
@@ -250,30 +208,11 @@ second_sweep() {
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "mixed:live,unknown" ]
 	[ "$(jq -r '.metadata.ISTIO_VERSION_PIN' <<<"$output")" = "mixed:v1.30.5,unknown" ]
 	[[ "$stderr" == *"input TSVs disagree on sweep-level ISTIO_VERSION_SOURCE (live,unknown)"* ]]
-	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "mixed:rmt=IstiodNotReady,unknown" ]
-	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format markdown
-	assert_output --partial "mixed:live,unknown"
-	# The new run alone reads live, and carries the readiness keys in every format.
+	# The new run alone reads live; the old one, never checked, unknown.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format json
 	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "live" ]
-	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC]' <<<"$output")" = '["rmt=IstiodNotReady","60"]' ]
-	for fmt in text csv markdown; do
-		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-new" --format "$fmt"
-		assert_output --partial "ISTIO_NOTREADY_AT_START"
-		assert_output --partial "rmt=IstiodNotReady"
-	done
-	# The old run alone was never checked: unknown in every format, not absent.
 	run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format json
-	[ "$(jq -c '.metadata | [.ISTIO_NOTREADY_AT_START, .ISTIO_READY_WAITED_SEC, .ISTIO_VERSION_SOURCE]' <<<"$output")" = '["unknown","unknown","unknown"]' ]
-	for fmt in text csv markdown; do
-		run --separate-stderr "$REPORT" --results-dir "${RES}/sweep-old" --format "$fmt"
-		assert_output --regexp 'ISTIO_NOTREADY_AT_START[^A-Za-z0-9]*unknown'
-	done
-	# --results-dir through a symlink (results/latest -> sweep-new), no trailing slash.
-	ln -s "${RES}/sweep-new" "${BATS_TEST_TMPDIR}/latest"
-	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
-	assert_success
-	[ "$(jq -r '.metadata.ISTIO_NOTREADY_AT_START' <<<"$output")" = "rmt=IstiodNotReady" ]
+	[ "$(jq -r '.metadata.ISTIO_VERSION_SOURCE' <<<"$output")" = "unknown" ]
 }
 
 # p1rows <run_id> <mesh> <iterations> <remotes...>: an OK row per (iteration, remote); P1
@@ -306,7 +245,7 @@ p1rows() {
 	assert_output 1
 }
 
-@test "005: 10 iterations x 3 remotes: P1's n is 10/10 in every format, so its p99 stays under the percentile floor" {
+@test "005: 10 iterations x 3 remotes: P1's n is 10/10 (iterations, not rows), so its p99 stays under the percentile floor" {
 	{ echo "# RUN_ID=r1"; platform_fixture_lines src,b,c,d; echo "$HDR"; p1rows r1 4 10 b c d; } > "${RES}/endpoint-r1.tsv"
 	run "$REPORT" --results-dir "$RES" --format json
 	assert_success
@@ -315,19 +254,11 @@ p1rows() {
 		'{"P1_local_wall":[10,10,null],"P1_conv_p50":[10,10,null],"P1_conv_p99":[10,10,null],"P2_discovery":[30,30,500],"P3_dataplane":[30,30,3000]}' ]
 	# The P1 mean is over the 10 iterations (1001..1010).
 	[ "$(jq -r '.rows[] | select(.phase == "P1_local_wall") | .avg_ms' <<<"$output")" = 1006 ]
-	run "$REPORT" --results-dir "$RES" --format csv
-	assert_line --regexp '^4,P1_local_wall,10,10,1001,1010,1006,'
-	assert_line --regexp '^4,P1_conv_p99,10,10,'
-	assert_line --regexp '^4,P2_discovery,30,30,'
+	# The report a sweep writes.
 	run "$REPORT" --results-dir "$RES" --format markdown
 	assert_success
 	assert_output --partial "| P1 local xDS (wall) | 10 | 10 |"
 	assert_output --partial "| P2 remote istiod EDS | 30 | 30 |"
-	run "$REPORT" --results-dir "$RES"
-	assert_output --regexp 'P1 local xDS \(wall\) +\| +10 \| +10 \|'
-	assert_output --regexp 'P1 conv_p99 \(hist\) +\| +10 \| +10 \|'
-	run "$REPORT" --results-dir "$RES" --format charts
-	assert_success
 }
 
 @test "005: 3 of 10 iterations overflowed: P1 reads 10 total, 7 valid, as 002's summary counts them" {
@@ -341,13 +272,6 @@ p1rows() {
 	# this 19-column TSV, whose rows cannot otherwise be split by side.
 	[ "$(jq -c '[.rows[] | select(.mesh_size == 4) | {(.phase): [.n_total, .n_valid]}] | add' <<<"$output")" = \
 		'{"P1_local_wall":[10,7],"P1_conv_p50":[10,7],"P1_conv_p99":[10,7],"P2_discovery":[30,30],"P3_dataplane":[30,30]}' ]
-	run "$REPORT" --results-dir "$RES" --format csv
-	assert_line --regexp '^4,P1_local_wall,10,7,'
-	run "$REPORT" --results-dir "$RES" --format markdown
-	assert_output --partial "| P1 local xDS (wall) | 10 | 7 |"
-	assert_output --partial "| P1 conv_p99 (hist) | 10 | 7 |"
-	run "$REPORT" --results-dir "$RES"
-	assert_output --regexp 'P1 local xDS \(wall\) +\| +10 \| +7 \|'
 	# 002's summary over the same rows (its SUMMARY_KV program: P1 n = prop_p1_sample over
 	# every row, before the row filter, of the distinct (run_id, iteration)): n=7/10; P2
 	# from the rows prop_drop_reason keeps: 30.

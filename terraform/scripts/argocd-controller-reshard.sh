@@ -298,7 +298,7 @@ app_status() {
   local n_members=${#want[@]}
   ((n_members == 0)) || echo "  and that each of these ${n_members} mesh members has Applications from every member ApplicationSet: ${want[*]}"
   local deadline=$((SECONDS + APP_STATUS_TIMEOUT_SEC)) apps appsets sets total since="" read_err="" what
-  local missing absent unreachable stale listed short cerr waiting last_waiting="" dest app msg
+  local missing absent unreachable stale listed short cerr waiting last_waiting="" dest app msg left
   local -A told=()
   APP_ERR_FILE=$(mktemp)
   trap 'rm -f "$APP_ERR_FILE"' EXIT
@@ -323,16 +323,19 @@ app_status() {
         echo "  all ${total} Application(s) have a sync and health status, compared since this check started; every Application and ApplicationSet they list exists${msg}"
         return 0
       fi
+      # The seconds before the deadline, never below 0 (a poll can end past it).
+      left=$((deadline - SECONDS))
+      ((left > 0)) || left=0
       # Errors once each, when first seen: the operator can stop the apply and fix them now.
       while IFS=$'\t' read -r dest app msg; do
         [[ -n "$dest" && -z "${told["cluster/$dest"]:-}" ]] || continue
         told["cluster/$dest"]=1
-        echo "WARNING: Argo CD cannot load state from cluster ${dest} (Application ${app}): ${msg}. The check fails in $((deadline - SECONDS))s unless this clears; you can stop the apply and fix it now (a URL the hub cannot reach: cluster_api_url_overrides; Unauthorized or Forbidden: the member's token, see \"Rotating a member's token\" in terraform/platform/README.md)." >&2
+        echo "WARNING: Argo CD cannot load state from cluster ${dest} (Application ${app}): ${msg}. The check fails in ${left}s unless this clears; you can stop the apply and fix it now (a URL the hub cannot reach: cluster_api_url_overrides; Unauthorized or Forbidden: the member's token, see \"Rotating a member's token\" in terraform/platform/README.md)." >&2
       done <<<"$unreachable"
       while IFS=$'\t' read -r app dest msg; do
         [[ -n "$app" && -z "${told["error/$msg"]:-}" ]] || continue
         told["error/$msg"]=1
-        echo "WARNING: Argo CD cannot compare Application ${app} (destination ${dest}), so it does not deploy: ${msg}. The check fails in $((deadline - SECONDS))s unless this clears; fix the chart, values or repository access the message names." >&2
+        echo "WARNING: Argo CD cannot compare Application ${app} (destination ${dest}), so it does not deploy: ${msg}. The check fails in ${left}s unless this clears; fix the chart, values or repository access the message names." >&2
       done <<<"$cerr"
       waiting=""
       [[ -z "$listed" ]] || waiting+="; $(count_lines "$listed") listed but not created yet"
@@ -348,8 +351,10 @@ app_status() {
       read_err="${read_err:-the reply was not a list of ${what}}"
       waiting="; the ${what} cannot be read: ${read_err}"
     fi
+    left=$((deadline - SECONDS))
+    ((left > 0)) || left=0
     if [[ "$waiting" != "$last_waiting" ]]; then
-      echo "  waiting ($((deadline - SECONDS))s left): ${waiting#; }"
+      echo "  waiting (${left}s left): ${waiting#; }"
       last_waiting="$waiting"
     fi
     if ((SECONDS >= deadline)); then
