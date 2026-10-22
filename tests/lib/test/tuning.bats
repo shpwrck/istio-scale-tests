@@ -574,7 +574,7 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 		|| { cat "$OUT"; false; }
 }
 
-@test "tuning 003: a sweep that stops before its end names the profile cleanup (it resumes Argo CD too) and then the suite's cleanup, one command to paste each" {
+@test "tuning 003: a sweep that stops before its end names the profile cleanup (it resumes Argo CD too) and then the suite's cleanup, one command to paste each; a pause that failed before its first window is not called still paused" {
 	gen_stub
 	rm -rf "${T}/tres"
 	# The stub hub answers nothing: the pause fails, after the sweep started.
@@ -586,4 +586,7 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	grep -qx 'STATUS=stopped' "${TDIR}/sweep-outcome.txt"
 	[[ "$stderr" == *"  clean up with: ./tests/tuning/005-cleanup.sh --contexts ci-a --results-dir ${T}/tres; ./tests/churn/005-cleanup.sh --contexts ci-a"* ]] \
 		|| { echo "$stderr" | tail -5; false; }
+	# The pause failed before it recorded a window: nothing to resume, nothing said still paused.
+	[ "$(grep -c 'still paused' "${TDIR}/sweep-outcome.txt")" -eq 0 ]
+	[[ "$stderr" != *"still paused"* ]]
 }

@@ -378,6 +378,7 @@ finish() {
 	local r="${T}/repo" h1 h2
 	mkdir -p "$r/tests" "$r/docs"
 	printf 'one\n' > "$r/tests/f"
+	printf '1\n\n3\n4\n5\n6\n7\n8\n9\n' > "$r/tests/g"
 	printf 'd\n' > "$r/docs/d"
 	printf '*.log\n' > "$r/.gitignore"
 	_commit "$r" init
@@ -393,15 +394,23 @@ finish() {
 	h1="$(ROOT="$r" harness_sha)"
 	[[ "$h1" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
 	[ "$(ROOT="$r" harness_sha)" = "$h1" ]
-	# Under a git config that prints diffs another way, the same edit reads the same.
-	printf '[core]\n\tabbrev = 12\n[diff]\n\tnoprefix = true\n\tcontext = 5\n' > "${T}/gitconfig"
-	[ "$(GIT_CONFIG_GLOBAL="${T}/gitconfig" ROOT="$r" harness_sha)" = "$h1" ]
 	printf 'three\n' > "$r/tests/f"
 	h2="$(ROOT="$r" harness_sha)"
 	[[ "$h2" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
 	[ "$h2" != "$h1" ]
 	git -C "$r" checkout -q -- tests/f
 	[ "$(ROOT="$r" harness_sha)" = v1 ]
+	# An edit of two files (two nearby hunks, a blank context line) reads the same under a git
+	# config and a user attributes file that print its diff another way.
+	printf 'two\n' > "$r/tests/f"
+	printf 'x\n\n3\n4\n5\n6\n7\n8\ny\n' > "$r/tests/g"
+	h1="$(ROOT="$r" harness_sha)"
+	printf 'tests/g diff=x\n' > "${T}/attrs"
+	printf 'tests/g\ntests/f\n' > "${T}/order"
+	printf '[core]\n\tabbrev = 12\n\tattributesFile = %s\n[diff]\n\tnoprefix = true\n\tcontext = 5\n\tinterHunkContext = 10\n\torderFile = %s\n\tsuppressBlankEmpty = true\n[diff "x"]\n\txfuncname = "^.+$"\n' \
+		"${T}/attrs" "${T}/order" > "${T}/gitconfig"
+	[ "$(GIT_CONFIG_GLOBAL="${T}/gitconfig" GIT_DIFF_OPTS=-u0 ROOT="$r" harness_sha)" = "$h1" ]
+	git -C "$r" checkout -q -- tests/f tests/g
 	# So are two contents of an untracked file.
 	mkdir -p "$r/config"
 	printf 'a\n' > "$r/config/new.env"

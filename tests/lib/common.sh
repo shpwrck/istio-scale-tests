@@ -772,12 +772,12 @@ harness_sha() {
 		return 0
 	}
 	if [[ -n "$s" ]]; then
-		# The same pathspec: the diff, with what a git config changes in it fixed (prefixes,
-		# algorithm, context, hunk joins, file order, full blob names, blank lines, a user's
-		# attributes file; no renames, colour or external diff), and, per untracked file, its
-		# name, a NUL and its content (a symlink's target).
+		# The same pathspec: the diff, with what a git config or GIT_DIFF_OPTS changes in it fixed
+		# (prefixes, algorithm, context, hunk joins, file order, full blob names, blank lines, path
+		# quoting, a user's attributes file; no renames, colour or external diff), and, per
+		# untracked file, its name, a NUL and its content (a symlink's target).
 		h="$(set -o pipefail; cd "$top" && {
-			GIT_OPTIONAL_LOCKS=0 git -c diff.suppressBlankEmpty=false -c core.attributesFile=/dev/null \
+			GIT_OPTIONAL_LOCKS=0 GIT_DIFF_OPTS='' git -c diff.suppressBlankEmpty=false -c core.attributesFile=/dev/null -c core.quotePath=true \
 				diff --binary --full-index --no-color --no-ext-diff --no-textconv --no-renames \
 				--diff-algorithm=myers --no-indent-heuristic -U3 --inter-hunk-context=0 -O/dev/null \
 				--src-prefix=a/ --dst-prefix=b/ --ignore-submodules=all HEAD -- "${spec[@]}" \

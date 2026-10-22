@@ -330,9 +330,10 @@ _istio_read_one() { TMPDIR="$2" istio_live_version "$1" "${_ira_k[@]}"; }
 # _ISTIO_VERSION_RESOLVED=1), before any change; dry_run 1 reads nothing (the pin, the other
 # keys unchecked). The members not ready are read again, together, every 5 s until each is
 # (istio_live_version's rule, which Sail's Ready condition alone does not meet), for up to
-# ISTIO_VERSION_READY_WAIT_SEC in all; one whose version cannot be read is not waited for. A
-# member unknown or still not ready, members that
-# differ, or a version not the pin (a leading v aside) fail the check:
+# ISTIO_VERSION_READY_WAIT_SEC in all; one whose first read leaves the version unknown (not
+# read, or not exact) is not waited for, and under fail it stops the run with no wait at all.
+# A member unknown or still not ready, members that differ, or a version not the pin (a
+# leading v aside) fail the check:
 # ISTIO_VERSION_CHECK=fail (the default) dies naming each; warn (always under --no-stop, for
 # a read-only check) warns, records the live value and makes each finding a sweep_note (call
 # it before sweep_start). Exports what istio_version_kv prints.
@@ -354,14 +355,20 @@ istio_version_resolve() {
 	fi
 	{ (($#)) && command -v "$1" >/dev/null 2>&1; } || die "neither kubectl nor oc found on PATH, so the live Istio version cannot be read"
 	local -a ivr_ctxs=() ivr_lines=() ivr_again=() ivr_wctxs=() ivr_relines=() ivr_bad=() ivr_still=() _ira_k=("$@")
-	local i n v rev cg rg ready why by="" revs="" gens="" seen="/" live="" known="" how t0 left waited
+	local i n v rev cg rg ready why by="" revs="" gens="" seen="/" live="" known="" how t0 left waited unread=0
 	split_csv "$ctxs_csv" ivr_ctxs
 	((${#ivr_ctxs[@]})) || die "istio_version_resolve: no mesh member contexts"
 	mapfile -t ivr_lines < <(_istio_read_all "$ctxs_csv" "$@")
 	for i in "${!ivr_ctxs[@]}"; do
 		IFS='|' read -r v _ _ _ ready _ <<<"${ivr_lines[i]:-}"
-		[[ "$ready" == yes || "${v:-unknown}" == unknown ]] || ivr_again+=("$i")
+		if [[ "${v:-unknown}" == unknown ]]; then
+			unread=1
+		elif [[ "$ready" != yes ]]; then
+			ivr_again+=("$i")
+		fi
 	done
+	# Under fail a member whose version is unknown stops the run anyway: no wait for the others.
+	[[ "$policy" == warn || "$unread" == 0 ]] || ivr_again=()
 	((${#ivr_again[@]} == 0 || wait_sec == 0)) \
 		|| echo "Istio: waiting up to ${wait_sec}s (ISTIO_VERSION_READY_WAIT_SEC) for ${#ivr_again[@]} member(s) not ready, reading them every 5s" >&2
 	# One deadline for all of them: the members still not ready are read again together.
@@ -376,8 +383,9 @@ istio_version_resolve() {
 		for i in "${ivr_again[@]}"; do
 			ivr_lines[i]="${ivr_relines[n]:-}"
 			n=$((n + 1))
-			IFS='|' read -r v _ _ _ ready _ <<<"${ivr_lines[i]}"
-			[[ "$ready" == yes || "${v:-unknown}" == unknown ]] || ivr_still+=("$i")
+			# A member read at the start stays in the wait when a re-read fails (a passing API error).
+			IFS='|' read -r _ _ _ _ ready _ <<<"${ivr_lines[i]}"
+			[[ "$ready" == yes ]] || ivr_still+=("$i")
 		done
 		ivr_again=(${ivr_still[@]+"${ivr_still[@]}"})
 	done

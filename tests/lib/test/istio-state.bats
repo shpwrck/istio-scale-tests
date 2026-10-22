@@ -121,18 +121,23 @@ recheck() {
 	[ ! -s "$KLOG" ]
 }
 
-@test "members not ready are read again every 5 s, together, until each is ready, up to ISTIO_VERSION_READY_WAIT_SEC in all: one ready on a later read goes on; one never ready stops the run at that one deadline, naming the seconds waited (warn notes it); one whose version cannot be read is not waited for" {
+@test "members not ready are read again every 5 s, together, until each is ready, up to ISTIO_VERSION_READY_WAIT_SEC in all: one ready on a later read goes on; one never ready stops the run at that one deadline, naming the seconds waited (warn notes it); one whose first read leaves the version unknown is not waited for, one whose re-read fails stays in the wait" {
 	# No real wait: sleep moves SECONDS on and logs what it was asked (SLOG); after its
-	# READY_AFTER-th call, b's Istio CR reads Healthy.
+	# READY_AFTER-th call, b's Istio CR reads Healthy; with FLAKY, b's reads fail after the
+	# first call only.
 	sleep() {
 		echo "$1" >> "$SLOG"
 		SECONDS=$((SECONDS + $1))
+		if [[ -n "${FLAKY:-}" ]]; then
+			if (($(wc -l < "$SLOG") == 1)); then unset V_b; else export V_b=v1.30.5; fi
+		fi
 		(($(wc -l < "$SLOG") < ${READY_AFTER:-999})) || state b Healthy
 	}
 	export SLOG="${BATS_TEST_TMPDIR}/sleeps" ISTIO_VERSION_READY_WAIT_SEC=12
 	: > "$SLOG"
-	# c's reads fail (V_c unset): it stops the run at once, with no wait.
-	V_a=v1.30.5 run --separate-stderr resolve_kv a,c 0
+	# c's reads fail (V_c unset): it stops the run at once, with no wait for b either.
+	state b IstiodNotReady
+	V_a=v1.30.5 V_b=v1.30.5 run --separate-stderr resolve_kv a,b,c 0
 	assert_failure 1
 	[[ "$stderr" == *"c: the version it runs is unknown: the Istio CR could not be read (kubectl exit 1)"* ]]
 	[ ! -s "$SLOG" ]
@@ -144,6 +149,13 @@ recheck() {
 	# b read at the start and after each wait; a, ready at once, never again.
 	[ "$(grep -c -- '--context=b --request-timeout=5s get istios.sailoperator.io default' "$KLOG")" -eq 3 ]
 	[ "$(grep -c -- '--context=a --request-timeout=5s get istios.sailoperator.io default' "$KLOG")" -eq 1 ]
+	# b's re-read after the first wait fails, and it is read again after the second.
+	: > "$SLOG"
+	state b IstiodNotReady
+	FLAKY=1 READY_AFTER=2 V_a=v1.30.5 V_b=v1.30.5 run --separate-stderr resolve_kv a,b 0
+	assert_success
+	assert_line ISTIO_VERSION=v1.30.5
+	[ "$(wc -l < "$SLOG")" -eq 2 ]
 	# Neither ever ready: both are read until the one deadline, each wait 5 s at most.
 	: > "$SLOG"
 	state a IstiodNotReady
