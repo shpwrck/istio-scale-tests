@@ -266,7 +266,7 @@ REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
 # harness_sha (tests/lib/common.sh): a harness with uncommitted changes reads
-# <describe>-dirty; this probe's own results do not count.
+# <describe>-dirty.<8hex>; this probe's own results do not count.
 HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 

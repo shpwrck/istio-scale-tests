@@ -134,8 +134,9 @@ sidecar CPU request of the live Istio CR, or `SCALE_PER_POD_CPU_M`;
 refuses a step that lacks pod slots or free CPU (`SCALE_CPU_PREFLIGHT_ENFORCE=0` only warns, for
 a node autoscaler).
 A sweep that dies, is interrupted or stops partway is not continued: run `005-cleanup.sh
---contexts <the sweep's>`, then the sweep again with the mesh sizes it did not finish. Every run
-writes a new `sweep-<RUN_ID>` dir, so the rows in the first one cover only the cells it finished.
+--contexts <the sweep's members>`, then run the sweep again into a new dir (every run writes a new
+`sweep-<RUN_ID>` dir) with the mesh sizes it did not finish; the rows in the first one cover only
+the cells it finished.
 A legacy cell that has rows for fewer members than its mesh size, or a member with fewer rows than
 its window wrote, is `INCOMPLETE`: the run was cut short while it wrote them. `002`
 appends a window's rows in one write, after a `# WINDOW_ROWS=<ctx>=<n>[/<spec>],...` line that
@@ -196,8 +197,8 @@ wrote its reports, but some cells failed (a status row instead of a measurement:
 `PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`, `INTERRUPTED`; `INCOMPLETE`: rows for fewer members
 than the mesh size, or a member with fewer rows than its window wrote; or `NOT_RUN`: planned, but no
 row), or it recorded a problem (those of [every sweep](../../README.md#how-a-sweep-ends), or the
-cells could not be counted: `TOTAL=unknown`; the rows are intact, and `004` counts them from the
-sweep dir). An
+cells could not be counted: `TOTAL=unknown`; the rows are intact, but the cells without a row
+(`NOT_RUN`) are then not counted). An
 `INCOMPLETE` cell, and a sweep outcome that is not `finished`, names a failed cell (`NOT_RUN`
 among them) or records a `PROBLEM` (the record of each sweep dir the report's inputs come from,
 pooled or not; the verdict names each), also turns the report's SLA verdict from `PASS` to

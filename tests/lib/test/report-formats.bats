@@ -269,7 +269,7 @@ if d["n"] != 12:
 }
 
 @test "a value with a quote, a backslash, ': ' and ' #' (and a tab or a CR) reads back as written: from every report's json through jq, from every md and charts frontmatter through YAML, each key once" {
-	local s fmt got key d="${BATS_TEST_TMPDIR}/j" n
+	local s fmt got md key d="${BATS_TEST_TMPDIR}/j" n
 	for s in $SUITES; do
 		[[ "$s" != churn ]] || continue
 		_out "${s}.json"
@@ -318,6 +318,16 @@ if d["n"] != 12:
 				echo "${s} ${fmt}: ${key} reads $(jq -c --arg k "$key" '.[$k]' <<<"$got")"
 				false
 			}
+		done
+	done
+	# churn's and controlplane's charts frontmatter carry the tuning keys as their md does.
+	for s in churn controlplane; do
+		got="$(fm "${BATS_FILE_TMPDIR}/out/${s}.charts")"
+		md="$(fm "${BATS_FILE_TMPDIR}/out/${s}.md")"
+		for key in tuning_baseline sidecar_egress_hosts; do
+			[ "$(jq -r --arg k "$key" 'has($k)' <<<"$got")" = true ] || { echo "${s} charts: no ${key}"; false; }
+			[ "$(jq -c --arg k "$key" '.[$k]' <<<"$got")" = "$(jq -c --arg k "$key" '.[$k]' <<<"$md")" ] \
+				|| { echo "${s}: ${key} is not the md's in charts"; false; }
 		done
 	done
 	got="$(fm "${BATS_FILE_TMPDIR}/out/tuning.md")" || { echo "tuning md: the frontmatter does not parse"; false; }

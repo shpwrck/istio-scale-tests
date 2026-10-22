@@ -125,8 +125,8 @@ are written); `4` it finished and wrote its reports, but some combinations faile
 `RESET_FAILED` or `PROBE_FAILED` rows), or it recorded a problem; `130`, `143` or `129` it was
 interrupted. `3` wins over `4`. What each records in `sweep-outcome.txt`, and the problems every
 sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not finish and
-no sweep runs any more, run the sweep again into a new dir; the rows already in the dir cover only
-the cells it finished.
+no sweep runs any more, run `006-cleanup.sh --contexts <the sweep's members> --wait-deletion`, then
+run the sweep again into a new dir; the rows already in the dir cover only the cells it finished.
 
 ## Remote reachability
 

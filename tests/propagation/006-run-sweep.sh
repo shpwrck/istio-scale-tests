@@ -164,6 +164,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 platform_validate
+sweep_settings_check
 
 CONTEXTS=()
 if [[ -n "$CONTEXTS_CSV" ]]; then

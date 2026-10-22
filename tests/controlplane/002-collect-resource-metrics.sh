@@ -370,8 +370,8 @@ if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
-# The harness (PL2: harness_sha): <describe>, or <describe>-dirty for uncommitted changes;
-# this probe's own results do not count.
+# The harness (PL2: harness_sha): <describe>, or <describe>-dirty.<8hex> for uncommitted
+# changes; this probe's own results do not count.
 HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"

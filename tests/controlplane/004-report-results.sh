@@ -298,7 +298,7 @@ if [[ "$ISTIO_VERSION_TAG" == mixed:* ]]; then
 	PROVENANCE_WARNING="The inputs were measured on different Istio versions (ISTIO_VERSION ${ISTIO_VERSIONS_M}), so fits and pairings across runs mix versions."
 fi
 if [[ "$HARNESS_SHAS_M" == *,* ]]; then
-	PROVENANCE_WARNING="${PROVENANCE_WARNING:+${PROVENANCE_WARNING} }The inputs ran on different harnesses (HARNESS_SHA ${HARNESS_SHAS_M}), so their cells may not be measured the same way."
+	PROVENANCE_WARNING="${PROVENANCE_WARNING:+${PROVENANCE_WARNING} }The inputs ran on different harnesses, or one did not record its harness (HARNESS_SHA ${HARNESS_SHAS_M}), so their cells may not be measured the same way."
 fi
 # Also on stderr, except for the text format, which prints it on stdout.
 if [[ -n "$PROVENANCE_WARNING" && "$FORMAT" != text ]]; then
@@ -2580,6 +2580,8 @@ report_charts() {
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
 	platform_report_lines yaml "$PLATFORM_VALUES"
 	echo "files_consumed: ${FILES_CONSUMED}"
+	echo "tuning_baseline: $(yaml_str "$(preamble_get TUNING_BASELINE)")"
+	echo "sidecar_egress_hosts: $(yaml_str "$(preamble_get SIDECAR_EGRESS_HOSTS)")"
 	echo "generated: $(date -u -Iseconds)"
 	echo "---"
 	echo ""

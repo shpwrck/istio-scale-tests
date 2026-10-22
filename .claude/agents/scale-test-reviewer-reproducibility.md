@@ -18,7 +18,7 @@ You are the **reproducibility reviewer** on the 7-agent scale-test team for this
 
 1. **TSV preamble metadata** (per PL2): every emitting script writes, through the shared emitters (PL36):
    - `RUN_ID` — timestamp + `$$` (or equivalent)
-   - `HARNESS_SHA` — `harness_sha` (`tests/lib/common.sh`): `git describe --always --abbrev=7`, plus `-dirty` when tests/, config/, charts/ or terraform/ have uncommitted changes; a sweep reads it at its start and its end, and a change in between is a problem in its outcome
+   - `HARNESS_SHA` — `harness_sha` (`tests/lib/common.sh`): `git describe --always --abbrev=7`, plus `-dirty.<8hex>` (a hash of the changes) when tests/, config/, charts/ or terraform/ have uncommitted changes; a sweep reads it at its start and its end, and a change in between is a problem in its outcome
    - `ISTIO_VERSION` — the version the members run, read live (`istio_version_resolve` / `istio_version_kv` in `tests/lib/preamble.sh`), next to `ISTIO_VERSION_PIN` (from `config/versions.env`); never the pin passed off as the live value
    - `KUBE_VERSIONS` — per context, probed concurrently with `--request-timeout=5s`, distinguishing `unreachable` (call failed/timeout) from `unknown` (succeeded but field empty)
    - The platform record (`platform_preamble_lines`) and the run config (`config_preamble_lines`)

@@ -58,8 +58,8 @@
 # Columns are checked, not learned from: a member the metadata never names is a context
 # the script was not told about, so pass it with --context NAME.
 #
-# Files it skips (named on stderr, never copied): other file types, dot files (a sweep's
-# .sweep.lock among them: a PID), the raw istiod-diag evidence folders
+# Files it skips (named on stderr, never copied): other file types, dot files (an older
+# sweep's .sweep.lock among them: a PID), the raw istiod-diag evidence folders
 # (istiod-diag-<RUN_ID>/NNN-*/), which keep host and node names on purpose and must never
 # be pasted, and a tuning sweep's raw copies of the Istio CR (istio-spec/*.json,
 # state/istio-before-*.json), which hold the cluster's own name. With --in-place they stay as they are,
@@ -95,9 +95,9 @@ igw-, nat-, rtb- with 8 or 17 hex digits) <vpc-id>, <subnet-id>, ...; cluster ho
 <host>; home dirs (/home/<name> and /Users/<name>) <home>. A file or dir name that
 holds a context is renamed the same way, without the angle brackets (mesh-a-ctx). The
 context mapping and the renames go to stderr only. Handles .tsv .md .txt .csv .json;
-skips other files, dot files (.sweep.lock), the raw istiod-diag evidence folders and a
-tuning sweep's raw copies of the Istio CR (istio-spec/, state/istio-before-*.json), each
-named on stderr, never copied.
+skips other files, dot files (an older sweep's .sweep.lock), the raw istiod-diag
+evidence folders and a tuning sweep's raw copies of the Istio CR (istio-spec/,
+state/istio-before-*.json), each named on stderr, never copied.
 
 Modes (--out or --in-place; --dry-run alone or with either):
   --out DIR         write the copy under DIR (new or empty, outside every PATH): a dir

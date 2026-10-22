@@ -103,8 +103,8 @@ unexpected error); `4` it finished and wrote its reports, but some mesh sizes fa
 exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder row), or it recorded a problem;
 `130`, `143` or `129` it was interrupted. What each records in `sweep-outcome.txt`, and the problems
 every sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not
-finish and no sweep runs any more, run `007-cleanup.sh` on its contexts, then the sweep again into
-a new dir.
+finish and no sweep runs any more, run `007-cleanup.sh --contexts <the sweep's members>`, then run
+the sweep again into a new dir.
 Rows a probe wrote with a non-OK status are measurements, not failures: the report counts them in
 `n_total`. Its `n_attempted` column is what the probes were configured to run (each TSV's
 `ITERATIONS`: iterations for P1, times its remotes for P2 and P3, and what a failed mesh size's

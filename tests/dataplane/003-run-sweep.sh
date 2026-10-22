@@ -206,6 +206,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 platform_validate
+sweep_settings_check
 
 # The probe window 002 gets as flags; from the environment or --config these reach 002
 # unchecked, and a bad one fails every probe.

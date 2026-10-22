@@ -147,8 +147,9 @@ precondition, or an unexpected error); `130`, `143` or `129` it was interrupted;
 and wrote its reports, but some cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it
 recorded a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
 `sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
-reason. When a sweep did not finish and no sweep runs any more, run the sweep again into a new dir;
-the rows already in the dir cover only the cells it finished.
+reason. When a sweep did not finish and no sweep runs any more, run `005-cleanup.sh --contexts <the
+sweep's members>`, then run the sweep again into a new dir; the rows already in the dir cover only
+the cells it finished.
 Rows a probe wrote with a non-OK status (`TIMEOUT_*`, `MISSING_VALUE`,
 ...) are measurements, not failed cells: the report counts them in `n_total`.
 

@@ -180,9 +180,10 @@ platform_gitops_namespace() {
 # platform_pod_filter <container>: jq program over a pod list, "<images>\t<fingerprint>\t
 # <running>\t<pod>". images: the container's image without registry host and path, plus the
 # sha256 that ran (from the imageID), of the pods whose container started or whose spec pins a
-# digest, those not terminated first; when none started, each spec image @unknown; unique,
-# "+"-joined; none without such a pod. fingerprint: name@startTime#restarts per pod, sorted (a
-# restart or a replaced pod changes it: PL9). running: Running pods. pod: the first Running one.
+# digest, those not ended first (Failed, Succeeded, or terminating: an old pod of a rollout);
+# when none started, each spec image @unknown; unique, "+"-joined; none without such a pod.
+# fingerprint: name@startTime#restarts per pod, sorted (a restart or a replaced pod changes it:
+# PL9). running: Running pods. pod: the first Running one.
 # shellcheck disable=SC2329
 platform_pod_filter() {
 	# shellcheck disable=SC2016  # jq program
@@ -192,7 +193,7 @@ platform_pod_filter() {
 	    | ([$p.status.containerStatuses[]? | select(.name == "'"$1"'")][0].imageID // "") as $id
 	    | select($img != "")
 	    | {ref: ($img | sub("^.*/"; "")), pin: ($img | test("@")),
-	       end: (($p.status.phase // "") | test("^(Failed|Succeeded)$")),
+	       end: ((($p.status.phase // "") | test("^(Failed|Succeeded)$")) or ($p.metadata.deletionTimestamp != null)),
 	       dig: ([$id | capture("(?<d>sha256:[0-9a-f]{64})")][0].d // "")}]
 	   | (map(select(.pin or .dig != "")) as $ran | [$ran[] | select(.end | not)] as $live
 	      | if ($live | length) > 0 then $live elif ($ran | length) > 0 then $ran else . end)
@@ -240,10 +241,11 @@ _platform_why() {
 }
 
 # _platform_env_digest <pods.json> <workdir>: ISTIOD_ENV_BY_CONTEXT from the istio-system pod list:
-# per istiod pod (those whose discovery container started, not terminated first), its env as
-# sorted name=value lines (a valueFrom as its JSON, keys sorted) without CLUSTER_ID; the first 12
-# hex digits of each distinct list's sha256, sorted and "+"-joined. none without an istiod pod;
-# unknown when the list does not parse or no sha256 tool works.
+# per istiod pod (those whose discovery container started, not ended first: Failed, Succeeded
+# or terminating), its env as sorted name=value lines (a valueFrom as its JSON, keys sorted)
+# without CLUSTER_ID; the first 12 hex digits of each distinct list's sha256, sorted and
+# "+"-joined. none without an istiod pod; unknown when the list does not parse or no sha256 tool
+# works.
 # shellcheck disable=SC2329
 _platform_env_digest() {
 	local line d out="" i=0
@@ -255,7 +257,7 @@ _platform_env_digest() {
 		 | ([$p.spec.containers[]? | select(.name == "discovery")][0]) as $c
 		 | select($c != null)
 		 | {run: ([$p.status.containerStatuses[]? | select(.name == "discovery")][0].imageID // "" | test("sha256:[0-9a-f]{64}")),
-		    end: (($p.status.phase // "") | test("^(Failed|Succeeded)$")),
+		    end: ((($p.status.phase // "") | test("^(Failed|Succeeded)$")) or ($p.metadata.deletionTimestamp != null)),
 		    env: ([$c.env[]? | select(.name != "CLUSTER_ID")
 		      | .name + "=" + (if .valueFrom != null then (.valueFrom | canon) else (.value // "") end)] | sort)}]
 		| (map(select(.run)) as $ran | [$ran[] | select(.end | not)] as $live
@@ -289,7 +291,7 @@ _platform_probe_member() {
 		  ([$d.spec.template.spec.containers[]? | select(.name == $name) | .image][0] // "") as $img
 		  | ($d.spec.selector.matchLabels // {}) as $sel
 		  | ([.items[]? | select(.kind == "Pod") | select((.metadata.labels // {}) as $l | $sel | to_entries | all(.value == $l[.key]))
-		      | {end: ((.status.phase // "") | test("^(Failed|Succeeded)$")),
+		      | {end: (((.status.phase // "") | test("^(Failed|Succeeded)$")) or (.metadata.deletionTimestamp != null)),
 		         dig: ([.status.containerStatuses[]? | select(.name == $name) | .imageID][0] // ""
 		           | [capture("(?<d>sha256:[0-9a-f]{64})")][0].d // "")}
 		      | select(.dig != "")]) as $ran

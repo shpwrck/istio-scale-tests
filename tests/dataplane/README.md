@@ -124,8 +124,9 @@ unexpected error); `130`, `143` or `129` it was interrupted; `3` the reachabilit
 reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it recorded
 a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
 `sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
-reason; `3` wins over `4`. When a sweep did not finish and no sweep runs any more, run the sweep
-again into a new dir; the rows already in the dir cover only the mesh sizes it finished.
+reason; `3` wins over `4`. When a sweep did not finish and no sweep runs any more, run
+`005-cleanup.sh --contexts <the sweep's members>`, then run the sweep again into a new dir; the rows
+already in the dir cover only the mesh sizes it finished.
 
 ## Run config (`--config FILE`)
 

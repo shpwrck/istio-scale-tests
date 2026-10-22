@@ -49,13 +49,13 @@ its findings log was removed once every finding was fixed or superseded.
 **How to preempt:** Every TSV-writing script emits a preamble block, through the shared emitters (PL36):
 ```
 # RUN_ID=<UTC timestamp>-<$$>
-# HARNESS_SHA=<git describe --always --abbrev=7>[-dirty]       (harness_sha, tests/lib/common.sh)
+# HARNESS_SHA=<git describe --always --abbrev=7>[-dirty.<8hex>] (harness_sha, tests/lib/common.sh)
 # ISTIO_VERSION=<the version the members run, read live>        ISTIO_VERSION_PIN=<config/versions.env>
 # KUBE_VERSIONS=<ctx=version,...; unreachable or unknown where a read failed>
 # SETTLE_SEC=<value>   (and every other knob that affects the result)
 # (the run config and the platform record: config_preamble_lines, platform_preamble_lines)
 ```
-Use UTC timestamps. `-dirty` marks a change git lists under `tests/`, `config/`, `charts/` or `terraform/` (submodules, an untracked note under `docs/` and the run's own results dir never count). A sweep reads `HARNESS_SHA` at its start and at its end; a change is a problem in its outcome (exit 4). `ISTIO_VERSION` is read live (`istio_version_resolve` / `istio_version_kv`), never the pin passed off as the live value; a value that could not be read is `unknown`.
+Use UTC timestamps. `-dirty.<8hex>` marks a change git lists under `tests/`, `config/`, `charts/` or `terraform/` (submodules, an untracked note under `docs/` and the run's own results dir never count); the hex hashes the change itself, so two different edits are two harnesses. A sweep reads `HARNESS_SHA` at its start and at its end; a change is a problem in its outcome (exit 4). `ISTIO_VERSION` is read live (`istio_version_resolve` / `istio_version_kv`), never the pin passed off as the live value; a value that could not be read is `unknown`.
 
 ## PL3 — Wall-clock window distinct from operator settle
 
@@ -391,7 +391,7 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 
 **Why:** Bash runs a trap only after the foreground command returns. A `kill -TERM <sweep pid>` (a CI timeout, a scheduler, `kill` from another terminal) therefore waited for the running step, which can be a cell of an hour: the sweep did not stop, and its stop record was written only after the step's results were. Running the step in the background and `wait`ing for it lets the trap run at once, but a signal sent to the step's PID alone reaches no one else: the step's own children (in-flight kubectl, per-member `( ... ) &` workers, commands under `timeout`) ran on after the sweep exited and released its lock.
 
-**How to preempt:** Start each step through `sweep_step` (`tests/lib/common.sh`): a background job in a process group of its own (stdin `/dev/null`) that the sweep `wait`s for, so the trap runs at once; pass a script, never a function or a pipeline, and guard the call (PL32). On HUP, INT or TERM the sweep sends SIGTERM to the step's process group (the step and everything it started), then SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` later, so it never hangs; its EXIT trap records `interrupted` with the signal, prints the suite's cleanup command (`SWEEP_CLEANUP_CMD`) and removes the lock. Keep the grace (30 s default) above every step's exit-time cleanup bound, and run bounded commands through `run_timeout`, whose `--foreground` keeps them in the step's group. One bats test proves it: a stub step that starts a child and sleeps; a SIGTERM to the sweep leaves no process of the step's group and records `interrupted`.
+**How to preempt:** Start each step through `sweep_step` (`tests/lib/common.sh`): a background job in a process group of its own (stdin `/dev/null`) that the sweep `wait`s for, so the trap runs at once; pass a script, never a function or a pipeline, and guard the call (PL32). On HUP, INT or TERM the sweep sends SIGTERM to the step's process group (the step and everything it started), then SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` later, so it never hangs; its EXIT trap records `interrupted` with the signal and prints the suite's cleanup command (`SWEEP_CLEANUP_CMD`). Keep the grace (30 s default) above every step's exit-time cleanup bound, and run bounded commands through `run_timeout`, whose `--foreground` keeps them in the step's group. One bats test proves it: a stub step that starts a child and sleeps; a SIGTERM to the sweep leaves no process of the step's group and records `interrupted`.
 
 (PL45 was added after carry-over round 2: the scale lens found in round 1 that a SIGTERM to a sweep waited for its step, as the sweeps' help said; rounds 2 to 5 forwarded the signal, then stopped the step's whole tree through `ps` and `/proc` walks and process freezes; the 2026-10 editing pass replaced all of that with the step's own process group.)
 

@@ -336,7 +336,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 platform_validate
-is_nonneg_int "$SETTLE_SEC" || die "--settle must be a non-negative integer (got: $SETTLE_SEC)"
+sweep_settings_check
+is_nonneg_int "$SETTLE_SEC" || die "--settle (or CONTROLPLANE_SETTLE_SEC) must be a non-negative integer (got: $SETTLE_SEC)"
 is_pos_int "$MAX_MATRIX" || die "CONTROLPLANE_MAX_MATRIX must be a positive integer (got: $MAX_MATRIX)"
 # 002 reads the same two knobs per combo; validate once here so a typo fails the
 # sweep up front instead of turning every combo into PROBE_FAILED.
@@ -426,7 +427,7 @@ for nc in "${NAMESPACE_COUNTS[@]}"; do
 	is_pos_int "$nc" || die "namespace-count '$nc' is not a positive integer"
 done
 for scp in "${SCOPINGS[@]}"; do
-	validate_scoping "$scp"
+	validate_scoping "$scp" "--sidecar-scopings (or CONTROLPLANE_SIDECAR_SCOPINGS)"
 done
 is_pos_int "$VSDR_EVERY" || die "--vsdr-every must be a positive integer (got: $VSDR_EVERY)"
 is_pos_int "$VSDR_SUBSETS" || die "--vsdr-subsets must be a positive integer (got: $VSDR_SUBSETS)"
@@ -1182,7 +1183,6 @@ fi
 # not touch the members), from the repo root as the other sweeps name theirs.
 # shellcheck disable=SC2034  # read by sweep_start's EXIT trap (tests/lib/common.sh)
 SWEEP_CLEANUP_CMD="./tests/controlplane/005-cleanup.sh --contexts $(IFS=,; echo "${CONTEXTS[*]}")"
-((GROWTH)) || SWEEP_CLEANUP_CMD+="; the next run of the sweep also deletes the namespaces before its first cell"
 capacity_plan_warn
 guard_add_mesh_members
 leftover_preflight
@@ -2333,16 +2333,16 @@ if ((_cells_rc == 0)) && is_nonneg_int "$_cells_seen"; then
 		sweep_note "${#NOTRUN_CELLS[@]} cell(s) of the matrix have no row (NOT_RUN: never reached): ${_nr_list}. To measure them, run the sweep again into a new dir with their axis values"
 	fi
 else
-	# The rows are intact, and the reports count them. The sweep dir (a local path) goes to
-	# stderr only, below, never into the record.
+	# The rows are intact; the cells without a row (NOT_RUN) are then not counted. The sweep
+	# dir (a local path) goes to stderr only, below, never into the record.
 	FAILED_CELLS=() CELLS_TOTAL=unknown _cells_counted=0
-	sweep_problem "could not count the sweep's cells: ${_cells_why:-awk exited ${_cells_rc} with no count}; the rows are intact: 004-report-results.sh counts them from the sweep dir"
+	sweep_problem "could not count the sweep's cells: ${_cells_why:-awk exited ${_cells_rc} with no count}; the rows are intact, but the cells without a row (NOT_RUN) are then not counted"
 fi
 outcome_rc=0 stop_args=()
 [[ -z "$SWEEP_STOPPED" ]] || stop_args=(--stopped 1 --stop-reason "RETIRE_FAILED: ${SWEEP_STOPPED}")
 sweep_finish ${stop_args[@]+"${stop_args[@]}"} --where "$_cells_where" \
 	"$CELLS_TOTAL" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
-((_cells_counted)) || echo "The sweep dir: ${OUTPUT_DIR} (count its cells with: ${SCRIPT_DIR}/004-report-results.sh --results-dir ${OUTPUT_DIR})" >&2
+((_cells_counted)) || echo "The sweep dir: ${OUTPUT_DIR}" >&2
 
 echo "Generating report..."
 "$SCRIPT_DIR/004-report-results.sh" --results-dir "$OUTPUT_DIR"

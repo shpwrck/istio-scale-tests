@@ -117,16 +117,15 @@ outcome_all() {
 # ---------------------------------------------------------------------------
 # sweep_start
 
-@test "sweep_start: a SWEEP_STOP_GRACE_SEC that is no number of seconds dies naming the key; the running record has STATUS, RUN_ID, HARNESS_SHA, STARTED_AT and UNIT; a lock whose PID runs is refused, one whose PID is gone is taken over" {
+@test "sweep_start: a SWEEP_STOP_GRACE_SEC that is no number of seconds dies naming the key; the running record has STATUS, RUN_ID, HARNESS_SHA, STARTED_AT and UNIT" {
 	SWEEP_STOP_GRACE_SEC=soon run --separate-stderr bash -c 'source "$ROOT/tests/lib/common.sh"; sweep_start "$1" r1' _ "$D"
 	assert_failure 1
 	[[ "$stderr" == *"SWEEP_STOP_GRACE_SEC must be a non-negative integer of seconds (got: soon)"* ]]
 	[ ! -e "${D}/sweep-outcome.txt" ]
 	HARNESS_SHA=abc1234 run --separate-stderr bash -c 'source "$ROOT/tests/lib/common.sh"
-		sweep_start "$1" r1 --unit passes; cp "$1/sweep-outcome.txt" "$1/at-start.txt"; cat "$1/.sweep.lock"; echo "me=$$"' _ "$D"
+		sweep_start "$1" r1 --unit passes; cp "$1/sweep-outcome.txt" "$1/at-start.txt"' _ "$D"
 	# It ends before sweep_finish: a stop (exit 1).
 	assert_failure 1
-	[ "${lines[0]}" = "${lines[1]#me=}" ]
 	[ "$(grep -v '^#' "${D}/at-start.txt" | cut -d= -f1 | tr '\n' ' ')" = "STATUS RUN_ID HARNESS_SHA STARTED_AT UNIT " ]
 	grep -qx 'STATUS=running' "${D}/at-start.txt"
 	grep -qx 'RUN_ID=r1' "${D}/at-start.txt"
@@ -134,25 +133,6 @@ outcome_all() {
 	grep -qxE 'STARTED_AT=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z' "${D}/at-start.txt"
 	grep -qx 'UNIT=passes' "${D}/at-start.txt"
 	grep -qx 'STATUS=stopped' "${D}/sweep-outcome.txt"
-	[ ! -e "${D}/.sweep.lock" ]
-	# Another sweep that runs holds the lock: refused, its record left alone.
-	sleep 30 &
-	local live=$!
-	echo "$live" > "${D}/.sweep.lock"
-	run --separate-stderr bash -c 'source "$ROOT/tests/lib/common.sh"; sweep_start "$1" r2' _ "$D"
-	kill "$live" 2>/dev/null || true
-	wait "$live" 2>/dev/null || true
-	assert_failure 1
-	[[ "$stderr" == *"another sweep (PID ${live}) writes to ${D}"* ]]
-	[ "$(<"${D}/.sweep.lock")" = "$live" ]
-	! grep -q 'RUN_ID=r2' "${D}/sweep-outcome.txt" || false
-	# Its PID is gone now: taken over with a warning.
-	run --separate-stderr bash -c 'source "$ROOT/tests/lib/common.sh"; harness_sha() { echo h1; }
-		sweep_start "$1" r3; sweep_finish 1 >/dev/null' _ "$D"
-	assert_success
-	[[ "$stderr" == *"warning: taking over ${D}/.sweep.lock from PID ${live}, which no longer runs"* ]]
-	grep -qx 'RUN_ID=r3' "${D}/sweep-outcome.txt"
-	[ ! -e "${D}/.sweep.lock" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -243,7 +223,7 @@ finish() {
 # ---------------------------------------------------------------------------
 # A sweep that ends before its end
 
-@test "a die after sweep_start records stopped with its reason (the sweep dir as <sweep dir>, the home dir as ~; the console keeps them), runs the cleanup once and removes the lock; an unexpected abort records the ERR trap's script, line and command" {
+@test "a die after sweep_start records stopped with its reason (the sweep dir as <sweep dir>, the home dir as ~; the console keeps them) and runs the cleanup once; an unexpected abort records the ERR trap's script, line and command" {
 	export D="${T}/home/u/results/sweep-x"
 	sweep_script 'sweep_note "a note so far"' 'die "cannot read ${HOME}/.kube/config for ${D}/x"'
 	HOME="${T}/home/u" run --separate-stderr bash "$S"
@@ -255,7 +235,6 @@ finish() {
 	grep -qx 'STOP_REASON=cannot read ~/.kube/config for <sweep dir>/x' "${D}/sweep-outcome.txt"
 	grep -qx 'NOTE=a note so far' "${D}/sweep-outcome.txt"
 	[ "$(<"${T}/cleanup.log")" = cleanup ]
-	[ ! -e "${D}/.sweep.lock" ]
 	rm -f "${T}/cleanup.log"
 	sweep_script 'false'
 	run --separate-stderr bash "$S"
@@ -282,7 +261,6 @@ finish() {
 	grep -qx 'STATUS=interrupted' "${D}/sweep-outcome.txt"
 	grep -qx 'SIGNAL=SIGTERM' "${D}/sweep-outcome.txt"
 	grep -qx 'EXIT=143' "${D}/sweep-outcome.txt"
-	[ ! -e "${D}/.sweep.lock" ]
 	run cat "${T}/err"
 	assert_line "Stopping the running step (step.sh): SIGTERM to its process group; SIGKILL to what still runs 10s later (SWEEP_STOP_GRACE_SEC)."
 	assert_line "warning: the sweep was interrupted (SIGTERM); its results may be partial"
@@ -396,8 +374,8 @@ finish() {
 # ---------------------------------------------------------------------------
 # harness_sha
 
-@test "harness_sha: the commit (a tag shows), -dirty for a tracked change or an untracked file under tests/, config/, charts/ or terraform/; an ignored file, a change elsewhere and an excluded dir do not count; unknown outside git" {
-	local r="${T}/repo"
+@test "harness_sha: the commit (a tag shows), -dirty.<8hex> for a tracked change or an untracked file under tests/, config/, charts/ or terraform/, the hex another for another change; an ignored file, a change elsewhere and an excluded dir do not count; unknown outside git" {
+	local r="${T}/repo" h1 h2
 	mkdir -p "$r/tests" "$r/docs"
 	printf 'one\n' > "$r/tests/f"
 	printf 'd\n' > "$r/docs/d"
@@ -410,19 +388,40 @@ finish() {
 	printf 'two\n' > "$r/docs/d"
 	printf 'n\n' > "$r/README.md"
 	[ "$(ROOT="$r" harness_sha)" = v1 ]
+	# Two edits of a tracked file are two harnesses; one read again is the same.
 	printf 'two\n' > "$r/tests/f"
-	[ "$(ROOT="$r" harness_sha)" = v1-dirty ]
+	h1="$(ROOT="$r" harness_sha)"
+	[[ "$h1" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
+	[ "$(ROOT="$r" harness_sha)" = "$h1" ]
+	printf 'three\n' > "$r/tests/f"
+	h2="$(ROOT="$r" harness_sha)"
+	[[ "$h2" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
+	[ "$h2" != "$h1" ]
 	git -C "$r" checkout -q -- tests/f
+	[ "$(ROOT="$r" harness_sha)" = v1 ]
+	# So are two contents of an untracked file.
 	mkdir -p "$r/config"
-	: > "$r/config/new.env"
-	[ "$(ROOT="$r" harness_sha)" = v1-dirty ]
+	printf 'a\n' > "$r/config/new.env"
+	h1="$(ROOT="$r" harness_sha)"
+	[[ "$h1" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
+	printf 'b\n' > "$r/config/new.env"
+	h2="$(ROOT="$r" harness_sha)"
+	[[ "$h2" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
+	[ "$h2" != "$h1" ]
 	rm "$r/config/new.env"
 	# A run's output dir inside the checkout: --exclude, or the HARNESS_SHA_EXCLUDE a sweep exports.
 	mkdir -p "$r/tests/x/results/sweep-1"
 	: > "$r/tests/x/results/sweep-1/a.tsv"
-	[ "$(ROOT="$r" harness_sha)" = v1-dirty ]
+	[[ "$(ROOT="$r" harness_sha)" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
 	[ "$(ROOT="$r" harness_sha --exclude "$r/tests/x/results")" = v1 ]
 	[ "$(HARNESS_SHA_EXCLUDE="$r/tests/x/results/sweep-1" ROOT="$r" harness_sha)" = v1 ]
+	# On a dirty tree too, a file there changes nothing.
+	printf 'two\n' > "$r/tests/f"
+	h1="$(ROOT="$r" harness_sha --exclude "$r/tests/x/results")"
+	[[ "$h1" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
+	printf 'more\n' > "$r/tests/x/results/sweep-1/b.tsv"
+	[ "$(ROOT="$r" harness_sha --exclude "$r/tests/x/results")" = "$h1" ]
+	[ "$(HARNESS_SHA_EXCLUDE="$r/tests/x/results/sweep-1" ROOT="$r" harness_sha)" = "$h1" ]
 	mkdir -p "${T}/plain"
 	[ "$(ROOT="${T}/plain" harness_sha)" = unknown ]
 }

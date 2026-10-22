@@ -7,7 +7,8 @@
 # - the refusals of a member or a profile that would share a file with another;
 # - the check that nothing but a profile edited the Istio CR during a pass: 001 records the
 #   generations once its apply settled, 002 compares them before its revert, and 003 makes each
-#   finding one problem naming the pass.
+#   finding one problem naming the pass;
+# - 002's and 005's one rollout deadline per round, and the cleanup a sweep that stops names.
 # The report (004) is in tuning-compare.bats. The tests that load a profile skip without PyYAML.
 
 load test_helper
@@ -29,11 +30,12 @@ setup() {
 	: >"$STUB_LOG"
 	# kubectl: one member per --context. Its Istio CR is live.<ctx>.json, which a merge patch
 	# changes (null deletes) unless STUB_PATCH_NOOP names the context; the Sail operator reads as
-	# reconciled and istiod as rolled out. Its markers are markers.<ctx>.json (an empty list when
-	# absent; STUB_LIST_FAIL names a context whose list fails). A delete -f of a marker file
-	# removes it, unless STUB_MARKER_STAYS names the context. The hub's Argo CD Applications are
-	# apps.json and its AppProject default project.json, which a merge patch replaces (logged as
-	# "project-patch"). Anything else fails.
+	# reconciled and istiod as rolled out (unless STUB_ROLLOUT_SLOW names the context: its rollout
+	# status moves the stub clock, the file clock, by its --timeout, then fails). Its markers are
+	# markers.<ctx>.json (an empty list when absent; STUB_LIST_FAIL names a context whose list
+	# fails). A delete -f of a marker file removes it, unless STUB_MARKER_STAYS names the context.
+	# The hub's Argo CD Applications are apps.json and its AppProject default project.json, which a
+	# merge patch replaces (logged as "project-patch"). Anything else fails.
 	cat >"${STUB_DIR}/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 echo "kubectl $*" >>"$STUB_LOG"
@@ -56,7 +58,14 @@ case "$args" in
 		mv "${STUB_DIR}/live.tmp" "${STUB_DIR}/live.${ctx}.json" ;;
 *" get istio.sailoperator.io default -o jsonpath="*) echo "2 2 True default" ;;
 *" get istiorevision.sailoperator.io default -o jsonpath="*) echo "1 1 True" ;;
-*" rollout status deployment/istiod "*) echo 'deployment "istiod" successfully rolled out' ;;
+*" rollout status deployment/istiod "*)
+	if on "${STUB_ROLLOUT_SLOW:-}"; then
+		t="${args##*--timeout=}"
+		echo "$(($(cat "${STUB_DIR}/clock") + ${t%%s *}))" >"${STUB_DIR}/clock"
+		echo "error: timed out waiting for the condition" >&2
+		exit 1
+	fi
+	echo 'deployment "istiod" successfully rolled out' ;;
 *" get istio.sailoperator.io default -o json "*) cat "${STUB_DIR}/live.${ctx}.json" ;;
 *" get configmaps -A -l istio-scale-tests/tuning-profile -o json "*)
 	if on "${STUB_LIST_FAIL:-}"; then
@@ -319,7 +328,9 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	[ "$(jq -c .spec.values.pilot.env "${STUB_DIR}/live.ctx-a.json")" = '{"PILOT_PUSH_THROTTLE":"100"}' ]
 	d2="$(grep -n -- "--context=ctx-a -n istio-system delete configmaps tuning-profile-02-xds-cache-off --ignore-not-found" "$STUB_LOG" | cut -d: -f1)"
 	d1="$(grep -n -- "--context=ctx-a -n istio-system delete configmaps tuning-profile-01-push-throttling --ignore-not-found" "$STUB_LOG" | cut -d: -f1)"
-	[ -n "$d2" ] && [ -n "$d1" ] && [ "$d2" -lt "$d1" ]
+	[ -n "$d2" ]
+	[ -n "$d1" ]
+	[ "$d2" -lt "$d1" ]
 	# ctx-b: a profile without an Istio CR change has nothing to patch; its marker goes.
 	grep -q -- "--context=ctx-b -n istio-system delete configmaps tuning-profile-04-connection-pools --ignore-not-found" "$STUB_LOG"
 	! grep -q '^patch ctx-b' "$STUB_LOG" || false
@@ -369,6 +380,32 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	PATH="${T}/nopy:${PATH}" run --separate-stderr "$CLEANUP" --contexts ctx-a,ctx-b --results-dir "${T}/results" --dry-run
 	assert_success
 	[ ! -s "$STUB_LOG" ]
+}
+
+@test "002 and 005: one rollout deadline for the members of a round; one that waits it out leaves the next what is left of it (at least 1s), never a whole timeout of its own" {
+	local ctx
+	# date +%s reads the stub clock; every other date call is the real one.
+	printf '#!/bin/sh\nif [ "$*" = "+%%s" ]; then cat "$STUB_DIR/clock"; else exec %s "$@"; fi\n' "$(command -v date)" \
+		>"${STUB_DIR}/bin/date"
+	chmod +x "${STUB_DIR}/bin/date"
+	state_dir
+	echo 1000 >"${STUB_DIR}/clock"
+	STUB_ROLLOUT_SLOW=ctx-a run --separate-stderr "$REVERT" --state-dir "$SD" --rollout-timeout 30
+	assert_failure
+	grep -qF -- "--context=ctx-a -n istio-system rollout status deployment/istiod --timeout=30s" "$STUB_LOG"
+	grep -qF -- "--context=ctx-b -n istio-system rollout status deployment/istiod --timeout=1s" "$STUB_LOG"
+	# 005's round: each member's marker patched, then one deadline for their rollouts.
+	: >"$STUB_LOG"
+	echo 1000 >"${STUB_DIR}/clock"
+	mk_marker 02-xds-cache-off 2026-10-19T10:00:00Z '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":null}}}}}' "${T}/m2.json"
+	for ctx in ctx-a ctx-b; do
+		markers_on "$ctx" "${T}/m2.json"
+		echo '{"spec":{"values":{"pilot":{"env":{"PILOT_ENABLE_CDS_CACHE":"false"}}}}}' >"${STUB_DIR}/live.${ctx}.json"
+	done
+	STUB_ROLLOUT_SLOW=ctx-a run --separate-stderr "$CLEANUP" --contexts ctx-a,ctx-b --results-dir "${T}/results" --rollout-timeout 30
+	assert_failure
+	grep -qF -- "--context=ctx-a -n istio-system rollout status deployment/istiod --timeout=30s" "$STUB_LOG"
+	grep -qF -- "--context=ctx-b -n istio-system rollout status deployment/istiod --timeout=1s" "$STUB_LOG"
 }
 
 @test "005-cleanup (U6-B1, U7-S3, U8-S4): with a hub context it removes the deny window a pause adds, recorded or not, and keeps every other window; one of its shape for other *-ossm Applications stays and fails the cleanup, named by the index --status shows it under; --resume without a record points at --clear" {
@@ -535,4 +572,18 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	[ -f "${TDIR}/04-connection-pools/SETUP_FAILED" ]
 	grep -qF "PROBLEM=the Istio CR or its active IstioRevision on ci-a changed during the sweep (generations 2/2 -> 3/3)" "$OUT" \
 		|| { cat "$OUT"; false; }
+}
+
+@test "tuning 003: a sweep that stops before its end names Argo CD's resume, the profile cleanup and then the suite's cleanup, one command to paste each" {
+	gen_stub
+	rm -rf "${T}/tres"
+	# The stub hub answers nothing: the pause fails, after the sweep started.
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run --separate-stderr "$SWEEP" \
+		--suite churn --contexts ci-a --gitops-context ci-hub --skip-setup --keep-workloads \
+		--profiles 01-push-throttling --settle 0 --output-dir "${T}/tres"
+	assert_failure 1
+	TDIR="$(find "${T}/tres" -maxdepth 1 -name 'sweep-*' -type d)"
+	grep -qx 'STATUS=stopped' "${TDIR}/sweep-outcome.txt"
+	[[ "$stderr" == *"  clean up with: ./tests/tuning/006-gitops-pause.sh --resume --state-file ${TDIR}/gitops-pause.json; ./tests/tuning/005-cleanup.sh --contexts ci-a --results-dir ${T}/tres; ./tests/churn/005-cleanup.sh --contexts ci-a"* ]] \
+		|| { echo "$stderr" | tail -5; false; }
 }

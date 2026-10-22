@@ -482,7 +482,7 @@ pooled() {
 	set_key "${base}/sweep-b/controlplane-run-b.tsv" HARNESS_SHA abc1234-dirty
 	report json "$base" --allow-multi-run
 	[ "$(verdict)" = PASS ]
-	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = "The inputs ran on different harnesses (HARNESS_SHA fixture,abc1234-dirty), so their cells may not be measured the same way." ]
+	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = "The inputs ran on different harnesses, or one did not record its harness (HARNESS_SHA fixture,abc1234-dirty), so their cells may not be measured the same way." ]
 	[ "$(jq -r '.metadata.harness_sha' <<<"$output")" = "mixed:fixture,abc1234-dirty" ]
 	# One sweep whose members ran 1.30.5 and 1.29.0.
 	mkdir -p "$d"

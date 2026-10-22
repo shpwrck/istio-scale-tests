@@ -431,8 +431,9 @@ with_run_config() {
 	CONTROLPLANE_RESULTS_DIR="$res" PATH="${fakeawk}:${PATH}" KUBECONFIG="$EK" run bash "$CP/003-run-sweep.sh" --contexts ci-a --mesh-sizes 1 --service-counts 5
 	assert_failure 4
 	d="$(find "$res" -maxdepth 1 -name 'sweep-*' -type d)"
-	assert_output --regexp "could not count the sweep's cells: awk: simulated: argument list too long reading <sweep dir>/controlplane-[^ ]+\.tsv; the rows are intact"
+	assert_output --regexp "could not count the sweep's cells: awk: simulated: argument list too long reading <sweep dir>/controlplane-[^ ]+\.tsv; the rows are intact, but the cells without a row \(NOT_RUN\) are then not counted"
 	refute_output --partial "cells ran"
+	refute_output --partial "count its cells"
 	grep -q "^PROBLEM=could not count the sweep's cells" "$d/sweep-outcome.txt"
 	grep -qx 'TOTAL=unknown' "$d/sweep-outcome.txt"
 	grep -qx 'FAILED=unknown' "$d/sweep-outcome.txt"

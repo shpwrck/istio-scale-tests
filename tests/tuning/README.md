@@ -87,9 +87,11 @@ recorded a problem (those of [every sweep](../../README.md#how-a-sweep-ends); th
 member's platform record changed during a pass, above and below; or the last revert left the
 Istio CR's spec unlike the start); `130` / `143` / `129`: interrupted (Ctrl-C, SIGTERM, SIGHUP),
 after reverting the active profile. `sweep-comparison.md` repeats `sweep-outcome.txt`. When a
-sweep did not finish and no sweep runs any more, check that no profile is still applied
-(`005-cleanup.sh`) and that Argo CD auto-sync is resumed (`006-gitops-pause.sh --resume`), then run
-the sweep again into a new dir.
+sweep did not finish and no sweep runs any more, run `005-cleanup.sh --contexts <the sweep's
+members>` (it reverts a profile still applied and resumes Argo CD auto-sync, as
+`006-gitops-pause.sh --resume` does; "After a killed run" has its flags) and the suite's cleanup
+script with `--contexts <the sweep's members>` (and `--wait-deletion` where the script has it),
+then run the sweep again into a new dir.
 
 ## Results
 
@@ -162,8 +164,11 @@ was not read or not recorded on one side (a digest `@unknown`, a member's versio
 lever `unknown`, a TSV from before the key), so whether it differs is not known; `-` without data.
 A member whose TSVs disagree (`mixed:<a>;<b>`) matches the other side when that side ran the same
 values. The profiles in `profiles/` set only istiod's env and root-namespace resources, so a lever
-or replica count that differs was changed by something else. The header gives the reference
-pass's record in one line.
+or replica count that differs was changed by something else. A profile of your own that sets a
+compared key (a `TUNING_BASELINE` lever, istiod's limits or replicas) gets that warning for its
+own change too (`pass <p>: <key> is <b>, against <a> in the baseline, so its change against the
+baseline is not the profile's alone`): 004 warns on every compared key that differs, whoever
+changed it. The header gives the reference pass's record in one line.
 
 Only the controlplane suite's TSVs record istiod's limits, and the dataplane suite's record no
 replica count, so those sweeps compare none of them. Nothing else shows a CPU limit that changes:

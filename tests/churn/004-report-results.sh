@@ -225,7 +225,7 @@ PLATFORM_VALUES+=$'\n'"KUBE_VERSIONS=$(platform_merge_by_context KUBE_VERSIONS "
 REPORT_WARNINGS="$(platform_report_warnings --with KUBE_VERSIONS "${TSV_FILES[@]}")"
 # One warning, every format, when the inputs ran on more than one harness.
 [[ "$HARNESS_SHA_M" != mixed:* ]] \
-	|| REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}the inputs ran on different harnesses (HARNESS_SHA ${HARNESS_SHA_M#mixed:}), so their rows may not all be measured the same way"
+	|| REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}the inputs ran on different harnesses, or one did not record its harness (HARNESS_SHA ${HARNESS_SHA_M#mixed:}), so their rows may not all be measured the same way"
 
 # TSV schema (21 columns):
 #  $1  run_id
@@ -690,6 +690,8 @@ report_charts() {
 	echo "istio_generations: $(yaml_str "${ISTIO_GENERATIONS_M}")"
 	echo "harness_sha: $(yaml_str "${HARNESS_SHA_M}")"
 	echo "files_consumed: ${#TSV_FILES[@]}"
+	echo "tuning_baseline: $(yaml_str "$(preamble_get TUNING_BASELINE)")"
+	echo "sidecar_egress_hosts: $(yaml_str "$(preamble_get SIDECAR_EGRESS_HOSTS)")"
 	echo "run_config: $(yaml_str "${RUN_CONFIG_M}")"
 	echo "run_config_sha256: $(yaml_str "${RUN_CONFIG_SHA256_M}")"
 	platform_report_lines yaml "$PLATFORM_VALUES"

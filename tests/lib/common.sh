@@ -22,7 +22,8 @@
 #                                        (CTX_FILE_NAME_MAX: the cut used inside folder names)
 #   is_pos_int <val>                  -> return 0 if val is a positive integer
 #   is_nonneg_int <val>               -> return 0 if val is a non-negative integer
-#   validate_scoping <val>            -> die if val is not none|namespace|explicit|wide
+#   validate_scoping <val> [<name>]   -> die if val is not none|namespace|explicit|wide,
+#                                        naming <name> (default: --sidecar-scoping)
 #   resolve_kubectl <out_arrayname>   -> set the named array to (kubectl) or (oc)
 #   validate_traffic_config <val>     -> die if val is not none|vsdr
 #   vsdr_service_count <svc> <every>  -> services that get a VS+DR (i mod every == 0)
@@ -39,10 +40,11 @@
 #                                        exit 127 with a message when neither exists
 #   SWEEP_FAILED_EXIT (4)             -> a sweep's exit code when it finished and wrote its
 #                                        report but a cell failed or a problem was recorded
+#   sweep_settings_check              -> die on a SWEEP_STOP_GRACE_SEC that is no number of
+#                                        seconds (sweep_start's check, for a --dry-run too)
 #   sweep_start <dir> <run_id> [--unit <noun>] [--cleanup <fn>]
-#                                     -> one run per sweep dir (.sweep.lock), the record
-#                                        sweep-outcome.txt (STATUS=running), the HUP, INT,
-#                                        TERM and EXIT traps
+#                                     -> the record sweep-outcome.txt (STATUS=running), the
+#                                        HUP, INT, TERM and EXIT traps
 #   sweep_step <cmd...>               -> run a step in its own process group, so a signal
 #                                        stops all of it (SWEEP_STOP_GRACE_SEC, then SIGKILL)
 #   sweep_problem <msg>, sweep_note <msg>
@@ -55,8 +57,9 @@
 #   sweep_outcome_lines <fmt> <path>...
 #                                     -> what the records of a report's sweeps say (text, md,
 #                                        charts, json, csv; verdict: the ones to caution on)
-#   harness_sha [--exclude <dir>]...  -> the harness the run uses: git describe, -dirty when
-#                                        tests/ config/ charts/ terraform/ have changes
+#   harness_sha [--exclude <dir>]...  -> the harness the run uses: git describe, -dirty.<8hex>
+#                                        (a hash of the changes) when tests/ config/ charts/
+#                                        terraform/ have changes
 #   CP_CELL_AWK                       -> awk functions for a controlplane cell's state
 #                                        (done, its status, INCOMPLETE)
 #   md_cell [-v <var>] <value>        -> the value for a markdown table cell (each | as
@@ -200,7 +203,7 @@ tsv_end_line() {
 validate_scoping() {
 	case "$1" in
 	none | namespace | wide | explicit) return 0 ;;
-	*) die "--sidecar-scoping must be one of [none, namespace, explicit, wide]; got '$1'" ;;
+	*) die "${2:---sidecar-scoping} must be one of [none, namespace, explicit, wide]; got '$1'" ;;
 	esac
 }
 
@@ -353,17 +356,25 @@ sweep_problem() { _SWEEP_PROBLEMS+=("${*//$'\n'/ }"); }
 # shellcheck disable=SC2329
 sweep_note() { _SWEEP_NOTES+=("${*//$'\n'/ }"); }
 
+# sweep_settings_check: die when SWEEP_STOP_GRACE_SEC is not a non-negative integer of
+# seconds. sweep_start checks it; a sweep calls it with its other checks, before its
+# --dry-run plan, so a dry run catches it too.
+# shellcheck disable=SC2329
+sweep_settings_check() {
+	is_nonneg_int "${SWEEP_STOP_GRACE_SEC:-30}" \
+		|| die "SWEEP_STOP_GRACE_SEC must be a non-negative integer of seconds (got: ${SWEEP_STOP_GRACE_SEC}); see config/options.env"
+}
+
 # sweep_start <dir> <run_id> [--unit <noun>] [--cleanup <fn>]: a sweep calls it as a plain
 # command before its first step (never under --dry-run). Dies when SWEEP_STOP_GRACE_SEC is
-# not a non-negative integer, or when <dir>/.sweep.lock names a PID that is alive (another
-# sweep writes there); a lock whose PID is gone is taken over with a warning. Then writes
+# not a non-negative integer (sweep_settings_check). Then writes
 # the record <dir>/sweep-outcome.txt: STATUS=running, RUN_ID, HARNESS_SHA (the sweep's, read
 # without <dir> when it is not set), STARTED_AT (UTC) and UNIT (<noun>, plural: cells, or
 # tuning's passes), and traps HUP, INT, TERM (_sweep_on_signal) and EXIT (_sweep_on_exit,
 # which runs <fn> once when the sweep ends before sweep_finish).
 # shellcheck disable=SC2329
 sweep_start() {
-	local _sw_dir="$1" _sw_rid="$2" _sw_lpid
+	local _sw_dir="$1" _sw_rid="$2"
 	shift 2
 	_SWEEP_UNIT=cells _SWEEP_CLEANUP=""
 	while (($#)); do
@@ -373,17 +384,8 @@ sweep_start() {
 		*) die "sweep_start: unknown argument: $1" ;;
 		esac
 	done
-	is_nonneg_int "${SWEEP_STOP_GRACE_SEC:-30}" \
-		|| die "SWEEP_STOP_GRACE_SEC must be a non-negative integer of seconds (got: ${SWEEP_STOP_GRACE_SEC}); see config/options.env"
+	sweep_settings_check
 	mkdir -p "$_sw_dir" || die "could not create the sweep dir ${_sw_dir}"
-	if ! (set -o noclobber; printf '%s\n' "$$" > "${_sw_dir}/.sweep.lock") 2>/dev/null; then
-		_sw_lpid="$(head -n 1 "${_sw_dir}/.sweep.lock" 2>/dev/null)" || _sw_lpid=""
-		if [[ "$_sw_lpid" =~ ^[1-9][0-9]*$ && "$_sw_lpid" != "$$" ]] && kill -0 "$_sw_lpid" 2>/dev/null; then
-			die "another sweep (PID ${_sw_lpid}) writes to ${_sw_dir}: wait for it to end, or stop it, before you start one there (if no such sweep runs, remove ${_sw_dir}/.sweep.lock)"
-		fi
-		echo "warning: taking over ${_sw_dir}/.sweep.lock from PID ${_sw_lpid:-unknown}, which no longer runs" >&2
-		printf '%s\n' "$$" 2>/dev/null >| "${_sw_dir}/.sweep.lock" || die "could not write ${_sw_dir}/.sweep.lock"
-	fi
 	_SWEEP_DIR="$_sw_dir" _SWEEP_RUN_ID="$_sw_rid" _SWEEP_PID="${BASHPID:-$$}" _SWEEP_STATE=running _SWEEP_SIGNAL=""
 	_SWEEP_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	[[ -n "${HARNESS_SHA:-}" ]] || HARNESS_SHA="$(harness_sha --exclude "$_sw_dir")"
@@ -425,13 +427,6 @@ _sweep_mask() {
 	[[ -z "${_SWEEP_DIR:-}" ]] || t="${t//"$_SWEEP_DIR"/<sweep dir>}"
 	if [[ -n "${HOME:-}" && "$HOME" != / ]]; then t="${t//"$HOME"/"$tilde"}"; fi
 	printf '%s' "$t"
-}
-
-# _sweep_unlock: remove the sweep dir's lock while it holds this sweep's PID.
-# shellcheck disable=SC2329
-_sweep_unlock() {
-	[[ -n "${_SWEEP_DIR:-}" ]] || return 0
-	[[ "$(head -n 1 "${_SWEEP_DIR}/.sweep.lock" 2>/dev/null)" != "$$" ]] || rm -f "${_SWEEP_DIR}/.sweep.lock" 2>/dev/null || true
 }
 
 # sweep_step <cmd> [<arg>...]: run one step of a sweep (a setup, a probe, a cleanup, a
@@ -498,7 +493,6 @@ _sweep_on_signal() {
 		_sweep_step_kill
 		if [[ "${_SWEEP_STATE:-}" == exiting ]]; then
 			echo "warning: SIG$1 cut the sweep's cleanup short${SWEEP_CLEANUP_CMD:+; clean up with: ${SWEEP_CLEANUP_CMD}}" >&2 || true
-			_sweep_unlock
 		fi
 		exit "$_sw_rc"
 	fi
@@ -508,14 +502,14 @@ _sweep_on_signal() {
 }
 
 # _sweep_on_exit: the EXIT trap of sweep_start. A step a second signal left running is
-# killed first. Once sweep_finish ran, it only removes the lock. Else the sweep ended before
+# killed first. Once sweep_finish ran, that is all. Else the sweep ended before
 # its end, and its record is rewritten at once (a second Ctrl-C during a long cleanup keeps
 # it): STATUS=interrupted with SIGNAL (Ctrl-C, SIGTERM, a closed terminal; a command such a
 # signal killed counts too: its exit 129, 130 or 143 through sweep_err_trap), else
 # STATUS=stopped with STOP_REASON (die's message, sweep_err_trap's script, line and command,
 # or "it exited <rc> before its end"; masked by _sweep_mask), with EXIT (128+n, or 1 for a
 # stop), ENDED_AT and the problems and notes so far. Then the cleanup sweep_start named runs
-# once (what it adds is recorded too), the lock goes, and stderr names the sweep dir and the
+# once (what it adds is recorded too), and stderr names the sweep dir and the
 # suite's cleanup command (SWEEP_CLEANUP_CMD, which each sweep sets). Never dies. The cleanup
 # runs inside it, and inside the signal trap and sweep_step when a signal ended the sweep,
 # so their locals are named _sw_*: one named like a sweep's global (controlplane's rc, the
@@ -527,10 +521,7 @@ _sweep_on_exit() {
 	[[ "${BASHPID:-$$}" == "${_SWEEP_PID:-}" ]] || return 0
 	trap '' PIPE
 	_sweep_step_kill
-	if [[ "${_SWEEP_STATE:-}" != running ]]; then
-		_sweep_unlock
-		return 0
-	fi
+	[[ "${_SWEEP_STATE:-}" == running ]] || return 0
 	_SWEEP_STATE=exiting
 	if [[ -z "$_sw_sig" && "${_SWEEP_STOP_BY:-}" == err ]]; then
 		case "${_SWEEP_STOP_RC:-}" in 129) _sw_sig=HUP ;; 130) _sw_sig=INT ;; 143) _sw_sig=TERM ;; esac
@@ -556,7 +547,6 @@ _sweep_on_exit() {
 		fi
 	fi
 	_SWEEP_STATE=ended
-	_sweep_unlock
 	{
 		echo "  sweep dir: ${_SWEEP_DIR}"
 		[[ -z "${SWEEP_CLEANUP_CMD:-}" ]] || echo "  clean up with: ${SWEEP_CLEANUP_CMD}"
@@ -745,15 +735,18 @@ sweep_outcome_lines() {
 # --- the harness a run uses (PL2) ---
 
 # harness_sha [--exclude <dir>]...: the harness the run uses (PL2): `git -C "${ROOT:-.}"
-# describe --always --abbrev=7` (an annotated hand-over tag shows), plus -dirty when git
+# describe --always --abbrev=7` (an annotated hand-over tag shows), plus -dirty.<8hex> when git
 # lists a tracked change, or an untracked file it does not ignore, under tests/, config/,
 # charts/ or terraform/ (submodules, the bats checkouts, never count); unknown when git
 # cannot answer. The untracked files under each <dir> that exists (a run's output dir
 # inside the checkout) do not count, and neither do those under HARNESS_SHA_EXCLUDE, the
-# output dir a sweep exports, so its steps leave it out too.
+# output dir a sweep exports, so its steps leave it out too. The hex: the first 8 of `git
+# hash-object` over the diff against HEAD and the counted untracked files' names and
+# contents, so two different edits read as two harnesses (and an edit during a sweep
+# changes it).
 # shellcheck disable=SC2329
 harness_sha() {
-	local root="${ROOT:-.}" v s top d rel
+	local root="${ROOT:-.}" v s h top d rel
 	local -a spec=(':(top,literal)tests' ':(top,literal)config' ':(top,literal)charts' ':(top,literal)terraform') dirs=()
 	while (($#)); do
 		case "$1" in
@@ -778,7 +771,26 @@ harness_sha() {
 		echo unknown
 		return 0
 	}
-	[[ -z "$s" ]] || v+="-dirty"
+	if [[ -n "$s" ]]; then
+		# The same pathspec: the diff (fixed prefixes, algorithm and context; no renames, colour
+		# or external diff, so one edit reads the same under any git config) and, per untracked
+		# file, its name, a NUL and its content (a symlink's target).
+		h="$(set -o pipefail; cd "$top" && {
+			GIT_OPTIONAL_LOCKS=0 git diff --binary --no-color --no-ext-diff --no-textconv --no-renames \
+				--diff-algorithm=myers --no-indent-heuristic -U3 \
+				--src-prefix=a/ --dst-prefix=b/ --ignore-submodules=all HEAD -- "${spec[@]}" \
+				&& GIT_OPTIONAL_LOCKS=0 git ls-files -z --others --exclude-standard -- "${spec[@]}" \
+				| while IFS= read -r -d '' d; do
+					printf '%s\0' "$d"
+					if [[ -L "$d" ]]; then readlink -- "$d" || :; elif [[ -f "$d" ]]; then cat -- "$d" || :; fi
+				done
+		} 2>/dev/null | git hash-object --stdin 2>/dev/null)" || h=""
+		[[ "$h" =~ ^[0-9a-f]{40} ]] || {
+			echo unknown
+			return 0
+		}
+		v+="-dirty.${h:0:8}"
+	fi
 	printf '%s\n' "$v"
 }
 

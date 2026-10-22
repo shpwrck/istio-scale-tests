@@ -18,17 +18,13 @@ setup() {
 
 # _ivk <kubectl args...>: fake-istio-cr.sh per member <c> (its --context): V_<c> the version
 # it runs (unset: every read fails), R_<c> its active revision, D_<c> its istiod
-# Deployment's status, the file state-<c> its Istio CR's state (default Healthy); `wait` (the
-# readiness wait) sets that file to W_<c> (default Healthy). Logs each call to KLOG.
+# Deployment's status, the file state-<c> its Istio CR's state (default Healthy). Logs each
+# call to KLOG.
 _ivk() {
-	local a c="" v r d w
+	local a c="" v r d
 	for a in "$@"; do [[ "$a" != --context=* ]] || c="${a#--context=}"; done
 	echo "$*" >> "$KLOG"
-	v="V_${c}" r="R_${c}" d="D_${c}" w="W_${c}"
-	if [[ " $* " == *" wait "* ]]; then
-		echo "${!w:-Healthy}" > "${BATS_TEST_TMPDIR}/state-${c}"
-		return 0
-	fi
+	v="V_${c}" r="R_${c}" d="D_${c}"
 	STUB_ISTIO_VERSION="${!v:-fail}" STUB_ISTIO_REV="${!r:-default}" STUB_ISTIOD_STATUS="${!d:-}" \
 		STUB_ISTIO_STATE="$(cat "${BATS_TEST_TMPDIR}/state-${c}" 2>/dev/null || echo Healthy)" "$FAKE_CR" "$@"
 }
@@ -125,24 +121,37 @@ recheck() {
 	[ ! -s "$KLOG" ]
 }
 
-@test "a member not ready gets one wait for its Istio CR's Ready condition and one more read: ready then, the run goes on; still not ready, it stops (warn records and notes it)" {
-	export ISTIO_VERSION_READY_WAIT_SEC=5
+@test "members not ready are read again every 5 s, together, until each is ready, up to ISTIO_VERSION_READY_WAIT_SEC in all: one ready on a later read goes on; one never ready stops the run at that one deadline, naming the seconds waited (warn notes it)" {
+	# No real wait: sleep moves SECONDS on and logs what it was asked (SLOG); after its
+	# READY_AFTER-th call, b's Istio CR reads Healthy.
+	sleep() {
+		echo "$1" >> "$SLOG"
+		SECONDS=$((SECONDS + $1))
+		(($(wc -l < "$SLOG") < ${READY_AFTER:-999})) || state b Healthy
+	}
+	export SLOG="${BATS_TEST_TMPDIR}/sleeps" ISTIO_VERSION_READY_WAIT_SEC=12
+	: > "$SLOG"
+	state b IstiodNotReady
+	READY_AFTER=2 V_a=v1.30.5 V_b=v1.30.5 run --separate-stderr resolve_kv a,b 0
+	assert_success
+	assert_line ISTIO_VERSION=v1.30.5
+	# b read at the start and after each wait; a, ready at once, never again.
+	[ "$(grep -c -- '--context=b --request-timeout=5s get istios.sailoperator.io default' "$KLOG")" -eq 3 ]
+	[ "$(grep -c -- '--context=a --request-timeout=5s get istios.sailoperator.io default' "$KLOG")" -eq 1 ]
+	# Neither ever ready: both are read until the one deadline, each wait 5 s at most.
+	: > "$SLOG"
+	state a IstiodNotReady
 	state b IstiodNotReady
 	V_a=v1.30.5 V_b=v1.30.5 run --separate-stderr resolve_kv a,b 0
-	assert_success
-	assert_line ISTIO_VERSION=v1.30.5
-	[ "$(grep -c ' wait --for=condition=Ready istios.sailoperator.io/default ' "$KLOG")" -eq 1 ]
-	grep -qE -- '--context=b wait --for=condition=Ready istios.sailoperator.io/default --timeout=[0-5]s' "$KLOG"
-	[ "$(grep -c -- '--context=b --request-timeout=5s get istios.sailoperator.io default' "$KLOG")" -eq 2 ]
-	[ "$(grep -c -- '--context=a --request-timeout=5s get istios.sailoperator.io default' "$KLOG")" -eq 1 ]
-	state b IstiodNotReady
-	V_a=v1.30.5 V_b=v1.30.5 W_b=IstiodNotReady run --separate-stderr resolve_kv a,b 0
 	assert_failure 1
-	[[ "$stderr" == *"b: not ready (Istio CR state is IstiodNotReady) after a wait of up to 5s"* ]]
-	ISTIO_VERSION_CHECK=warn V_a=v1.30.5 V_b=v1.30.5 W_b=IstiodNotReady run --separate-stderr resolve_kv a,b 0
+	[[ "$stderr" =~ "a: not ready (Istio CR state is IstiodNotReady) after waiting "[0-9]+"s" ]]
+	[[ "$stderr" =~ "b: not ready (Istio CR state is IstiodNotReady) after waiting "[0-9]+"s" ]]
+	awk '$1 < 1 || $1 > 5 { bad = 1 } { s += $1 } END { exit bad || NR < 2 || s > 12 }' "$SLOG"
+	: > "$SLOG"
+	ISTIO_VERSION_CHECK=warn V_a=v1.30.5 V_b=v1.30.5 run --separate-stderr resolve_kv a,b 0
 	assert_success
 	assert_line ISTIO_VERSION=v1.30.5
-	assert_line "NOTE=Istio version check at the start: b: not ready (Istio CR state is IstiodNotReady) after a wait of up to 5s"
+	assert_line --regexp '^NOTE=Istio version check at the start: b: not ready \(Istio CR state is IstiodNotReady\) after waiting [0-9]+s$'
 }
 
 @test "--dry-run reads nothing and records the pin; a step under its sweep reuses the sweep's read" {

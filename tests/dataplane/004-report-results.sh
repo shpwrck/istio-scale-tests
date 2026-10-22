@@ -178,7 +178,7 @@ KIND_PATH_WARNING="$(platform_kind_path_warning "$(sed -n 's/^NODE_PROVIDER_BY_C
 # One warning, every format, when the inputs ran on more than one harness.
 for kv in ${PREAMBLE[@]+"${PREAMBLE[@]}"}; do
 	[[ "$kv" == HARNESS_SHA=mixed:* ]] || continue
-	REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}the inputs ran on different harnesses (HARNESS_SHA ${kv#HARNESS_SHA=mixed:}), so their rows may not all be measured the same way"
+	REPORT_WARNINGS+="${REPORT_WARNINGS:+$'\n'}the inputs ran on different harnesses, or one did not record its harness (HARNESS_SHA ${kv#HARNESS_SHA=mixed:}), so their rows may not all be measured the same way"
 done
 
 # AWK aggregation: group by (mesh_size, qps_target, target_class).

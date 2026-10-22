@@ -103,7 +103,8 @@ which wins over the upstream docs there when they disagree.
   before any window and writes `platform_preamble_lines` next to `config_preamble_lines`; a run's
   markdown summary adds `platform_md_row` after its `| Run config |` row; every suite report merges
   the record with `platform_report_values` and prints `platform_report_warnings` in every format's
-  body; a sweep calls `platform_probe_share` right after its `platform_probe`, then
+  body (tuning 004 instead warns through its own "Platform record" row, in every format and on
+  stderr); a sweep calls `platform_probe_share` right after its `platform_probe`, then
   `platform_start_warnings`, and `platform_drift_check` after its last step, before `sweep_finish`
   (tuning 003: around each pass's probes). Tuning 001 and 003 refuse to start on a profile's
   objects; the other sweeps warn. Every script that sources it calls `platform_validate`;
@@ -162,8 +163,10 @@ which wins over the upstream docs there when they disagree.
 `bash` 4.3+, `kubectl` (or `oc`), `terraform` >= 1.14.8, `helm` 3 or 4, `jq`, `curl`, `awk` (gawk
 5.2 and 5.3 corrupt unset array elements passed to a function: `common.sh` then runs mawk, or
 stops), GNU `timeout` (`gtimeout` from Homebrew coreutils on macOS; call it through `run_timeout`
-in `tests/lib/common.sh`), `istioctl` matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite,
-and the frontmatter bats, which skip without it), `aws` + `rosa` (ROSA only).
+in `tests/lib/common.sh`), GNU `parallel` (`tests/lib/verify.sh --jobs` and CI; moreutils'
+`parallel` is another tool), `ps` (`sweep.bats` and `gateway-api.bats` call it), `istioctl`
+matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter bats, which skip
+without it), `aws` + `rosa` (ROSA only).
 
 ## Scale-test improvement cycle
 

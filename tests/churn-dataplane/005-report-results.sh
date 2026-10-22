@@ -154,7 +154,7 @@ HARNESS_SHA="$(extract_preamble_kv HARNESS_SHA)"
 # One warning, every format (json data_warnings), when the inputs ran on more than one harness.
 HARNESS_WARNING=""
 [[ "$HARNESS_SHA" != mixed:* ]] \
-	|| HARNESS_WARNING="the inputs ran on different harnesses (HARNESS_SHA ${HARNESS_SHA#mixed:}), so their rows may not all be measured the same way"
+	|| HARNESS_WARNING="the inputs ran on different harnesses, or one did not record its harness (HARNESS_SHA ${HARNESS_SHA#mixed:}), so their rows may not all be measured the same way"
 ISTIO_VERSION_STR="$(extract_preamble_kv ISTIO_VERSION)"
 # Live (each member's active IstioRevision) or pin (config only), the configured pin,
 # and which member ran which (PL19).

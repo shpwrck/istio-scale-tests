@@ -246,8 +246,8 @@ if [[ -z "$MESH_SIZE" ]]; then
 fi
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-# The harness (PL2: harness_sha, tests/lib/common.sh): <describe>, or <describe>-dirty for
-# uncommitted changes; this probe's own results do not count.
+# The harness (PL2: harness_sha, tests/lib/common.sh): <describe>, or <describe>-dirty.<8hex>
+# for uncommitted changes; this probe's own results do not count.
 HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 TSV_FILE="${OUTPUT_DIR}/endpoint-${RUN_ID}.tsv"
 

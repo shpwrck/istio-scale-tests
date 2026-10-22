@@ -33,8 +33,8 @@ envelope, a summary) can name members in prose only, so when the files' metadata
 no `--context` gives one, it refuses the whole run (exit 1, nothing written; `--no-contexts` runs
 anyway, for files that name no kube context: nothing checks that, so read the copy for member
 names). It never copies the raw `istiod-diag-*/NNN-*/` evidence, a tuning sweep's raw copies of the
-Istio CR (`istio-spec/`, `state/istio-before-*.json`: they hold the cluster's own name) or a sweep's
-`.sweep.lock`; each is named on stderr.
+Istio CR (`istio-spec/`, `state/istio-before-*.json`: they hold the cluster's own name) or a dot
+file (an older sweep's `.sweep.lock`); each is named on stderr.
 
 A person reads the copy, file names included, before it is committed. The script has no
 pattern for:

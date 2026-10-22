@@ -333,7 +333,7 @@ if ((${#TSV_WIDTHS[@]} > 1)); then
 	data_warning "the input TSVs have different column counts (${_wf//,/, }), so their rows are filtered by different rules (tests/lib/propagation.sh): one without remote_status (under 23 columns) drops a row's P2/P3 for either side's failure, one without p1_status (under 21) takes P1 from its iteration's first OK row, and an 18-column one has no p2_dirty or scrape-skew check. Compare its figures with care."
 fi
 [[ "${PREAMBLE[HARNESS_SHA]:-}" != mixed:* ]] \
-	|| data_warning "the inputs ran on different harnesses (HARNESS_SHA ${PREAMBLE[HARNESS_SHA]#mixed:}), so their rows may not all be measured the same way"
+	|| data_warning "the inputs ran on different harnesses, or one did not record its harness (HARNESS_SHA ${PREAMBLE[HARNESS_SHA]#mixed:}), so their rows may not all be measured the same way"
 # data_warnings_lines <prefix>: each DATA_WARNINGS line behind a prefix (nothing when none).
 data_warnings_lines() {
 	[[ -n "$DATA_WARNINGS" ]] || return 0

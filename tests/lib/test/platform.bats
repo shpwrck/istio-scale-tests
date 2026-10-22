@@ -252,8 +252,10 @@ _probe_gw() {
 # the rest answers). PROBE_ISTIOD: istiod's tag (1.30.5); PROBE_ISTIOD_THROTTLE its
 # PILOT_PUSH_THROTTLE (100); PROBE_ISTIOD_PODS=pending: its pod has not started. PROBE_EWGW=other:
 # the east-west gateway runs another build than the ingress gateway's (an egress gateway never
-# counts). PROBE_TUNING_OBJECTS: none (default), marker (profile 02's marker), two (two profiles'
-# objects, in reverse order) or timeout; PROBE_TUNING_ON: on that member only.
+# counts). PROBE_TERMINATING=1: each also has an old pod of another build still terminating (phase
+# Running, deletionTimestamp set), istiod's with other settings. PROBE_TUNING_OBJECTS: none
+# (default), marker (profile 02's marker), two (two profiles' objects, in reverse order) or
+# timeout; PROBE_TUNING_ON: on that member only.
 _probe_kubectl() {
 	local a ctx="" st tobj
 	printf '%s\n' "$*" >> "$CALLS"
@@ -272,7 +274,8 @@ _probe_kubectl() {
 		[[ "${PROBE_PLATFORM:-}" != openshift ]] || printf '%s\n' route.openshift.io/v1 security.openshift.io/v1
 		;;
 	*" -n sail-operator get deployments.apps,pods "*)
-		printf '{"kind":"List","items":[{"kind":"Deployment","metadata":{"name":"sail-operator"},"spec":{"selector":{"matchLabels":{"app":"sail"}},"template":{"spec":{"containers":[{"name":"sail-operator","image":"registry.example.invalid/sail/sail-operator:1.31.1"}]}}}},{"kind":"Pod","metadata":{"name":"sail-1","labels":{"app":"sail"}},"status":{"phase":"Running","containerStatuses":[{"name":"sail-operator","imageID":"registry.example.invalid/sail/sail-operator@%s"}]}},{"kind":"Pod","metadata":{"name":"unrelated","labels":{"app":"x"}},"status":{"containerStatuses":[{"name":"sail-operator","imageID":"%s"}]}}]}\n' "$DIG_A" "$DIG_C"
+		printf '{"kind":"List","items":[{"kind":"Deployment","metadata":{"name":"sail-operator"},"spec":{"selector":{"matchLabels":{"app":"sail"}},"template":{"spec":{"containers":[{"name":"sail-operator","image":"registry.example.invalid/sail/sail-operator:1.31.1"}]}}}},{"kind":"Pod","metadata":{"name":"sail-1","labels":{"app":"sail"}},"status":{"phase":"Running","containerStatuses":[{"name":"sail-operator","imageID":"registry.example.invalid/sail/sail-operator@%s"}]}},{"kind":"Pod","metadata":{"name":"unrelated","labels":{"app":"x"}},"status":{"containerStatuses":[{"name":"sail-operator","imageID":"%s"}]}}%s]}\n' "$DIG_A" "$DIG_C" \
+			"$([[ -z "${PROBE_TERMINATING:-}" ]] || printf ',{"kind":"Pod","metadata":{"name":"sail-0","labels":{"app":"sail"},"deletionTimestamp":"2026-10-01T00:00:00Z"},"status":{"phase":"Running","containerStatuses":[{"name":"sail-operator","imageID":"x@%s"}]}}' "$DIG_B")"
 		;;
 	*" -n openshift-operators get clusterserviceversions.operators.coreos.com "*)
 		[[ "${PROBE_PLATFORM:-}" == openshift ]] || { echo "error: the server doesn't have a resource type \"clusterserviceversions\"" >&2; return 1; }
@@ -286,6 +289,10 @@ _probe_kubectl() {
 		_probe_gw ingress-1 ingressgateway 1.30.5 "$DIG_C"
 		_probe_gw egress-1 egressgateway 9.9.9 "$DIG_B"
 		if [[ "${PROBE_EWGW:-same}" == other ]]; then _probe_gw eastwest-1 eastwestgateway 1.30.6 "$DIG_A"; else _probe_gw eastwest-1 eastwestgateway 1.30.5 "$DIG_C"; fi
+		if [[ -n "${PROBE_TERMINATING:-}" ]]; then
+			printf ',{"metadata":{"name":"istiod-0","labels":{"app":"istiod"},"deletionTimestamp":"2026-10-01T00:00:00Z"},"spec":{"containers":[{"name":"discovery","image":"x/pilot:1.30.4","env":[{"name":"PILOT_PUSH_THROTTLE","value":"999"}]}]},"status":{"phase":"Running","containerStatuses":[{"name":"discovery","imageID":"x@%s"}]}}' "$DIG_C"
+			_probe_gw ingress-0 ingressgateway 1.30.4 "$DIG_A" | sed 's/"labels"/"deletionTimestamp":"2026-10-01T00:00:00Z","labels"/'
+		fi
 		echo ']}'
 		;;
 	*" get ${PLATFORM_TUNING_KINDS} -A -l ${PLATFORM_TUNING_LABEL} "*)
@@ -356,6 +363,14 @@ env_digest() {
 	[ "$(platform_member_value member-c istiod_env)" = "$(env_digest 50)" ]
 	[ "$(platform_member_value member-c proxy)" = "proxyv2:1.30.5@${DIG_C}+proxyv2:1.30.6@${DIG_A}" ]
 	[ "$(platform_member_value member-c istiod)" = "pilot:1.30.5@unknown" ]
+	# A rollout's tail: old pods still terminating (phase Running) are left out of the builds and
+	# istiod's env.
+	probe_setup
+	PROBE_TERMINATING=1 platform_probe member-t 2>"$WARN"
+	[ "$(platform_member_value member-t operator)" = "sail-operator:1.31.1@${DIG_A}" ]
+	[ "$(platform_member_value member-t istiod)" = "pilot:1.30.5@${DIG_B}" ]
+	[ "$(platform_member_value member-t proxy)" = "proxyv2:1.30.5@${DIG_C}" ]
+	[ "$(platform_member_value member-t istiod_env)" = "$(env_digest)" ]
 	# OpenShift: the OSSM CSV's version (the Sail operator not read), the cloud provider (a node
 	# without one left out).
 	probe_setup

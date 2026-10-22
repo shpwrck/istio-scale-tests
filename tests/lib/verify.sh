@@ -225,10 +225,10 @@ EXTRACTED_PATTERNS=(
 	# counter window deltas (metrics.sh)
 	'counter_delta() {'
 	# a sweep's start, steps, stop and outcome (common.sh)
+	'sweep_settings_check() {'
 	'sweep_start() {'
 	'_sweep_record() {'
 	'_sweep_mask() {'
-	'_sweep_unlock() {'
 	'sweep_step() {'
 	'_sweep_step_stop() {'
 	'_sweep_step_kill() {'
@@ -253,7 +253,6 @@ EXTRACTED_PATTERNS=(
 	'_istio_read() {'
 	'_istio_read_all() {'
 	'_istio_read_one() {'
-	'_istio_wait_one() {'
 	'istio_version_resolve() {'
 	'istio_version_recheck() {'
 	'istio_generations_read() {'
@@ -349,7 +348,9 @@ BATS="${ROOT}/tests/lib/test/bats-core/bin/bats"
 if [[ -x "$BATS" ]]; then
 	bats_jobs=()
 	if ((JOBS > 1)); then
-		if command -v parallel >/dev/null 2>&1; then
+		# GNU parallel only: moreutils' parallel is another tool, with which bats --jobs fails.
+		# (The output is captured, not piped to grep -q: under pipefail a SIGPIPE would fail it.)
+		if [[ "$(parallel --version 2>/dev/null </dev/null)" == *"GNU parallel"* ]]; then
 			bats_jobs=(--jobs "$JOBS" --no-parallelize-within-files)
 		else
 			echo "    WARNING: --jobs ${JOBS} needs GNU parallel on PATH; running the bats files one after another"

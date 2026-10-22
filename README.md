@@ -185,11 +185,11 @@ Every TSV preamble has these keys, and each suite's report repeats them, merged 
 
 | Key | What it means | Where it comes from |
 | --- | --- | --- |
-| `HARNESS_SHA` | The harness that wrote the result: `git describe --always --abbrev=7`, plus `-dirty` when git lists a changed tracked file, or an untracked file it does not ignore, under `tests/`, `config/`, `charts/` or `terraform/` (a run's own results never count; `tests/<suite>/configs/*.local.env` is ignored) | `harness_sha`, [tests/lib/common.sh](tests/lib/common.sh) |
+| `HARNESS_SHA` | The harness that wrote the result: `git describe --always --abbrev=7`, plus `-dirty.<8hex>` when git lists a changed tracked file, or an untracked file it does not ignore, under `tests/`, `config/`, `charts/` or `terraform/` (a run's own results never count; `tests/<suite>/configs/*.local.env` is ignored); the hex hashes the diff against `HEAD` and those untracked files' names and contents, so two different edits read as two harnesses | `harness_sha`, [tests/lib/common.sh](tests/lib/common.sh) |
 | `RUN_CONFIG`, `RUN_CONFIG_SHA256` | The `--config` file (its path from the repo root, or only its name outside the repo) and its SHA-256; `none` without one | `config_preamble_lines`, [tests/lib/config.sh](tests/lib/config.sh) |
 | `ISTIO_VERSION`, `ISTIO_VERSION_PIN`, `ISTIO_VERSION_SOURCE` | The version the members run ([below](#the-istio-version-check)), the pin (`ISTIO_VERSION` in `config/versions.env`), and `live`, or `pin` in a `--dry-run`, which reads nothing | `istio_version_kv`, [tests/lib/preamble.sh](tests/lib/preamble.sh) |
 | `ISTIO_VERSION_BY_CONTEXT`, `ISTIO_ACTIVE_REVISIONS`, `ISTIO_GENERATIONS` | Per member: its version, its active IstioRevision, and its Istio CR and IstioRevision generations (`<ctx>=<cr>/<revision>`); `unchecked` when not read live | `istio_version_kv` |
-| `KUBE_VERSIONS` | Each member's Kubernetes server version (`unreachable` when it did not answer) | `probe_kube_versions`, `tests/lib/preamble.sh` |
+| `KUBE_VERSIONS` | Each member's Kubernetes server version (`unreachable` when it did not answer); the placeholder a propagation or dataplane sweep writes for a failed mesh size leaves it out | `probe_kube_versions`, `tests/lib/preamble.sh` |
 | `TUNING_BASELINE`, `SIDECAR_EGRESS_HOSTS` | The baseline's tuning levers on the source member (`sidecar`, `discoverySelectors`, `telemetryFiltering`, `accessLogFiltering`, each `on` or `off`) and the root Sidecar's egress hosts (`none` without one); gateway-api records them per member (`TUNING_BASELINE[<ctx>]`) | `tuning_baseline_state`, `tests/lib/preamble.sh` |
 | `PLATFORM`, `TEST_PLATFORM`, `PLATFORM_BY_CONTEXT` | `kubernetes` or `openshift` over the members (`mixed` when they run both); the override as set (`auto`, `kubernetes` or `openshift`); what each member serves, asked even with an override | `platform_preamble_lines`, [tests/lib/platform.sh](tests/lib/platform.sh) |
 | `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>@<digest>` (the digest its pods run) or, on OpenShift, `servicemeshoperator3:<version>` (its CSV); `absent` when the member runs none | `platform_preamble_lines` |
@@ -199,15 +199,17 @@ Every TSV preamble has these keys, and each suite's report repeats them, merged 
 
 `unknown` means not read (a failed read, which warns; a file from before the key), never none or
 off; an image whose pods have not started (Pending, an operator scaled to 0) reads
-`<image>@unknown`, not read either; several values on one member are `+`-joined (a rollout). Where a
-report's inputs disagree, a key reads `mixed:<a>,<b>` (per member `<ctx>=mixed:<a>;<b>`;
-`mixed:unknown,...` when only some inputs carry it), with a warning in the report's body.
+`<image>@unknown`, not read either; several values on one member are `+`-joined (a rollout; a pod
+already terminating counts only when no other ran). Where a report's inputs disagree, a key reads
+`mixed:<a>,<b>` (per member `<ctx>=mixed:<a>;<b>`; `mixed:unknown,...` when only some inputs carry
+it), with a warning in the report's body. An older harness wrote `MESH_OPERATOR_BY_CONTEXT` with a
+readiness suffix (such as `/Available`) and `NODE_PROVIDER_BY_CONTEXT` as `aws+none` where some node
+had no provider ID: its TSVs, pooled with newer ones, read `mixed` on those keys, with that warning.
 
 ### How a sweep ends
 
-From its start a sweep's `sweep-outcome.txt` says `STATUS=running`, and its dir holds a lock
-(`.sweep.lock`, its PID) that refuses another run into that dir while that PID runs (a dead run's
-lock is taken over). At its end, before its reports, it records `STATUS=finished` and exits `0`, or
+From its start a sweep's `sweep-outcome.txt` says `STATUS=running`. At its end, before its reports,
+it records `STATUS=finished` and exits `0`, or
 `4` when some cells failed (`N of M cells failed`, by reason) or it recorded a problem (the Istio
 version, revision or generations, a member's platform record or `HARNESS_SHA` changed during the
 sweep; each suite README lists its own). One that stops exits `1` (a bad flag or precondition, a
@@ -217,19 +219,26 @@ Ctrl-C, SIGTERM or SIGHUP it sends SIGTERM to the running step's process group (
 process it started), SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` (30) seconds later, records
 `STATUS=interrupted` with the signal and exits 128+n (130, 143, 129). One that ends early prints its
 dir and the suite's cleanup command; only one killed outright (SIGKILL, out of memory, a lost host)
-keeps `STATUS=running`. Every report of the dir repeats the outcome.
+keeps `STATUS=running`. Every report of the dir repeats the outcome; a `sweep-outcome.txt` an older
+harness wrote has no `STATUS` line: the reports read it as `UNKNOWN` and flag it. A sweep that did
+not finish (killed outright, or its terminal closed, so its `clean up with:` line went to a dead
+terminal) may leave its test workloads on the members: run the suite's cleanup script (each suite
+README names it) with `--contexts <the sweep's members>` (and `--wait-deletion` where the script has
+it), then run the sweep again into a new dir.
 
 ### The Istio version check
 
 Before its first change, every suite reads the version each member runs: the exact `.spec.version`
 of the IstioRevision its `istios.sailoperator.io default` CR names as active. A member is ready when
-its CR is Healthy and reconciled, one revision is in use and istiod is rolled out; members that are
-not get one wait for their CR's Ready condition (up to `ISTIO_VERSION_READY_WAIT_SEC`, 60 s) and one
-more read. With `ISTIO_VERSION_CHECK=fail` (the default) a version not read, members on different
+its CR is Healthy and reconciled, no more than one revision is in use (two or more: a migration) and
+istiod is rolled out with no pod terminating; the members that are not are read again, together,
+every 5 s until they are, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s) in all. With
+`ISTIO_VERSION_CHECK=fail` (the default) a version not read, members on different
 versions, a version other than the pin `ISTIO_VERSION` (keep it equal to `istioVersion` in
 `charts/spoke-ossm/values.yaml`) or a member still not ready stops the suite before it changes
-anything; `warn` goes on, records what the mesh runs and notes it in the outcome; gateway-api,
-read-only, only warns. A sweep reads every member again at its end: another version or active
+anything; `warn` goes on and records what the mesh runs: a sweep notes each finding in its outcome,
+while a probe run on its own and gateway-api (read-only, it only warns) print it on stderr only.
+A sweep reads every member again at its end: another version or active
 revision, or generations that moved (an edit of the Istio CR, or Sail rendering it again), is a
 problem; a member not ready or not read then, a note.
 
@@ -237,8 +246,9 @@ problem; a member not ready or not read then, a note.
 
 The platform keys are read outside every measurement window, each read bounded by
 `PLATFORM_READ_TIMEOUT` (20s; raise it for members with many nodes), `PLATFORM_READ_PARALLEL` (20;
-lower it on a runner short of memory) members at a time, as are the Kubernetes and Istio version
-reads. A sweep reads them once, hands them to its steps in `platform-record.txt` and reads them
+lower it on a runner short of memory) members at a time. The Kubernetes and Istio version reads
+share only `PLATFORM_READ_PARALLEL`: each of their reads has a fixed 5 s timeout. A sweep reads
+the platform keys once, hands them to its steps in `platform-record.txt` and reads them
 again after its last step: a value that changed is a problem. `TEST_PLATFORM` picks each suite
 chart's OpenShift overlay (`auto` asks each member); the record asks each member anyway, and warns
 when one differs. Compare results within one platform and mesh build: a report warns when its inputs

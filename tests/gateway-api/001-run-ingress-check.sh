@@ -1301,7 +1301,7 @@ fi
 # (PL39): say when it is not the commit the script runs from.
 HARNESS="$(harness_sha --exclude "$RESULTS_DIR")"
 CHART_REVISION_VS_HARNESS=unknown
-# A dirty tree reads <describe>-dirty; the commit is before it.
+# A dirty tree reads <describe>-dirty.<8hex>; the commit is before it.
 hc="${HARNESS%%-dirty*}"
 if [[ "$hc" =~ -g([0-9a-f]{7,})$ ]]; then
 	hc="${BASH_REMATCH[1]}"

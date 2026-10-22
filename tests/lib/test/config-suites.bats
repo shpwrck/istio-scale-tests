@@ -223,7 +223,7 @@ no_plan() { [[ "$output" != *"Dry-run complete"* && "$output" != *"[dry-run] 001
 	# Keys older TSVs carry that no run writes any more are left out, so a pooled report never
 	# shows one file's value as every input's.
 	c="$(cfg old.tsv '# RUN_ID=r1' '# ISTIO_PROXY_VERSIONS=ci-a=1.30.5:30' '# ISTIO_NOTREADY_AT_START=none' \
-		'# ISTIO_READY_WAITED_SEC=0' '# ISTIO_GENERATIONS=ci-a=2/2' $'timestamp\tx')"
+		'# ISTIO_READY_WAITED_SEC=0' '# HARNESS_CONTENT_KEY=0123abcd' '# ISTIO_GENERATIONS=ci-a=2/2' $'timestamp\tx')"
 	run config_merged_preamble "$c" "$(cfg new.tsv '# RUN_ID=r2' '# ISTIO_GENERATIONS=ci-a=2/2' $'timestamp\tx')"
 	assert_success
 	assert_output "$(printf '%s\n' RUN_ID=mixed:r1,r2 ISTIO_GENERATIONS=ci-a=2/2)"
@@ -266,6 +266,25 @@ churn/003-run-sweep.sh CHURN_POLL_INTERVAL_MS
 churn-dataplane/004-run-sweep.sh COEXEC_CLEANUP_GRACE_SEC
 propagation/006-run-sweep.sh PROPAGATION_DRAIN_TIMEOUT_SEC
 controlplane/003-run-sweep.sh CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S
+LIST
+}
+
+@test "every sweep, tuning's too, refuses a SWEEP_STOP_GRACE_SEC that is no number of seconds under --dry-run, naming the key, before its first step" {
+	local sweep args
+	while read -r sweep args; do
+		# shellcheck disable=SC2086  # the sweep's flags, one word each
+		SWEEP_STOP_GRACE_SEC=soon KUBECONFIG="$EK" run bash "${ROOT}/tests/${sweep}" --dry-run $args
+		[ "$status" -eq 1 ] || { echo "${sweep}: exit ${status}"; echo "$output" | tail -3; false; }
+		[[ "$output" == *"SWEEP_STOP_GRACE_SEC must be a non-negative integer of seconds (got: soon)"* ]] \
+			|| { echo "${sweep}: no SWEEP_STOP_GRACE_SEC error"; echo "$output" | tail -3; false; }
+		no_plan
+	done <<'LIST'
+propagation/006-run-sweep.sh --contexts ci-a
+churn/003-run-sweep.sh --contexts ci-a
+dataplane/003-run-sweep.sh --contexts ci-a
+churn-dataplane/004-run-sweep.sh --contexts ci-a
+controlplane/003-run-sweep.sh --contexts ci-a
+tuning/003-run-tuning-sweep.sh --suite churn --contexts ci-a --gitops-context ci-hub
 LIST
 }
 

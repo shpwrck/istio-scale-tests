@@ -20,9 +20,10 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    `pilot.autoscaleEnabled: false`, `pilot.replicaCount: <K>` (default 3). An autoscaling istiod
    changes topology mid-sweep and corrupts the xDS deltas.
 3. **Enough CPU for the workload** — see [Capacity planning](#capacity-planning).
-4. **A kubeconfig with every mesh-member context.** Set `SETUP_CONTEXTS` in `config/versions.env`
-   or pass `--contexts`: mesh members only, never the hub. Token/OAuth credentials must stay
-   valid for the whole multi-hour run.
+4. **A kubeconfig with every mesh-member context.** Pass `--contexts`, or set `SETUP_CONTEXTS` in
+   a `tests/<suite>/configs/<name>.local.env` run config (git ignores it; an edit of
+   `config/versions.env` changes `HARNESS_SHA`): mesh members only, never the hub. Token/OAuth
+   credentials must stay valid for the whole multi-hour run.
 5. **Tools:** `kubectl`/`oc`, `helm`, `jq`, `curl`, `awk`, and GNU `timeout` (macOS: `brew install
    coreutils` for `gtimeout`; the controlplane suite stops at startup without one).
 6. **The `ISTIO_VERSION` pin matches the mesh.** Every suite but gateway-api reads the version
@@ -31,8 +32,8 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    gateway-api, a read-only check, records it and goes on. Fix the pin (or the mesh);
    `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs. A member that is not
    ready (its Istio CR not Healthy or not reconciled, a revision migration, an istiod rollout) is
-   waited for once, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s), and stops the run too when it is
-   still not ready. A sweep reads it again at the end and exits 4 when the version or the active
+   read again every 5 s, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s), and stops the run too when it
+   is still not ready. A sweep reads it again at the end and exits 4 when the version or the active
    revision changed during the sweep, or when the generation of a member's Istio CR or active
    IstioRevision moved with the same version (an edit of the Istio CR, or Sail rendering it again;
    a tuning sweep, whose profiles move them on purpose, checks them around each pass and at its
