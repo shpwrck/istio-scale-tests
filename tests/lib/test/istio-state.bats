@@ -121,7 +121,7 @@ recheck() {
 	[ ! -s "$KLOG" ]
 }
 
-@test "members not ready are read again every 5 s, together, until each is ready, up to ISTIO_VERSION_READY_WAIT_SEC in all: one ready on a later read goes on; one never ready stops the run at that one deadline, naming the seconds waited (warn notes it)" {
+@test "members not ready are read again every 5 s, together, until each is ready, up to ISTIO_VERSION_READY_WAIT_SEC in all: one ready on a later read goes on; one never ready stops the run at that one deadline, naming the seconds waited (warn notes it); one whose version cannot be read is not waited for" {
 	# No real wait: sleep moves SECONDS on and logs what it was asked (SLOG); after its
 	# READY_AFTER-th call, b's Istio CR reads Healthy.
 	sleep() {
@@ -131,6 +131,12 @@ recheck() {
 	}
 	export SLOG="${BATS_TEST_TMPDIR}/sleeps" ISTIO_VERSION_READY_WAIT_SEC=12
 	: > "$SLOG"
+	# c's reads fail (V_c unset): it stops the run at once, with no wait.
+	V_a=v1.30.5 run --separate-stderr resolve_kv a,c 0
+	assert_failure 1
+	[[ "$stderr" == *"c: the version it runs is unknown: the Istio CR could not be read (kubectl exit 1)"* ]]
+	[ ! -s "$SLOG" ]
+	: > "$KLOG"
 	state b IstiodNotReady
 	READY_AFTER=2 V_a=v1.30.5 V_b=v1.30.5 run --separate-stderr resolve_kv a,b 0
 	assert_success

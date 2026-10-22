@@ -1339,7 +1339,7 @@ if got.get("SCENARIO_SET[ctx-a]") != "v0: \"q\" #1 \\b":
 	assert_output --partial "GWAPI_ARGOCD_NAMESPACE and GWAPI_ARGOCD_APPSET name it"
 	grep -q '^# ARGOCD=failed on hub' "$(tsv)"
 	# restart: an OpenShift hub (openshift-gitops) that synced this script's own commit: "same", or
-	# "same-dirty" from a modified tree (harness_sha: a dirty tree is <describe>-dirty).
+	# "same-dirty" from a modified tree (harness_sha: a dirty tree is <describe>-dirty.<8hex>).
 	use restart
 	assert_output --partial "Argo CD namespace on hub: openshift-gitops (from its platform; GWAPI_ARGOCD_NAMESPACE sets it)"
 	grep -q -- '--context=hub .*-n openshift-gitops get applicationsets.argoproj.io mesh-verify-gwapi' "$STUB_LOG"

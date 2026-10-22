@@ -374,7 +374,7 @@ finish() {
 # ---------------------------------------------------------------------------
 # harness_sha
 
-@test "harness_sha: the commit (a tag shows), -dirty.<8hex> for a tracked change or an untracked file under tests/, config/, charts/ or terraform/, the hex another for another change; an ignored file, a change elsewhere and an excluded dir do not count; unknown outside git" {
+@test "harness_sha: the commit (a tag shows), -dirty.<8hex> for a tracked change or an untracked file under tests/, config/, charts/ or terraform/, the hex another for another change and the same under another git config; an ignored file, a change elsewhere and an excluded dir do not count; unknown outside git" {
 	local r="${T}/repo" h1 h2
 	mkdir -p "$r/tests" "$r/docs"
 	printf 'one\n' > "$r/tests/f"
@@ -393,6 +393,9 @@ finish() {
 	h1="$(ROOT="$r" harness_sha)"
 	[[ "$h1" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]
 	[ "$(ROOT="$r" harness_sha)" = "$h1" ]
+	# Under a git config that prints diffs another way, the same edit reads the same.
+	printf '[core]\n\tabbrev = 12\n[diff]\n\tnoprefix = true\n\tcontext = 5\n' > "${T}/gitconfig"
+	[ "$(GIT_CONFIG_GLOBAL="${T}/gitconfig" ROOT="$r" harness_sha)" = "$h1" ]
 	printf 'three\n' > "$r/tests/f"
 	h2="$(ROOT="$r" harness_sha)"
 	[[ "$h2" =~ ^v1-dirty\.[0-9a-f]{8}$ ]]

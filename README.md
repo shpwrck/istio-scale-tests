@@ -220,7 +220,8 @@ process it started), SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` (30) seco
 `STATUS=interrupted` with the signal and exits 128+n (130, 143, 129). One that ends early prints its
 dir and the suite's cleanup command; only one killed outright (SIGKILL, out of memory, a lost host)
 keeps `STATUS=running`. Every report of the dir repeats the outcome; a `sweep-outcome.txt` an older
-harness wrote has no `STATUS` line: the reports read it as `UNKNOWN` and flag it. A sweep that did
+harness wrote has no `STATUS` line: the reports read it as `UNKNOWN` and flag it (the csv format
+copies the record's lines as they are). A sweep that did
 not finish (killed outright, or its terminal closed, so its `clean up with:` line went to a dead
 terminal) may leave its test workloads on the members: run the suite's cleanup script (each suite
 README names it) with `--contexts <the sweep's members>` (and `--wait-deletion` where the script has
@@ -231,8 +232,9 @@ it), then run the sweep again into a new dir.
 Before its first change, every suite reads the version each member runs: the exact `.spec.version`
 of the IstioRevision its `istios.sailoperator.io default` CR names as active. A member is ready when
 its CR is Healthy and reconciled, no more than one revision is in use (two or more: a migration) and
-istiod is rolled out with no pod terminating; the members that are not are read again, together,
-every 5 s until they are, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s) in all. With
+istiod is rolled out with no pod terminating (Kubernetes reports those from 1.35 on); the members
+that are not are read again, together, every 5 s until they are, up to
+`ISTIO_VERSION_READY_WAIT_SEC` (60 s) in all, unless their version cannot be read. With
 `ISTIO_VERSION_CHECK=fail` (the default) a version not read, members on different
 versions, a version other than the pin `ISTIO_VERSION` (keep it equal to `istioVersion` in
 `charts/spoke-ossm/values.yaml`) or a member still not ready stops the suite before it changes

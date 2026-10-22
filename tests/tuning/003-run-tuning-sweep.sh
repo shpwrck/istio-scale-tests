@@ -356,15 +356,13 @@ mkdir -p "$SWEEP_DIR"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
 	istio_version_kv | sed 's/^/# /'
 } >"${SWEEP_DIR}/sweep-metadata.txt"
-# What the console names when the sweep ends before its end, one command to paste each:
-# Argo CD's resume and the profile cleanup (the EXIT trap does both, unless it fails or a
-# second signal cuts it short), then the suite's cleanup (the trap leaves its resources).
+# What the console names when the sweep ends before its end, one command to paste each: the
+# profile cleanup, which also resumes Argo CD from any pause record left under the results
+# dir (the EXIT trap does both, unless it fails or a second signal cuts it short), then the
+# suite's cleanup (the trap leaves its resources).
 _tc=("${TUNING_DIR}/005-cleanup.sh" --contexts "$CONTEXTS_CSV")
 [[ "$OUTPUT_BASE" == "${TUNING_DIR}/results" ]] || _tc+=(--results-dir "$OUTPUT_BASE")
 SWEEP_CLEANUP_CMD="./$(show "${_tc[@]}"); ./$(show "${CLEANUP_CMD[@]}")"
-if ((GITOPS_PAUSE)); then
-	SWEEP_CLEANUP_CMD="./$(show "${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$PAUSE_STATE"); ${SWEEP_CLEANUP_CMD}"
-fi
 # sweep-outcome.txt says the sweep runs until sweep_finish writes its outcome; one that ends
 # before records how, then runs tuning_cleanup.
 sweep_start "$SWEEP_DIR" "$RUN_ID" --unit passes --cleanup tuning_cleanup

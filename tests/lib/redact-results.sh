@@ -242,9 +242,6 @@ add_file() {
 	if [[ "$src" == *$'\t'* || "$src" == *$'\n'* ]]; then
 		SKIPPED+=("${src} (a tab or newline in the name)"); return 0
 	fi
-	if [[ "$base" == .sweep.lock ]]; then
-		SKIPPED+=("${src} (a sweep's lock file: the PID of the run that held the dir)"); return 0
-	fi
 	if [[ "$base" == .* ]]; then SKIPPED+=("${src} (dot file)"); return 0; fi
 	if [[ "/${rel}" =~ /istiod-diag-[^/]+/[0-9][0-9][0-9]-[^/]+/ ]]; then
 		SKIPPED+=("${src} (raw istiod-diag evidence: keeps host and node names, never paste it)"); return 0

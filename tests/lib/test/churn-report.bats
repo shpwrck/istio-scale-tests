@@ -293,7 +293,7 @@ col() { awk -F'\t' -v c="$1" '$1 == "run_id" { for (i = 1; i <= NF; i++) ix[$i] 
 	TZ=EST5 churn "$RES"
 	assert_success
 	f="$(ls "$RES"/churn-*.tsv)"
-	# harness_sha (-dirty on a dirty tree).
+	# harness_sha (-dirty.<8hex> on a dirty tree).
 	grep -qx "# HARNESS_SHA=$(source "${ROOT}/tests/lib/common.sh"; source "${ROOT}/tests/lib/preamble.sh"; harness_sha)" "$f"
 	grep -qx "# ISTIO_VERSION=${ISTIO_VERSION}" "$f"
 	grep -qx "# ISTIO_VERSION_PIN=${ISTIO_VERSION}" "$f"

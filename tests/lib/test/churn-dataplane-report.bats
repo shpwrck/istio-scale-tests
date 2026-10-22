@@ -242,7 +242,7 @@ two_pairs() {
 }
 
 @test "005: the recorded outcome is in every format" {
-	local note="Istio version check at the start: c2: not ready (Istio CR state is IstioCNINotHealthy) after a wait of up to 60s"
+	local note="Istio version check at the start: c2: not ready (Istio CR state is IstioCNINotHealthy) after waiting 60s"
 	{
 		echo "# RUN_ID=r1"
 		echo "$HDR"

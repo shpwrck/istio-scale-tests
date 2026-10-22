@@ -574,7 +574,7 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 		|| { cat "$OUT"; false; }
 }
 
-@test "tuning 003: a sweep that stops before its end names Argo CD's resume, the profile cleanup and then the suite's cleanup, one command to paste each" {
+@test "tuning 003: a sweep that stops before its end names the profile cleanup (it resumes Argo CD too) and then the suite's cleanup, one command to paste each" {
 	gen_stub
 	rm -rf "${T}/tres"
 	# The stub hub answers nothing: the pause fails, after the sweep started.
@@ -584,6 +584,6 @@ patch ctx-a {"spec":{"values":{"pilot":{"env":{"PILOT_PUSH_THROTTLE":"100"}}}}}'
 	assert_failure 1
 	TDIR="$(find "${T}/tres" -maxdepth 1 -name 'sweep-*' -type d)"
 	grep -qx 'STATUS=stopped' "${TDIR}/sweep-outcome.txt"
-	[[ "$stderr" == *"  clean up with: ./tests/tuning/006-gitops-pause.sh --resume --state-file ${TDIR}/gitops-pause.json; ./tests/tuning/005-cleanup.sh --contexts ci-a --results-dir ${T}/tres; ./tests/churn/005-cleanup.sh --contexts ci-a"* ]] \
+	[[ "$stderr" == *"  clean up with: ./tests/tuning/005-cleanup.sh --contexts ci-a --results-dir ${T}/tres; ./tests/churn/005-cleanup.sh --contexts ci-a"* ]] \
 		|| { echo "$stderr" | tail -5; false; }
 }
