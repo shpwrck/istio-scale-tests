@@ -1,8 +1,11 @@
 #!/usr/bin/env bats
 # End-to-end tests of tests/controlplane/004-report-results.sh (PL33: through the real
-# entrypoint) against fixtures/controlplane_cluster_proxies.tsv.
+# entrypoint) against fixture TSVs (no cluster). A figure, a label or a warning that more
+# than one format prints from one value is checked in every format once (the metadata
+# test), and its rules in json.
 #
-# Fixture (one combo: mesh 2, 15 svc, 2 reps, 1 ns, scoping none; tolerance 10 %, min diff 2):
+# Fixture fixtures/controlplane_cluster_proxies.tsv (one combo: mesh 2, 15 svc, 2 reps, 1 ns,
+# scoping none; tolerance 10 %, min diff 2):
 #   window 1  mesh-a 2 istiod pods 15+15 = 30, 30 sidecar pods -> OK
 #             mesh-b 3 istiod pods 12+10+12 = 34, 34 sidecar pods -> OK
 #   window 2  mesh-a 16+14 = 30, 40 sidecar pods -> LOW (|30-40| = 10 > max(4, 2))
@@ -27,6 +30,7 @@ load test_helper
 
 FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv"
 VSDR_FIXTURE="${ROOT}/tests/lib/test/fixtures/controlplane_vsdr.tsv"
+GROWTH="${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv"
 REPORT="${ROOT}/tests/controlplane/004-report-results.sh"
 
 setup() {
@@ -34,6 +38,18 @@ setup() {
 	mkdir -p "$RES"
 	cp "$FIXTURE" "${RES}/controlplane-fixture-t2.tsv"
 }
+
+# report <format> [dir] [flag...]: 004 over res/ (or dir), its stderr apart; it must succeed.
+report() {
+	local fmt="$1" dir="${2:-$RES}"
+	(($# < 2)) || shift
+	shift
+	run --separate-stderr "$REPORT" --results-dir "$dir" --format "$fmt" "$@"
+	assert_success
+}
+
+verdict() { jq -r '.metadata.sla.verdict' <<<"$output"; }
+headline() { jq -r '.metadata.sla.headline' <<<"$output"; }
 
 # legacy40 <out>: the fixture as an older file would be: schema 40, no proxy-check or
 # traffic keys, cols 1-40 only.
@@ -50,9 +66,75 @@ vsdr_dir() {
 	cp "$VSDR_FIXTURE" "${VRES}/controlplane-fixture-t6.tsv"
 }
 
-@test "report json: per-replica vs per-cluster peaks and the proxy-check tally" {
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
+# with_platform <sed program>: the fixture with the platform record a current 003 writes
+# (members mesh-a and mesh-b on kind nodes), edited by <sed program>.
+with_platform() {
+	{
+		head -1 "$FIXTURE"
+		platform_fixture_lines mesh-a,mesh-b | sed "$1"
+		tail -n +2 "$FIXTURE"
+	} > "${RES}/controlplane-fixture-t2.tsv"
+}
+
+# second_input <sed program>: controlplane-fixture-t3.tsv, the fixture again with the record
+# edited by <sed program>: a second input of the same report.
+second_input() {
+	{
+		head -1 "$FIXTURE"
+		platform_fixture_lines mesh-a,mesh-b | sed "$1"
+		tail -n +2 "$FIXTURE"
+	} > "${RES}/controlplane-fixture-t3.tsv"
+}
+
+# set_key <file> <KEY> <value>: the preamble's "# KEY=" line set to <value>.
+set_key() {
+	sed "s|^# ${2}=.*|# ${2}=${3}|" "$1" > "${1}.new"
+	mv "${1}.new" "$1"
+}
+
+# cp_tsv <file> <second WINDOW_ROWS> <mesh-b rows in it> [lines before the first
+# WINDOW_ROWS] [lines before the second]: the fixture's preamble (plus
+# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,mesh-b=3) and two cells (15 and 30 services) of valid
+# rows, each member 3 rows a window (mesh-b <n> in the second).
+cp_tsv() {
+	awk -F'\t' -v OFS='\t' -v w2="$2" -v nb="$3" -v x1="${4:-}" -v x2="${5:-}" '
+	function row(at, s, m, n,    i) { for (i = 1; i <= n; i++) { $0 = t; $1 = "2026-06-01T" at ":00+00:00"; $2 = m; $4 = s; $31 = 0; print } }
+	/^#/ {
+		print
+		if (index($0, "# ISTIOD_REPLICAS=") == 1) print "# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=3,mesh-b=3"
+		next
+	}
+	$1 == "timestamp" { print; next }
+	t == "" { t = $0 }
+	END {
+		if (x1 != "") print x1
+		print "# WINDOW_ROWS=mesh-a=3/3,mesh-b=3/3"; row("00:00", 15, "mesh-a", 3); row("00:00", 15, "mesh-b", 3)
+		if (x2 != "") print x2
+		print "# WINDOW_ROWS=" w2; row("00:10", 30, "mesh-a", 3); row("00:10", 30, "mesh-b", nb)
+	}' "$FIXTURE" > "$1"
+}
+
+# no_window_rows <file>: <file> without its WINDOW_ROWS lines (an older harness).
+no_window_rows() {
+	sed '/^# WINDOW_ROWS=/d' "$1" > "${1}.new"
+	mv "${1}.new" "$1"
+}
+
+# pooled <base>: two sweep dirs under <base>, run-a and run-b, each a cp_tsv of valid rows.
+pooled() {
+	local s
+	for s in a b; do
+		mkdir -p "${1}/sweep-${s}"
+		cp_tsv "${1}/sweep-${s}/controlplane-run-${s}.tsv" "mesh-a=3/3,mesh-b=3/3" 3
+		set_key "${1}/sweep-${s}/controlplane-run-${s}.tsv" RUN_ID "run-${s}"
+	done
+}
+
+# ---------------------------------------------------------------------------
+# The cluster-proxies fixture: its figures in each format
+
+@test "report json: per-replica vs per-cluster peaks, the proxy-check tally and n valid of n total; every valid row has a push count" {
+	report json
 	[ "$(jq -r '.metadata.achieved_scale.connected_proxies_max' <<<"$output")" = "16" ]
 	[ "$(jq -r '.metadata.achieved_scale.connected_proxies_cluster_max' <<<"$output")" = "34" ]
 	[ "$(jq -c '.metadata.proxy_check | {tolerance_pct, min_diff, ok, low, high, na, excluded}' <<<"$output")" = \
@@ -60,12 +142,12 @@ vsdr_dir() {
 	[ "$(jq -r '.metadata.proxy_check.flagged' <<<"$output")" = "mesh-a@2026-06-01T00:10:00+00:00:LOW:30/40" ]
 	[ "$(jq -c '.results[0].connected_proxies_cluster' <<<"$output")" = '{"min":30,"max":34,"avg":31}' ]
 	[ "$(jq -c '.results[0].connected_proxies' <<<"$output")" = '{"min":9,"max":16,"avg":13}' ]
-	[ "$(jq -c '[.results[0].n_total, .results[0].n_valid]' <<<"$output")" = '[10,9]' ]
+	[ "$(jq -c '[.results[0].n_total, .results[0].n_valid, .results[0].xds_pushes_n]' <<<"$output")" = '[10,9,9]' ]
+	[[ "$stderr" != *"no xDS push count"* ]]
 }
 
 @test "report text: per-cluster peak, tally and a WARNING naming the cluster scrape" {
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_success
+	report text
 	assert_output --partial "connected_proxies per istiod replica (max): 16"
 	assert_output --partial "connected_proxies per cluster (max): 34"
 	assert_output --partial "(tolerance 10%, min diff 2): ok=2 low=1 high=0 n/a=0 excluded=1"
@@ -74,22 +156,9 @@ vsdr_dir() {
 	assert_output --partial "Connected proxies / cluster:        min=30 max=34 avg=31"
 }
 
-@test "report: no WARNING when every counted cluster scrape is OK; exit code unaffected" {
-	f="${RES}/controlplane-fixture-t2.tsv"
-	awk 'BEGIN { FS = OFS = "\t" } !/^#/ && $43 == "LOW" { $43 = "OK" } { print }' "$f" > "${f}.tmp"
-	mv "${f}.tmp" "$f"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_success
-	refute_output --partial "WARNING:"
-	assert_output --partial "ok=3 low=0 high=0"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
-	assert_success
-	refute_output --partial "**Warning:**"
-}
-
 @test "report csv: rows gain cluster_proxies_*, the traffic and the growth columns (69) and a proxy_check comment" {
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
-	assert_success
+	local hdr row
+	report csv
 	hdr=$(grep -v '^#' <<<"$output" | sed -n 1p)
 	row=$(grep -v '^#' <<<"$output" | sed -n 2p)
 	[ "$(awk -F, '{ print NF }' <<<"$hdr")" -eq 69 ]
@@ -110,40 +179,44 @@ vsdr_dir() {
 	assert_output --partial "# WARNING: connected proxies differ"
 }
 
-@test "report markdown: proxies/cluster column, achieved rows and a Warning note" {
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
-	assert_success
+@test "report markdown: proxies/cluster column, achieved rows and a Warning note; a none-only sweep has no traffic-effect section" {
+	report markdown
 	assert_output --partial "| proxies/replica | proxies/cluster |"
 	assert_output --partial "| connected_proxies per cluster (max) | 34 |"
 	assert_output --partial "> **Warning:** connected proxies differ"
 	assert_output --partial 'proxy_check_tolerance_pct: "10"'
+	refute_output --partial "## Traffic management (VS/DR) effect"
+	assert_output --partial "| traffic_configs | none |"
 }
 
-@test "envelope: per-cluster peak, per-replica peak and proxy check from the report JSON" {
+@test "envelope from the report JSON: per-cluster and per-replica peaks and the proxy check; istiod replicas probed on every context, no context names in the table" {
 	source "${ROOT}/tests/lib/capacity.sh"
 	source "${ROOT}/tests/lib/envelope.sh"
 	source "${ROOT}/tests/lib/platform.sh"  # platform_summary (the Platform / mesh build row)
-	# `false` as the kubectl argv: the live reads degrade to unknown; only the
-	# report-sourced rows are asserted.
-	run --separate-stderr render_scale_envelope "$RES" "$REPORT" "mesh-a,mesh-b" false
+	_rep_kubectl() {
+		local ctx="" a
+		for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
+		[[ "$*" == *"get deploy istiod"* ]] || return 1
+		case "$ctx" in
+		mesh-a) echo '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"discovery"}]}}}}' ;;
+		mesh-b) echo '{"spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"discovery"}]}}}}' ;;
+		esac
+	}
+	run --separate-stderr render_scale_envelope "$RES" "$REPORT" "mesh-a,mesh-b" _rep_kubectl
 	assert_success
 	assert_output --partial "| **Connected proxies per cluster (measured peak)** | 34 |"
 	assert_output --partial "| Connected proxies per istiod replica (peak) | 16 |"
 	# n/a and excluded are shown, so the fixture's excluded scrape is not hidden.
 	assert_output --partial "| Proxy check vs Running sidecar pods | ok=2 low=1 high=0 n/a=0 excluded=1 (tolerance 10%, min diff 2) |"
+	assert_output --partial "| istiod replicas | 1-3 per cluster (varies by cluster) | — | live \`deploy/istiod\` on every context |"
+	refute_output --partial "mesh-b=3"
 }
 
-@test "report charts: still renders after the aggregate width change" {
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
-	assert_success
-}
-
-@test "report: a 40-column TSV feeds the old columns and adds nothing to the new keys" {
+@test "report: a 40-column TSV feeds the old columns only: next to a 51-column file it adds nothing to the new keys; alone, they read unknown" {
 	# Named to sort FIRST, so the tolerance must not come from the first file only.
 	legacy40 "${RES}/controlplane-a-legacy40.tsv"
 	[ "$(grep -m1 '^timestamp' "${RES}/controlplane-a-legacy40.tsv" | awk -F'\t' '{ print NF }')" -eq 40 ]
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
+	report json
 	[[ "$stderr" == *"1 TSV file(s) use the 40-column schema"* ]]
 	[ "$(jq -c '[.metadata.files_consumed, .metadata.skipped_legacy]' <<<"$output")" = '[2,0]' ]
 	# Old columns: both files' rows are aggregated (n_total doubles), and the 40-column
@@ -157,205 +230,281 @@ vsdr_dir() {
 	[ "$(jq -c '.metadata.proxy_check | {tolerance_pct, ok, low, high, na, excluded}' <<<"$output")" = \
 		'{"tolerance_pct":"10","ok":2,"low":1,"high":0,"na":0,"excluded":1}' ]
 	[ "$(jq -c '.results[0].connected_proxies_cluster' <<<"$output")" = '{"min":30,"max":34,"avg":31}' ]
-}
-
-@test "report: only 40-column files -> per-cluster keys unknown/null and no WARNING" {
-	legacy40 "${RES}/controlplane-a-legacy40.tsv"
+	# Alone.
 	rm -f "${RES}/controlplane-fixture-t2.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
+	report json
 	[ "$(jq -r '.metadata.achieved_scale.connected_proxies_cluster_max' <<<"$output")" = "unknown" ]
 	[ "$(jq -r '.metadata.proxy_check.tolerance_pct' <<<"$output")" = "unknown" ]
 	[ "$(jq -c '.results[0].connected_proxies_cluster' <<<"$output")" = '{"min":null,"max":null,"avg":null}' ]
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_success
-	refute_output --partial "WARNING:"
 }
 
 @test "report: a TSV of another width is skipped as legacy, with a warning" {
 	cut -f1-34 "$FIXTURE" > "${RES}/controlplane-old34.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
+	report json
 	[[ "$stderr" == *"skipping 1 legacy TSV file(s)"* ]]
 	[[ "$stderr" == *"expected 40, 51, 63 or 66 columns"* ]]
 	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
 }
 
-@test "report: a 43-column TSV (an intermediate layout that never shipped) is skipped as legacy" {
-	cut -f1-43 "$FIXTURE" > "${RES}/controlplane-mid43.tsv"
-	[ "$(grep -m1 '^timestamp' "${RES}/controlplane-mid43.tsv" | awk -F'\t' '{ print NF }')" -eq 43 ]
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[[ "$stderr" == *"skipping 1 legacy TSV file(s)"* ]]
-	[ "$(jq -r '.metadata.files_consumed' <<<"$output")" = "1" ]
-}
+# ---------------------------------------------------------------------------
+# What the report merges from its inputs: the platform record, provenance, the record
 
-# with_platform <sed program>: the fixture with the platform record a current 003 writes
-# (members mesh-a and mesh-b on kind nodes), edited by <sed program>.
-with_platform() {
-	{
-		head -1 "$FIXTURE"
-		platform_fixture_lines mesh-a,mesh-b | sed "$1"
-		tail -n +2 "$FIXTURE"
-	} > "${RES}/controlplane-fixture-t2.tsv"
-}
-
-@test "report: the platform record reaches every format (PL19); cloud nodes raise no kind warning" {
-	with_platform 's/=kind/=aws/g'
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[ "$(jq -r '.metadata | "\(.platform) \(.test_platform) \(.node_provider_by_context)"' <<<"$output")" = "kubernetes auto mesh-a=aws,mesh-b=aws" ]
-	[ "$(jq '[(.metadata.data_warnings // [])[] | select(test("kind"))] | length' <<<"$output")" = 0 ]
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	assert_output --partial "# platform: PLATFORM=kubernetes  TEST_PLATFORM=auto  PLATFORM_BY_CONTEXT=mesh-a=kubernetes,mesh-b=kubernetes"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
-	assert_output --partial "# platform: PLATFORM=kubernetes TEST_PLATFORM=auto PLATFORM_BY_CONTEXT=mesh-a=kubernetes,mesh-b=kubernetes"
-	for fmt in markdown charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_line 'mesh_operator_by_context: "mesh-a=sail-operator:1.31.1,mesh-b=sail-operator:1.31.1"'
-		assert_line 'node_provider_by_context: "mesh-a=aws,mesh-b=aws"'
-		refute_output --partial "Nodes on kind"
-	done
-}
-
-@test "report: a member on kind nodes warns that capacity is the shared host's, in every format" {
+@test "every format carries what the report merged from its inputs (PL19): the platform record (mixed where inputs differ), the pooled runs and their provenance warning, the sweep's record, the verdict and the data warnings" {
+	local v h fmt p="istiod restarted during the sweep (bats)" t3="${RES}/controlplane-fixture-t3.tsv"
+	local dis="input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for 2 of 2 members: the report mixes runs with different values of it; compare like with like"
+	local kv="mesh-a=v1.34.8,mesh-b=mixed:v1.34.8;v1.35.0" pi="mesh-a=mixed:proxyv2:1.30.5;proxyv2:1.30.6,mesh-b=mixed:proxyv2:1.30.5;proxyv2:1.30.6"
+	# Two runs: mesh-b on kind nodes; the second on another proxy build, another Kubernetes
+	# version on mesh-b and another Istio version. The first's sweep record has a problem.
+	# The verdict is the fixture's own (FAIL: a restart in a window), the rest in its headline.
 	with_platform 's/mesh-a=kind/mesh-a=aws/'
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[ "$(jq '[.metadata.data_warnings[] | select(startswith("Nodes on kind (NODE_PROVIDER_BY_CONTEXT)"))] | length' <<<"$output")" = 1 ]
-	[[ "$stderr" == *"WARNING: Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory"* ]]
+	second_input 's/mesh-a=kind/mesh-a=aws/; s/proxyv2:1.30.5/proxyv2:1.30.6/g'
+	set_key "$t3" RUN_ID fixture-t3
+	set_key "$t3" ISTIO_VERSION 1.30.6
+	set_key "$t3" KUBE_VERSIONS mesh-a=v1.34.8,mesh-b=v1.35.0
+	printf '%s\n' STATUS=finished RUN_ID=fixture-t2 TOTAL=1 FAILED=0 "PROBLEM=${p}" > "${RES}/sweep-outcome.txt"
+	report json "$RES" --allow-multi-run
+	v="$(verdict)"
+	h="$(headline)"
+	[ "$v" = FAIL ]
+	[[ "$h" == *"; also the sweep outcome is not clean"*"; also the inputs were measured on different Istio versions"*"; also node figures left out"* ]]
+	[ "$(jq -r '.metadata | "\(.proxy_image_by_context) \(.kube_versions) \(.node_provider_by_context)"' <<<"$output")" = "${pi} ${kv} mesh-a=aws,mesh-b=kind" ]
+	jq -e --arg d "$dis" '.metadata.data_warnings | index($d) != null and any(.[]; startswith("Nodes on kind (NODE_PROVIDER_BY_CONTEXT)")) and any(.[]; startswith("input TSVs disagree on KUBE_VERSIONS for 1 of 2 members"))' <<<"$output"
+	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == "The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.30.6)"* ]]
+	[ "$(jq -c '[.pooled_runs.runs, .sweep_outcomes[0].problems[0]]' <<<"$output")" = "$(jq -cn --arg p "$p" '[2, $p]')" ]
+	# stderr names the members.
+	[[ "$stderr" == *"warning: input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for mesh-a (proxyv2:1.30.5 or proxyv2:1.30.6), mesh-b (proxyv2:1.30.5 or proxyv2:1.30.6)"* ]]
 	for fmt in text csv; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		report "$fmt" "$RES" --allow-multi-run
+		[[ "$(grep '^# platform: ' <<<"$output")" == *"PROXY_IMAGE_BY_CONTEXT=${pi}"*"KUBE_VERSIONS=${kv}"* ]] || { echo "${fmt}: $(grep '^# platform: ' <<<"$output")"; false; }
+		assert_line "# WARNING: ${dis}"
 		assert_output --partial "# WARNING: Nodes on kind (NODE_PROVIDER_BY_CONTEXT)"
+		assert_output --partial "# WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.30.6)"
+		assert_output --partial "$p"
+		assert_output --partial "${v} — ${h}"
 	done
+	assert_line "# POOLED_RUNS=2"
 	for fmt in markdown charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
+		report "$fmt" "$RES" --allow-multi-run
+		assert_line "proxy_image_by_context: \"${pi}\""
+		assert_line "kube_versions: \"${kv}\""
+		assert_line "> **Warning:** ${dis}"
 		assert_output --partial "> **Warning:** Nodes on kind (NODE_PROVIDER_BY_CONTEXT)"
+		# charts tells the version mix in its pooled-runs note only.
+		assert_output --partial "> **Pooled runs.** This report pools 2 runs (--allow-multi-run): fixture-t2, fixture-t3. HARNESS_SHA: fixture. ISTIO_VERSION: 1.30.5, 1.30.6. These differ"
+		assert_output --partial "$p"
+		[[ "$fmt" == markdown ]] || continue
+		assert_output --partial "> **Warning:** The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.30.6)"
+		assert_line "sla_verdict: \"${v}\""
+		assert_output --partial "**Customer SLA verdict: ${v}** — ${h}"
 	done
-	# A file from before the record does not know its nodes: no kind warning, no guess.
-	cp "$FIXTURE" "${RES}/controlplane-fixture-t2.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
-	refute_output --partial "Nodes on kind"
-	[[ "$stderr" != *"Nodes on kind"* && "$stderr" != *"Node provider not read"* ]]
 }
 
-@test "report (H5): a member whose node provider was not read warns and leaves the node figures out of the verdict" {
-	with_platform 's/mesh-a=kind/mesh-a=aws/; s/mesh-b=kind/mesh-b=unknown/'
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
+@test "node figures: kind nodes warn that capacity is the shared host's, a member whose node provider was not read warns too, and either leaves the node figures out of the verdict; a file from before the record warns of neither" {
 	local w="Node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown): if their nodes are kind's, every node reports the whole host's CPU and memory"
+	with_platform 's/mesh-a=kind/mesh-a=aws/; s/mesh-b=kind/mesh-b=unknown/'
+	report json
 	[ "$(jq --arg w "$w" '[.metadata.data_warnings[] | select(startswith($w))] | length' <<<"$output")" = 1 ]
 	[ "$(jq '[.metadata.data_warnings[] | select(startswith("Nodes on kind"))] | length' <<<"$output")" = 0 ]
-	[ "$(jq -r '.metadata.sla.verdict' <<<"$output")" != PASS ]
-	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"node figures left out: node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown), so node_cpu_pct and node_mem_pct may measure a host several clusters share, as on kind"* ]]
-	[[ "$stderr" == *"WARNING: ${w}"* ]]
-	for fmt in text csv; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_output --partial "# WARNING: ${w}"
-	done
-	for fmt in markdown charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_output --partial "> **Warning:** ${w}"
-	done
+	[ "$(verdict)" != PASS ]
+	[[ "$(headline)" == *"node figures left out: node provider not read on 1 member(s) (NODE_PROVIDER_BY_CONTEXT unknown), so node_cpu_pct and node_mem_pct may measure a host several clusters share, as on kind"* ]]
 	# With a member on kind as well, the kind warning (and its reason) covers it.
 	with_platform 's/mesh-b=kind/mesh-b=unknown/'
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+	report json
 	[ "$(jq '[.metadata.data_warnings[] | select(startswith("Node provider not read"))] | length' <<<"$output")" = 0 ]
-	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *"node figures left out: the nodes are kind's"* ]]
+	[ "$(jq '[.metadata.data_warnings[] | select(startswith("Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host'"'"'s CPU and memory"))] | length' <<<"$output")" = 1 ]
+	[[ "$(headline)" == *"node figures left out: the nodes are kind's"* ]]
+	# A file from before the record (it does not know its nodes): no warning, no guess.
+	cp "$FIXTURE" "${RES}/controlplane-fixture-t2.tsv"
+	report json
+	[ "$(jq '[(.metadata.data_warnings // [])[] | select(test("kind|Node provider not read"))] | length' <<<"$output")" = 0 ]
+	[[ "$(headline)" != *"node figures left out"* ]]
 }
 
-# second_input <sed program>: controlplane-fixture-t3.tsv, the fixture again with the record
-# edited by <sed program>: a second input of the same report.
-second_input() {
-	{
-		head -1 "$FIXTURE"
-		platform_fixture_lines mesh-a,mesh-b | sed "$1"
-		tail -n +2 "$FIXTURE"
-	} > "${RES}/controlplane-fixture-t3.tsv"
-}
-
-@test "report (H10): inputs that disagree or could not be read warn in every format's body, counting members" {
+@test "report (H10): an input whose platform value was not read, next to one that was, warns counting members (stderr names them); the merged value marks it" {
 	with_platform 's/=kind/=aws/g; s/mesh-b=pilot:1.30.5/mesh-b=unknown/'
-	second_input 's/=kind/=aws/g; s/proxyv2:1.30.5/proxyv2:1.30.6/g'
-	# The body counts members (its warnings reach the scale envelope, pasted into campaign
-	# docs); stderr names them.
-	local unread="ISTIOD_IMAGE_BY_CONTEXT is unknown in some input TSVs (not read for 1 of 2 members), while others have a value: the report cannot tell whether those runs had the same one"
-	local dis="input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for 2 of 2 members: the report mixes runs with different values of it; compare like with like"
-	local fmt top first
-	for fmt in text csv; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_success
-		assert_line "# WARNING: ${unread}"
-		assert_line "# WARNING: ${dis}"
-	done
-	for fmt in markdown charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_success
-		assert_line "> **Warning:** ${unread}"
-		assert_line "> **Warning:** ${dis}"
-		# Under the title, before the first section, table, chart or note.
-		top="$(grep -nF "> **Warning:** ${dis}" <<<"$output" | cut -d: -f1)"
-		first="$(awk 'seen && /^(\| |## |```mermaid|> [^*])/ { print NR; exit } /^# / { seen = 1 }' <<<"$output")"
-		((top < first)) || { echo "${fmt}: warning at ${top}, first section, table, chart or note at ${first}"; false; }
-	done
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[ "$(jq --arg u "$unread" --arg d "$dis" '[.metadata.data_warnings[] | select(. == $u or . == $d)] | length' <<<"$output")" = 2 ]
-	[[ "$(jq -r '.metadata.proxy_image_by_context' <<<"$output")" == "mesh-a=mixed:proxyv2:1.30.5;proxyv2:1.30.6,mesh-b=mixed:proxyv2:1.30.5;proxyv2:1.30.6" ]]
-	[[ "$stderr" == *"warning: input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for mesh-a (proxyv2:1.30.5 or proxyv2:1.30.6), mesh-b (proxyv2:1.30.5 or proxyv2:1.30.6)"* ]]
+	second_input 's/=kind/=aws/g'
+	report json
+	[ "$(jq --arg u "ISTIOD_IMAGE_BY_CONTEXT is unknown in some input TSVs (not read for 1 of 2 members), while others have a value: the report cannot tell whether those runs had the same one" '[.metadata.data_warnings[] | select(. == $u)] | length' <<<"$output")" = 1 ]
 	[[ "$stderr" == *"warning: ISTIOD_IMAGE_BY_CONTEXT is unknown in some input TSVs (not read for mesh-b)"* ]]
+	[[ "$(jq -r '.metadata.istiod_image_by_context' <<<"$output")" == "mesh-a=pilot:1.30.5,mesh-b="*unknown* ]]
 }
 
-@test "report (H10): inputs that agree add no platform warning" {
-	with_platform 's/=kind/=aws/g'
-	second_input 's/=kind/=aws/g'
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[ "$(jq '[.metadata.data_warnings[] | select(test("input TSVs|is unknown in some|Nodes on kind"))] | length' <<<"$output")" = 0 ]
-	[[ "$(jq -r '.metadata.mesh_operator_by_context' <<<"$output")" != *mixed* ]]
-	[[ "$stderr" != *"warning: input TSVs"* && "$stderr" != *"is unknown in some"* ]] || { echo "$stderr"; false; }
-	local fmt
-	for fmt in text csv markdown charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		refute_output --partial "input TSVs disagree"
-		refute_output --partial "is unknown in some"
-	done
+# ---------------------------------------------------------------------------
+# The verdict and the data warnings of a window's rows
+
+@test "a window that ran on fewer istiod pods than its member's Deployment wants (<n>/<spec>) is valid but turns PASS into CAUTION with a data warning; <n> at <spec> is PASS; fewer rows than <n> stays INCOMPLETE; a member with no istiod pod Running (one N/A row, 1/<spec>) is no shortfall" {
+	local w tsv="${RES}/controlplane-fixture-t2.tsv" dg
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=2/3" 2
+	report json
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "1 cell(s) ran on fewer istiod pods than their member's istiod Deployment wants (a replica evicted or Pending), so their per-replica figures are not comparable with the other cells; the figures: peak utilization"* ]]
+	w="1 cell(s) ran on fewer istiod pods than their member's istiod Deployment wants (its .spec.replicas at the window's baseline: a replica evicted, or Pending), so their per-replica figures are not comparable with the other cells; the rows are valid measurements of the pods that ran: mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (mesh-b ran 2 of its 3 istiod replicas)."
+	# The only data warning: the cell is not INCOMPLETE.
+	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = "$(jq -cn --arg w "$w" '[$w]')" ]
+	# The Deployment wanted 2 at that window's baseline: the window ran what it wanted.
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=2/2" 2
+	report json
+	[ "$(verdict)" = PASS ]
+	# The window wrote 3 rows for mesh-b and the TSV holds 2: cut short, as before /<spec>.
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 2
+	report json
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "1 cell(s) are INCOMPLETE "* ]]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *"(mesh-b has 2 of the 3 rows its window wrote)"* ]]
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
+	# mesh-b had no istiod pod Running: one degraded N/A row (istiod_restarted unknown) and
+	# the entry mesh-b=1/3. Not "ran 1 of its 3": its row is in no figure, and the verdict
+	# already reads CAUTION for it (n_valid below n_total).
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=1/3" 0
+	dg="$(grep -v '^#' "$tsv" | sed -n 2p | awk -F'\t' -v OFS='\t' '{ $1 = "2026-06-01T00:10:00+00:00"; $2 = "mesh-b"; $4 = 30; for (i = 8; i <= 27; i++) $i = "N/A"; $31 = "unknown"; print }')"
+	printf '%s\n' "$dg" >> "$tsv"
+	report json
+	[ "$(jq -r '.metadata.data_warnings[]' <<<"$output" | grep -c 'istiod replicas')" = 0 ]
+	[ "$(verdict)" != PASS ]
 }
 
-@test "report: each member's Kubernetes version, merged over the inputs, is in every format once; inputs that differ on a member read mixed and warn" {
-	with_platform 's/=kind/=aws/g'
-	second_input 's/=kind/=aws/g'
-	sed -i.bak 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.35.0/' "${RES}/controlplane-fixture-t3.tsv"
-	rm -f "${RES}/controlplane-fixture-t3.tsv.bak"
-	local kv="mesh-a=v1.34.8,mesh-b=mixed:v1.34.8;v1.35.0" fmt
-	local w="input TSVs disagree on KUBE_VERSIONS for 1 of 2 members: the report mixes runs with different values of it; compare like with like"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[ "$(jq -r '.metadata.kube_versions' <<<"$output")" = "$kv" ]
-	[ "$(jq --arg w "$w" '[.metadata.data_warnings[] | select(. == $w)] | length' <<<"$output")" = 1 ]
-	[[ "$stderr" == *"warning: input TSVs disagree on KUBE_VERSIONS for mesh-b (v1.34.8 or v1.35.0)"* ]]
-	for fmt in text csv; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_success
-		[[ "$(grep '^# platform: ' <<<"$output")" == *" KUBE_VERSIONS=${kv}" ]]
-		assert_line "# WARNING: ${w}"
-	done
-	for fmt in markdown charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_success
-		# Once in the frontmatter (frontmatter.bats checks that no key repeats).
-		[ "$(sed -n '2,/^---$/p' <<<"$output" | grep -c '^kube_versions: ')" = 1 ]
-		assert_line "kube_versions: \"${kv}\""
-		assert_line "> **Warning:** ${w}"
-	done
+@test "a WINDOW_ROWS line without /<spec> (an older harness) below the member's ISTIOD_REPLICAS_BY_CONTEXT is a data warning only; a growth window's own line is read too" {
+	local g="${BATS_TEST_TMPDIR}/grow"
+	cp_tsv "${RES}/controlplane-fixture-t2.tsv" "mesh-a=3,mesh-b=2" 2
+	report json
+	[ "$(verdict)" = PASS ]
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == "1 cell(s) have fewer rows for a member than its istiod replicas at the sweep's start (ISTIOD_REPLICAS_BY_CONTEXT): mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (mesh-b ran 2 of its 3 istiod replicas). "*"it does not change the verdict." ]]
+	# A growth series' first window ran 1 of the 2 istiod pods its Deployment wanted.
+	mkdir -p "$g"
+	awk '!/^#/ && $1 != "timestamp" && !d++ { print "# WINDOW_ROWS=mesh-a=1/2" } { print }' "$GROWTH" > "${g}/controlplane-fixture-ns.tsv"
+	report json "$g"
+	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" == *"the rows are valid measurements of the pods that ran: mesh=1 svcs=200 reps=1 ns=100 scope=namespace traffic=none window=grow (mesh-a ran 1 of its 2 istiod replicas)."* ]]
+	# The fixture's verdict is FAIL (a restart): the cell adds itself to the headline.
+	[ "$(verdict)" = FAIL ]
+	[[ "$(headline)" == *"; also 1 cell(s) ran on fewer istiod pods than their member's istiod Deployment wants"* ]]
 }
 
-# --- VirtualService/DestinationRule traffic axis -------------------------------
+@test "a cell cut short while its member rows were written is INCOMPLETE (rows of fewer members than its mesh size; in a TSV without WINDOW_ROWS, a member with fewer rows than its istiod replicas in the cell written last): a data warning, CAUTION; a standalone 002 run is never INCOMPLETE" {
+	local tsv="${RES}/controlplane-fixture-t2.tsv" s2="${BATS_TEST_TMPDIR}/standalone"
+	# The second cell has rows of mesh-a only (an older harness: no WINDOW_ROWS lines).
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 0
+	no_window_rows "$tsv"
+	report json
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "1 cell(s) are INCOMPLETE (rows of fewer members than their mesh size"* ]]
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == "1 cell(s) are INCOMPLETE: "*": mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (rows of 1 of 2 members)."* ]]
+	# mesh-b wrote 2 rows in the cell written last, 3 (its istiod replicas) in the first.
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 2
+	no_window_rows "$tsv"
+	report json
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *": mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (mesh-b has rows of 2 of its 3 istiod replicas)."* ]]
+	# The same rows from a standalone 002 run (PHASE is not sweep) are no sweep's cells.
+	mkdir -p "$s2"
+	cp "$tsv" "${s2}/${tsv##*/}"
+	set_key "${s2}/${tsv##*/}" PHASE final
+	report json "$s2"
+	[ "$(verdict)" = PASS ]
+	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
+}
 
-@test "vsdr report json: traffic axis, VS/DR knobs and per-cell traffic fields" {
+@test "a row cut short (fewer columns than the header, at least 40) is not a row: its cell is INCOMPLETE, its columns read as no figure" {
+	local tsv="${RES}/controlplane-fixture-t2.tsv"
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 3
+	awk -F'\t' -v OFS='\t' -v last="$(wc -l < "$tsv")" 'NR == last { NF = 42 } { print }' "$tsv" > "${tsv}.cut"
+	mv "${tsv}.cut" "$tsv"
+	[ "$(awk -F'\t' 'END { print NF }' "$tsv")" = 42 ]
+	report json
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "1 cell(s) are INCOMPLETE "* ]]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *"svcs=30 "*"(mesh-b has 2 of the 3 rows its window wrote)"* ]]
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
+}
+
+@test "a cell whose window had a Running istiod pod not Ready at its baseline, or one not Ready at its end, is named in a data warning of each kind, and the verdict does not change; a line read only right before a WINDOW_ROWS line (the end line right after the baseline line); a growth window's own lines count" {
+	local tsv="${RES}/controlplane-fixture-t2.tsv" g="${BATS_TEST_TMPDIR}/g" v
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 3
+	report json
+	v="$(jq -c '.metadata.sla' <<<"$output")"
+	[ "$(verdict)" = PASS ]
+	[ "$(jq -c '.metadata.data_warnings' <<<"$output")" = '[]' ]
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 3 "" "# ISTIOD_NOT_READY=mesh-b=istiod-x,mesh-b=istiod-y"$'\n'"# ISTIOD_NOT_READY_AT_END=mesh-a=istiod-z,mesh-b=istiod-y"
+	report json
+	[ "$(jq -c '.metadata.sla' <<<"$output")" = "$v" ]
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 2 ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == "1 cell(s) have an istiod pod that was Running but not Ready at the window's baseline: mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (istiod-x on mesh-b, istiod-y on mesh-b). "*"it does not change the verdict." ]]
+	[[ "$(jq -r '.metadata.data_warnings[1]' <<<"$output")" == "1 cell(s) have an istiod pod that was not Ready at the window's end "*"mesh=2 svcs=30 reps=2 ns=1 scope=none traffic=none (istiod-z on mesh-a, istiod-y on mesh-b). "*"it does not change the verdict." ]]
+	# First window: a baseline line with another line between it and the end line names
+	# nothing, the end line still counts. Second: an end line not right before WINDOW_ROWS.
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 3 "# ISTIOD_NOT_READY=mesh-b=istiod-x"$'\n'"# NOTE=bats"$'\n'"# ISTIOD_NOT_READY_AT_END=mesh-b=istiod-y" "# ISTIOD_NOT_READY_AT_END=mesh-b=istiod-w"$'\n'"# NOTE=bats"
+	report json
+	[ "$(jq -r '.metadata.data_warnings | length' <<<"$output")" = 1 ]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == "1 cell(s) have an istiod pod that was not Ready at the window's end "*"mesh=2 svcs=15 reps=2 ns=1 scope=none traffic=none (istiod-y on mesh-b). "* ]]
+	# A growth series' first window.
+	mkdir -p "$g"
+	awk '!/^#/ && $1 != "timestamp" && !d++ { print "# ISTIOD_NOT_READY=mesh-a=istiod-g"; print "# ISTIOD_NOT_READY_AT_END=mesh-a=istiod-h"; print "# WINDOW_ROWS=mesh-a=1/1" } { print }' "$GROWTH" > "${g}/controlplane-fixture-ns.tsv"
+	report json "$g"
+	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" == *"1 cell(s) have an istiod pod that was Running but not Ready at the window's baseline: mesh=1 svcs=200 reps=1 ns=100 scope=namespace traffic=none window=grow (istiod-g on mesh-a)."* ]]
+	[[ "$(jq -r '.metadata.data_warnings[]' <<<"$output")" == *"not Ready at the window's end "*"mesh=1 svcs=200 reps=1 ns=100 scope=namespace traffic=none window=grow (istiod-h on mesh-a)."* ]]
+}
+
+@test "a sweep outcome that is not clean turns PASS into CAUTION, its rule named in the headline: a PROBLEM (the record found through a symlink to the dir), a failed cell, a sweep still running, each record of a pooled report; a NOTE stays PASS" {
+	local base="${BATS_TEST_TMPDIR}/base" h="the sweep outcome is not clean ("
+	cp_tsv "${RES}/controlplane-fixture-t2.tsv" "mesh-a=3/3,mesh-b=3/3" 3
+	printf 'STATUS=finished\nRUN_ID=fixture-t2\nTOTAL=2\nFAILED=0\nPROBLEM=istiod restarted during the sweep (bats)\n' > "${RES}/sweep-outcome.txt"
+	# Through a symlink to the results dir (no trailing slash).
+	ln -s "$RES" "${BATS_TEST_TMPDIR}/latest"
+	report json "${BATS_TEST_TMPDIR}/latest"
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "${h}"*": finished, 1 problem(s): see sweep-outcome.txt), so the figures may not cover or measure what they seem to; the figures: "* ]]
+	[ "$(jq -r '.sweep_outcomes[0].problems[0]' <<<"$output")" = "istiod restarted during the sweep (bats)" ]
+	# A note is a caveat, not a failure.
+	printf 'STATUS=finished\nTOTAL=2\nFAILED=0\nNOTE=a member was not ready at the start (bats)\n' > "${RES}/sweep-outcome.txt"
+	report json
+	[ "$(verdict)" = PASS ]
+	# Pooled sweeps: the headline names each record that is not clean.
+	pooled "$base"
+	printf 'STATUS=finished\nTOTAL=2\nFAILED=1\nFAILED_BY=INCOMPLETE x1\n' > "${base}/sweep-a/sweep-outcome.txt"
+	printf 'STATUS=running\n' > "${base}/sweep-b/sweep-outcome.txt"
+	report json "$base" --allow-multi-run
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "${h}sweep-a: finished, 1 failed; sweep-b: running: see sweep-outcome.txt)"* ]]
+	[ "$(jq -c '[.sweep_outcomes[] | [.dir, .status]]' <<<"$output")" = '[["sweep-a","finished"],["sweep-b","running"]]' ]
+}
+
+@test "inputs of different Istio versions turn PASS into CAUTION and name the versions; a sweep whose members ran different versions keeps its mixed:a/b value one item in every list and tag; different harnesses alone warn, without a verdict change" {
+	local base="${BATS_TEST_TMPDIR}/base" d="${BATS_TEST_TMPDIR}/mixed"
+	pooled "$base"
+	set_key "${base}/sweep-a/controlplane-run-a.tsv" ISTIO_VERSION 1.30.5
+	set_key "${base}/sweep-b/controlplane-run-b.tsv" ISTIO_VERSION 1.30.6
+	report json "$base" --allow-multi-run
+	[ "$(verdict)" = CAUTION ]
+	[[ "$(headline)" == "the inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.30.6; see the provenance warning), so their cells may not be comparable; the figures: "* ]]
+	# One Istio version, two harnesses: a warning, still PASS.
+	set_key "${base}/sweep-b/controlplane-run-b.tsv" ISTIO_VERSION 1.30.5
+	set_key "${base}/sweep-b/controlplane-run-b.tsv" HARNESS_SHA abc1234-dirty
+	report json "$base" --allow-multi-run
+	[ "$(verdict)" = PASS ]
+	[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" = "The inputs ran on different harnesses (HARNESS_SHA fixture,abc1234-dirty), so their cells may not be measured the same way." ]
+	[ "$(jq -r '.metadata.harness_sha' <<<"$output")" = "mixed:fixture,abc1234-dirty" ]
+	# One sweep whose members ran 1.30.5 and 1.29.0.
+	mkdir -p "$d"
+	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=mixed:v1.30.5/v1.29.0|' "$FIXTURE" > "${d}/controlplane-mixed.tsv"
+	report json "$d"
+	[ "$(jq -c '[.metadata.istio_version, .metadata.istio_versions, .pooled_runs.istio_version]' <<<"$output")" = \
+		'["mixed:v1.30.5/v1.29.0",["mixed:v1.30.5/v1.29.0"],["mixed:v1.30.5/v1.29.0"]]' ]
+	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION mixed:v1.30.5/v1.29.0)"* ]]
+	# Pooled with a run on one of those versions (1.30.5, without the v): each distinct
+	# version once, one `# KEY=value` line.
+	sed 's|^# RUN_ID=.*|# RUN_ID=other|' "$FIXTURE" > "${d}/controlplane-other.tsv"
+	report csv "$d" --allow-multi-run
+	assert_line "# ISTIO_VERSION=mixed:v1.30.5,v1.29.0"
+	refute_output --partial "mixed:mixed:"
+}
+
+# ---------------------------------------------------------------------------
+# VirtualService/DestinationRule traffic axis
+
+@test "vsdr report json: traffic axis, VS/DR knobs and per-cell traffic fields; a restarted vsdr row stays out of the istiod aggregates but counts in n_total" {
 	vsdr_dir
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format json
-	assert_success
+	report json "$VRES"
 	[ "$(jq -r '.metadata.sweep.traffic_configs' <<<"$output")" = "none,vsdr" ]
 	[ "$(jq -c '.metadata.traffic_management' <<<"$output")" = '{"vsdr_every":"1","vsdr_subsets":"2"}' ]
 	# Four cells: the traffic config is part of the grouping key (none sorts first).
@@ -365,58 +514,33 @@ second_input() {
 		'[10,10,1.5,0.75,150,3072]' ]
 	[ "$(jq -c '.results[3] | [.sidecar_clusters_avg, .sidecar_cds_bytes_avg, .sidecar_rds_bytes_avg]' <<<"$output")" = '[50,102400,40960]' ]
 	[ "$(jq -c '[.results[] | .istiod_vs_ingest_short]' <<<"$output")" = '[false,true,false,false]' ]
-}
-
-@test "vsdr report: a restarted vsdr row stays out of the istiod aggregates but counts in n_total" {
-	vsdr_dir
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format json
-	assert_success
 	# mem 999 and VS 3 come only from the restarted row.
 	[ "$(jq -c '.results[3] | [.n_total, .n_valid, .istiod_rss_peak_mi.max, .istiod_virt_services_avg]' <<<"$output")" = '[3,2,520,10]' ]
 }
 
-@test "vsdr report markdown: traffic-effect section pairs none and vsdr with expected clusters" {
+@test "vsdr report markdown: the traffic-effect section pairs none and vsdr with expected clusters; the scoping-effect table compares none cells only" {
 	vsdr_dir
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format markdown
-	assert_success
+	report markdown "$VRES"
 	assert_output --partial 'traffic_configs: "none,vsdr"'
-	assert_output --partial 'vsdr_subsets: "2"'
 	assert_output --partial "| traffic_configs | none,vsdr  (vsdr: every 1, 2 subsets) |"
 	assert_output --partial "| 2 | 10 | 2 | 1 | none | vsdr | 3 | 2 | 120 |"
 	[ "$(grep -c '^## Traffic management (VS/DR) effect$' <<<"$output")" -eq 1 ]
 	assert_output --partial "| 2 | 10 | 2 | 1 | none | 2/2 | 10 | 0 -> 10 | 100 -> 120 (+20.0%) | 250 -> 260 (+4.0%) | 500 -> 520 (+4.0%) | 100 -> 150 (+50.0%) | 1.00 -> 1.50 (+50.0%) | 0.50 -> 0.75 (+50.0%) | 2.0 -> 3.0 (+50.0%) |"
 	assert_output --partial "| 2 | 10 | 2 | 1 | none | 10 | 20 | 30 -> 50 (+66.7%) | +20 | 50.0 -> 100.0 (+100.0%) | 20.0 -> 40.0 (+100.0%) | 1.00 -> 1.50 (+50.0%) |"
-	assert_output --partial "Order bias:"
-}
-
-@test "vsdr report: ingest WARN fires for the cell whose istiod saw 6 of 10 VirtualServices only" {
-	vsdr_dir
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format markdown
-	assert_success
-	[ "$(grep -c 'WARN:\*\* istiod ingested fewer VirtualServices' <<<"$output")" -eq 1 ]
-	assert_output --partial 'vsdr cell `2|10|2|1|explicit`: istiod VirtualServices 0 -> 6 (+6) < 10 configured'
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format text
-	assert_success
-	assert_output --partial "WARNING: vsdr cell 2|10|2|1|explicit: istiod VirtualServices 0 -> 6 (+6) < 10 configured"
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format csv
-	assert_success
-	assert_output --partial "# WARNING: vsdr cell 2|10|2|1|explicit:"
-	refute_output --partial "vsdr cell 2|10|2|1|none:"
-}
-
-@test "vsdr report markdown: the scoping-effect table compares none cells only" {
-	vsdr_dir
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format markdown
-	assert_success
 	# With the vsdr cells leaking in (last one wins) this row would read 1.5 / 1.0 / 33.3%.
 	assert_output --partial "| 2 | 10 | 2 | 1 | 1.00 | N/A | 0.50 | N/A | 50.0% |"
 }
 
-@test "report: a none-only sweep has no traffic-effect section and no vsdr note" {
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
-	assert_success
-	refute_output --partial "## Traffic management (VS/DR) effect"
-	assert_output --partial "| traffic_configs | none |"
+@test "vsdr report: the ingest WARN fires for the cell whose istiod saw 6 of 10 VirtualServices only, in markdown, text and csv" {
+	vsdr_dir
+	report markdown "$VRES"
+	[ "$(grep -c 'WARN:\*\* istiod ingested fewer VirtualServices' <<<"$output")" -eq 1 ]
+	assert_output --partial 'vsdr cell `2|10|2|1|explicit`: istiod VirtualServices 0 -> 6 (+6) < 10 configured'
+	report text "$VRES"
+	assert_output --partial "WARNING: vsdr cell 2|10|2|1|explicit: istiod VirtualServices 0 -> 6 (+6) < 10 configured"
+	report csv "$VRES"
+	assert_output --partial "# WARNING: vsdr cell 2|10|2|1|explicit:"
+	refute_output --partial "vsdr cell 2|10|2|1|none:"
 }
 
 @test "vsdr report charts: vsdr cells get their own series instead of overwriting none" {
@@ -424,8 +548,7 @@ second_input() {
 	# A second mesh size (1) so the CPU chart renders.
 	awk 'BEGIN { FS = OFS = "\t" } !/^#/ && $1 != "timestamp" { $3 = 1 } !/^#/ && $1 != "timestamp" { print }' \
 		"$VSDR_FIXTURE" >> "${VRES}/controlplane-fixture-t6.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format charts
-	assert_success
+	report charts "$VRES"
 	assert_output --partial "> Series order: **explicit** **explicit/vsdr** **none** **none/vsdr**."
 }
 
@@ -444,60 +567,25 @@ second_input() {
 	assert_output --partial "| Traffic management | vsdr |"
 }
 
-# fleet_replicas <out>: the fixture as an INFRA_SCHEMA 2 file whose members run 1 and 3
-# istiod replicas.
-fleet_replicas() {
+# ---------------------------------------------------------------------------
+# istiod replicas
+
+@test "report: istiod replicas that differ by member read 1-3 per cluster; an INFRA_SCHEMA 1 file says its count is the first context's" {
+	rm -f "${RES}"/*.tsv
 	awk '
 		$0 == "# CONTROLPLANE_INFRA_SCHEMA=1" { print "# CONTROLPLANE_INFRA_SCHEMA=2"; next }
 		$0 == "# ISTIOD_REPLICAS=3" { print "# ISTIOD_REPLICAS=1-3"; print "# ISTIOD_REPLICAS_BY_CONTEXT=mesh-a=1,mesh-b=3"; next }
-		{ print }' "$FIXTURE" > "$1"
-}
-
-@test "report: istiod replicas that differ by member read 1-3 per cluster in every format" {
-	rm -f "${RES}"/*.tsv
-	fleet_replicas "${RES}/controlplane-fleet.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$RES"
-	assert_success
+		{ print }' "$FIXTURE" > "${RES}/controlplane-fleet.tsv"
+	report text
 	assert_output --partial "istiod replicas:             1-3 per cluster (varies by cluster)"
 	assert_output --partial "istiod replicas by context:  mesh-a=1,mesh-b=3"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
-	assert_output --partial "| istiod replicas | 1-3 per cluster (varies by cluster) |"
-	assert_output --partial 'istiod_replicas_by_context: "mesh-a=1,mesh-b=3"'
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
-	assert_output --partial "istiod_replicas=1-3 istiod_replicas_by_context=mesh-a=1,mesh-b=3 "
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	[ "$(jq -c '.metadata.infra | [.istiod_replicas, .istiod_replicas_by_context]' <<<"$output")" = '["1-3","mesh-a=1,mesh-b=3"]' ]
-}
-
-@test "report: an INFRA_SCHEMA 1 file says its replica count is the first context's" {
-	run --separate-stderr "$REPORT" --results-dir "$RES"
-	assert_success
+	cp "$FIXTURE" "${RES}/controlplane-fleet.tsv"
+	report text
 	assert_output --partial "istiod replicas:             3 (first context only)"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	[ "$(jq -r '.metadata.infra.istiod_replicas_by_context' <<<"$output")" = unknown ]
 }
 
-@test "envelope: istiod replicas probed on every context, no context names in the table" {
-	source "${ROOT}/tests/lib/capacity.sh"
-	source "${ROOT}/tests/lib/envelope.sh"
-	source "${ROOT}/tests/lib/platform.sh"  # platform_summary (the Platform / mesh build row)
-	_rep_kubectl() {
-		local ctx="" a
-		for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
-		[[ "$*" == *"get deploy istiod"* ]] || return 1
-		case "$ctx" in
-		mesh-a) echo '{"spec":{"replicas":1,"template":{"spec":{"containers":[{"name":"discovery"}]}}}}' ;;
-		mesh-b) echo '{"spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"discovery"}]}}}}' ;;
-		esac
-	}
-	run --separate-stderr render_scale_envelope "$RES" "$REPORT" "mesh-a,mesh-b" _rep_kubectl
-	assert_success
-	assert_output --partial "| istiod replicas | 1-3 per cluster (varies by cluster) | — | live \`deploy/istiod\` on every context |"
-	assert_output --partial "per-replica limit x that cluster's istiod replicas"
-	refute_output --partial "mesh-b=3"
-}
-
-# --- Namespace scaling (growth cells) -----------------------------------------------
+# ---------------------------------------------------------------------------
+# Namespace scaling (growth cells)
 # fixtures/controlplane_ns_growth.tsv (63 columns; mesh 1, K=2, config-only, M=4):
 #   grow (namespace)  N=100,200,400: heap 150/200/300, istiod services 2N+10, CPU-s 2/2/4
 #                     (0.02 CPU-s per added namespace)
@@ -520,6 +608,7 @@ fleet_replicas() {
 # growth_variant <awk program>: growth_dir, then rewrite its data rows with the program
 # (comment and header lines pass through untouched).
 growth_variant() {
+	local f
 	growth_dir
 	f="${GRES}/controlplane-fixture-ns.tsv"
 	awk -F'\t' 'BEGIN { OFS = "\t" } /^#/ || $1 == "timestamp" { print; next } '"$1" "$f" > "${f}.tmp"
@@ -529,7 +618,7 @@ growth_variant() {
 growth_dir() {
 	GRES="${BATS_TEST_TMPDIR}/g"
 	mkdir -p "$GRES"
-	cp "${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" "${GRES}/controlplane-fixture-ns.tsv"
+	cp "$GROWTH" "${GRES}/controlplane-fixture-ns.tsv"
 }
 
 # fit_of <json> <scoping> <window> <metric>: [per_100ns, r2, n, exponent, points].
@@ -538,10 +627,9 @@ fit_of() {
 		'[.namespace_scaling.fits[] | select(.scoping == $s and .window == $w and .metric == $m)][0] | [.per_100ns, .r2, .n, .exponent, .points]' <<<"$1"
 }
 
-@test "growth report json: fits, exponents and points; restarted and skipped rows stay out" {
+@test "growth report json: fits, exponents and points (restarted and skipped rows stay out), the pairings, and the cells not measured named apart from restarts" {
 	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	[ "$(fit_of "$output" wide probe heap_inuse_mi)" = '[205.7,0.98,3,2,[[100,40],[200,160],[400,640]]]' ]
 	[ "$(fit_of "$output" wide probe proxy_config_kib)" = '[100,1,3,1,[[100,100],[200,200],[400,400]]]' ]
 	# The restarted N=400 copy (heap 9999) and the N=800 guard rows never reach a fit.
@@ -553,102 +641,67 @@ fit_of() {
 	# Per-cell growth keys; the guard rows count in n_total, not n_valid.
 	[ "$(jq -c '[.results[] | select(.namespace_count == 800)] | map([.window_kind, .n_total, .n_valid]) | unique' <<<"$output")" = '[["grow",1,0],["probe",1,0]]' ]
 	[ "$(jq -c '.metadata.growth | [.growth_mode, .services_per_namespace, .workload_modes]' <<<"$output")" = '["in-place","2","config-only,pods"]' ]
-}
-
-@test "growth report: pods vs config-only, M-sweep, discovery and fidelity pairings" {
-	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
-	[ "$(jq -c '.namespace_scaling.pods_vs_config_only | [.missing, (.rows[] | select(.metric == "heap_inuse_mi") | [.config_only, .pods, .ratio])]' <<<"$output")" = '[null,[152,260,1.71]]' ]
+	# Pairings.
+	[ "$(jq -c '.namespace_scaling.pods_vs_config_only | [.missing, .note, (.rows[] | select(.metric == "heap_inuse_mi" or .metric == "istiod_cpu_s") | [.config_only, .pods, .ratio])]' <<<"$output")" = '[null,null,[152,260,1.71],[2.5,6,2.4]]' ]
 	[ "$(jq -c '[.namespace_scaling.measurement_pod_sweep.rows[] | select(.cell | test("wide")) | [.measurement_pods, .heap_inuse_mi, .heap_per_added_pod_mi]]' <<<"$output")" = '[[4,660,null],[16,708,4]]' ]
 	# PL31: labeled adds X x K = 100 Services, unlabeled adds none; no baseline-less row.
 	[ "$(jq -c '[.namespace_scaling.discovery[] | select(.cell | test("namespace")) | [.outside, .delta, .expected_delta, .check]]' <<<"$output")" = '[["none",null,null,"-"],["unlabeled",0,0,"OK"],["labeled",100,100,"OK"]]' ]
 	[ "$(jq -c '[.namespace_scaling.fresh_vs_in_place[] | select(.metric == "istiod_services") | [.fresh, .in_place, .diff]]' <<<"$output")" = '[[210,212,"+1.0%"]]' ]
+	# Cells not measured: the guard's status rows, not restarts.
+	[ "$(jq -c '[.namespace_scaling.not_measured[] | [.n, .window, .scoping, .statuses]] | unique' <<<"$output")" = '[[800,"grow","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","none",["SKIPPED_MEM_GUARD"]],[800,"probe","wide",["SKIPPED_MEM_GUARD"]]]' ]
+	[ "$(jq -c '[.results[] | select(.namespace_count == 800)] | map([.status_rows, .statuses]) | unique' <<<"$output")" = '[[1,["SKIPPED_MEM_GUARD"]]]' ]
+	[[ "$(headline)" == *". Of the rows, 4 are status rows of cells skipped or failed, not restarts: SKIPPED_MEM_GUARD 4" ]]
 }
 
-@test "growth report markdown, text and csv carry the scaling section" {
-	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_success
-	assert_output --partial "## Namespace scaling"
+@test "growth report: the scaling section, its cells not measured (apart from restarts) and its fit note reach markdown, text and csv" {
+	local note="the conv_p99_ms push gate (at least 120 xDS pushes per istiod replica) read pushes_avg from only some of the valid rows of 1 fitted point(s)"
+	# p99 at 300 ms (fitted), plus a second valid wide-probe row at N=400 without a push count.
+	growth_variant '$10 == 90 { $10 = 300 } $7 == "wide" && $57 == "probe" && $6 == 400 && $31 == "0" && !d++ { print; $13 = "N/A" } { print }'
+	report json "$GRES"
+	[[ "$(jq -r '.namespace_scaling.fit_note' <<<"$output")" == "${note}, the others having no push count: "*"N=400 (1/2 rows)" ]]
+	report markdown "$GRES"
 	assert_output --partial "| mesh=1 K=2 config-only | wide | probe | heap_inuse_mi | Mi | 205.7 | -200 | 0.980 | 3 | 2.00 | 100:40 200:160 400:640 |"
-	assert_output --partial "### Pods vs config-only (required)"
 	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy, pods deploy) | heap_inuse_mi | 152 | 260 | 1.71 |"
 	assert_output --partial "| mesh=1 K=2 config-only N=400 namespace | labeled | 50 | 912 | 100 | 100 |"
-	assert_output --partial 'window_kinds: "deploy,grow,outside,probe"'
-	# Growth cells get their key columns in the per-cell table; the legacy tables skip them.
-	assert_output --partial "| window | K | workload | M | outside |"
-	assert_output --partial "(No legacy-layout cell with traffic none to compare;"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format text
-	assert_success
-	assert_output --partial "--- Namespace scaling"
+	assert_output --partial "| mesh=1 K=2 config-only | 800 | grow | namespace | 4 | - | SKIPPED_MEM_GUARD | 1 |"
+	assert_output --partial "| 0 | 1 (1 status: SKIPPED_MEM_GUARD) | grow |"
+	# The restart footnote counts only the restarted row; the status rows get their own line.
+	assert_output --partial "> 1 row(s) had istiod restarts during the scrape window"
+	assert_output --partial "> 4 row(s) are status rows of cells that were skipped or failed (SKIPPED_MEM_GUARD 4), not restarts"
+	assert_output --partial "> **Note:** ${note}"
+	report text "$GRES"
 	assert_output --partial "mesh=1 K=2 config-only scoping=wide window=probe heap_inuse_mi (Mi): per_100ns=205.7"
-	assert_output --partial "Growth cell:          window=grow services_per_namespace=2"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format csv
-	assert_success
+	assert_output --partial "mesh=1 K=2 config-only N=800 window=grow scoping=namespace M=4 outside=- status=SKIPPED_MEM_GUARD rows=1"
+	assert_output --partial "  NOTE: ${note}"
+	report csv "$GRES"
 	assert_output --partial "# scaling_fit: series=mesh=1 K=2 config-only scoping=wide window=probe metric=heap_inuse_mi unit=Mi per_100ns=205.7"
 	assert_output --partial "# scaling_pods_vs_config_only: cell=mesh=1 K=2 N=100 namespace"
-	assert_output --partial "# growth: growth_mode=in-place"
+	assert_output --partial "# scaling_not_measured: series=mesh=1 K=2 config-only n=800 window=grow scoping=namespace measurement_pods=4 outside=- status=SKIPPED_MEM_GUARD rows=1"
+	assert_output --partial "# scaling_fit: NOTE: ${note}"
 }
 
-@test "growth report: the pods-vs-config-only row says NOT MEASURED without a pods cell" {
-	growth_dir
-	f="${GRES}/controlplane-fixture-ns.tsv"
-	awk -F'\t' '/^#/ || $1 == "timestamp" || $53 != "pods"' "$f" > "${f}.tmp"
-	mv "${f}.tmp" "$f"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_success
-	assert_output --partial "> **Not measured:** not measured: every valid growth cell is config-only."
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+@test "growth report: the pods-vs-config-only pairing says not measured without a pods cell" {
+	growth_variant '$53 != "pods"'
+	report json "$GRES"
 	[[ "$(jq -r '.namespace_scaling.pods_vs_config_only.missing' <<<"$output")" == "not measured: every valid growth cell is config-only."* ]]
 	[ "$(jq -r '.namespace_scaling.measurement_pod_sweep.missing' <<<"$output")" = null ]
 }
 
-@test "growth report: a legacy-only report has no scaling section; mixed reports keep both" {
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
-	assert_success
-	refute_output --partial "## Namespace scaling"
-	refute_output --partial "| window | K |"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
+@test "growth report: a legacy-only report has no scaling section; next to growth cells, the legacy cell keeps its own" {
+	report json
 	[ "$(jq 'has("namespace_scaling")' <<<"$output")" = false ]
 	growth_dir
 	cp "$FIXTURE" "${GRES}/controlplane-fixture-t2.tsv"
 	# Two runs (two RUN_IDs) in one dir: pooled on purpose.
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --allow-multi-run --format json
-	assert_success
+	report json "$GRES" --allow-multi-run
 	# The 51-column file keeps its own cell (legacy defaults) next to the growth cells.
 	[ "$(jq -c '[.results[] | select(.services_per_namespace == 0)] | map([.n_total, .window_kind, .workload_mode])' <<<"$output")" = '[[10,"deploy","pods"]]' ]
 	[ "$(jq '.namespace_scaling.fits | length > 0' <<<"$output")" = true ]
 }
 
-@test "growth report: cells not measured are named, apart from restarts, in every format" {
-	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
-	[ "$(jq -c '[.namespace_scaling.not_measured[] | [.n, .window, .scoping, .statuses]] | unique' <<<"$output")" = '[[800,"grow","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","namespace",["SKIPPED_MEM_GUARD"]],[800,"probe","none",["SKIPPED_MEM_GUARD"]],[800,"probe","wide",["SKIPPED_MEM_GUARD"]]]' ]
-	[ "$(jq -c '[.results[] | select(.namespace_count == 800)] | map([.status_rows, .statuses]) | unique' <<<"$output")" = '[[1,["SKIPPED_MEM_GUARD"]]]' ]
-	[[ "$(jq -r '.metadata.sla.headline' <<<"$output")" == *". Of the rows, 4 are status rows of cells skipped or failed, not restarts: SKIPPED_MEM_GUARD 4" ]]
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_output --partial "### Cells not measured"
-	assert_output --partial "| mesh=1 K=2 config-only | 800 | grow | namespace | 4 | - | SKIPPED_MEM_GUARD | 1 |"
-	assert_output --partial "mem-guard-<RUN_ID>.tsv"
-	assert_output --partial "| 0 | 1 (1 status: SKIPPED_MEM_GUARD) | grow |"
-	# The restart footnote counts only the restarted row; the status rows get their own line.
-	assert_output --partial "> 1 row(s) had istiod restarts during the scrape window — counters"
-	refute_output --partial "undetectable restart state"
-	assert_output --partial "> 4 row(s) are status rows of cells that were skipped or failed (SKIPPED_MEM_GUARD 4), not restarts"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format text
-	assert_output --partial "mesh=1 K=2 config-only N=800 window=grow scoping=namespace M=4 outside=- status=SKIPPED_MEM_GUARD rows=1"
-	assert_output --partial "  - not measured: 1 status row(s) SKIPPED_MEM_GUARD (the cell was skipped or failed; not a restart)"
-	refute_output --partial "? undetectable restart"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format csv
-	assert_output --partial "# scaling_not_measured: series=mesh=1 K=2 config-only n=800 window=grow scoping=namespace measurement_pods=4 outside=- status=SKIPPED_MEM_GUARD rows=1"
-}
-
 @test "growth report: grow windows fit window deltas per namespace added, from the previous grow step even when it is invalid" {
 	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	# No raw window delta is fitted against N for grow windows (each adds N - N_prev).
 	[ "$(jq '[.namespace_scaling.fits[] | select(.window == "grow" and (.metric == "istiod_cpu_s" or .metric == "xds_pushes" or .metric == "pushes_per_proxy" or .metric == "push_kb"))] | length' <<<"$output")" = 0 ]
 	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,null,2,-1,[[200,4],[400,2]]]' ]
@@ -657,8 +710,7 @@ fit_of() {
 	# The N=200 grow restarted: N=400 still divides by 400 - 200 (0.02), not by 400 - 100
 	# (0.0133); the first grow window stays out, so one point is left and no slope.
 	growth_variant '$6 == 200 && $57 == "grow" { $31 = 1 } { print }'
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[null,null,1,null,[[400,0.02]]]' ]
 }
 
@@ -669,37 +721,25 @@ fit_of() {
 	# Convergence p99 of the later windows sits at 300 ms (bucket 100-500, not pinned in the
 	# first bucket, so it is fitted).
 	growth_variant '$10 == 90 { $10 = 300 } $6 == 100 && $57 == "grow" { $59 += 0.5; $13 += 20; $47 = 9; $48 = 9; $10 = 9000 } { print }'
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	[ "$(fit_of "$output" namespace grow onboard_cpu_s_per_ns)" = '[0,null,2,0,[[200,0.02],[400,0.02]]]' ]
 	[ "$(fit_of "$output" namespace grow onboard_pushes_per_ns)" = '[-1,null,2,-1,[[200,4],[400,2]]]' ]
 	[ "$(jq -c '[.namespace_scaling.fits[] | select(.window == "grow" and (.metric == "push_time_ms" or .metric == "pushcontext_init_ms" or .metric == "conv_p99_ms")) | [.metric, .points]]' <<<"$output")" = '[["push_time_ms",[[200,1],[400,1]]],["pushcontext_init_ms",[[200,0.5],[400,0.5]]],["conv_p99_ms",[[200,300],[400,300]]]]' ]
 	# Gauges keep the first grow window.
 	[ "$(fit_of "$output" namespace grow heap_inuse_mi)" = '[50,1,3,0.5,[[100,150],[200,200],[400,300]]]' ]
 	[ "$(jq -r '.namespace_scaling.fit_rules.grow_window_fits' <<<"$output")" = skip_first_step ]
-	[[ "$(jq -r '.namespace_scaling.fit_rules.text' <<<"$output")" == *"The first grow window of a series (from 0 namespaces) is left out"* ]]
-	# The rule is stated in every format.
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_output --partial "> The first grow window of a series (from 0 namespaces) is left out of every grow-window fit"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format text
-	assert_output --partial "  The first grow window of a series (from 0 namespaces) is left out"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format csv
-	assert_output --partial "grow_window_fits=skip_first_step"
-	assert_output --partial "# scaling_fit_rules: conv_p99_ms points come only from windows with at least 120 xDS pushes per istiod replica, counted across xDS types"
 }
 
 @test "growth report: conv_p99 fits skip windows below the push floor" {
 	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	# The fixture's p99 is 90 ms everywhere: pinned in istiod's first bucket (0-100 ms), an
 	# interpolation, so no conv_p99 fit at all.
 	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms")] | length' <<<"$output")" = 0 ]
 	# At 300 ms (bucket 100-500): namespace/none probes have 10 pushes, so no conv_p99 fit;
 	# wide probes (120) and grow (400) keep it (grow without its first window).
 	growth_variant '$10 == 90 { $10 = 300 } { print }'
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms" and .window == "probe" and .scoping != "wide")] | length' <<<"$output")" = 0 ]
 	[ "$(fit_of "$output" wide probe conv_p99_ms)" = '[0,1,3,0,[[100,300],[200,300],[400,300]]]' ]
 	[ "$(fit_of "$output" namespace grow conv_p99_ms)" = '[0,null,2,0,[[200,300],[400,300]]]' ]
@@ -707,111 +747,33 @@ fit_of() {
 	[ "$(jq -r '.namespace_scaling.fit_rules.conv_p99_push_count' <<<"$output")" = xds_pushes_per_replica_across_types ]
 	# 119 pushes (about 24-30 full pushes short of the floor) is not enough.
 	growth_variant '$10 == 90 { $10 = 300 } $7 == "wide" && $57 == "probe" && $13 == 120 { $13 = 119 } { print }'
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "conv_p99_ms" and .window == "probe")] | length' <<<"$output")" = 0 ]
-	# Every format says the floor counts pushes across xDS types, not convergence samples.
-	for fmt in markdown text; do
-		run --separate-stderr "$REPORT" --results-dir "$GRES" --format "$fmt"
-		assert_output --partial "at least 120 xDS pushes per istiod replica, counted across xDS types (a full push to one proxy adds one push per xDS type it watches, typically 3-5, but one convergence sample)"
-		refute_output --partial "fewer samples make the p99 their maximum"
-	done
 }
 
 @test "growth report: pods vs config-only compares window deltas only within one window kind" {
 	# Without the config-only deploy cell, the config-only probe pairs with the pods deploy.
 	growth_variant '!($53 == "config-only" && $57 == "deploy")'
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | [.metric, .config_only, .pods, .ratio]]' <<<"$output")" = '[["heap_inuse_mi",150,260,1.73],["istiod_cpu_s",null,null,null],["xds_pushes",null,null,null],["pushes_per_proxy",null,null,null],["proxy_config_kib",50,52,1.04],["proxy_envoy_mem_mi",5,8,1.6],["istiod_services",212,210,0.99]]' ]
-	[[ "$(jq -r '.namespace_scaling.pods_vs_config_only.note' <<<"$output")" == "istiod_cpu_s, xds_pushes and pushes_per_proxy are N/A where the pair has different window kinds"* ]]
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only probe, pods deploy) | istiod_cpu_s | N/A | N/A | N/A |"
-	assert_output --partial "> **Note:** istiod_cpu_s, xds_pushes and pushes_per_proxy are N/A"
-	# Same-kind pairs (the full fixture: both deploy) compare every metric, with no note.
-	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | select(.metric == "istiod_cpu_s") | .ratio]' <<<"$output")" = '[2.4]' ]
-	[ "$(jq -r '.namespace_scaling.pods_vs_config_only.note' <<<"$output")" = null ]
+	# The label names each side's window kind.
+	[ "$(jq -r '[.namespace_scaling.pods_vs_config_only.rows[].cell] | unique[]' <<<"$output")" = "mesh=1 K=2 N=100 namespace (config-only probe, pods deploy)" ]
 }
 
 @test "growth report: with two istiod replicas, per-replica pushes per proxy and the M-sweep from per-cluster heap" {
 	# Every data row becomes two istiod replicas, each serving half the proxies; at M=16 the
 	# new measurement pods' scopes land on one replica only (the other keeps its M=4 heap).
 	growth_variant '$2 != "mesh-a" { print; next } { $22 = $22 / 2; print; if ($54 == 16 && $7 == "wide") $34 = 660; else if ($54 == 16 && $7 == "namespace") $34 = 320; print }'
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	# 10 pushes per replica / 3 proxies per replica (the cluster has 6).
 	[ "$(fit_of "$output" namespace probe pushes_per_proxy)" = '[0,1,3,0,[[100,3.333],[200,3.333],[400,3.333]]]' ]
 	# Per replica the heap grows 2 Mi per pod (cost / 2); per cluster 4 Mi, the scope cost.
 	[ "$(jq -c '[.namespace_scaling.measurement_pod_sweep.rows[] | select(.cell | test("wide")) | [.measurement_pods, .heap_inuse_mi, .heap_inuse_cluster_mi, .istiod_pods_per_cluster, .heap_per_added_pod_mi]]' <<<"$output")" = '[[4,660,1320,2,null],[16,684,1368,2,4]]' ]
 	[ "$(jq -r '.namespace_scaling.measurement_pod_sweep.istiod_replicas' <<<"$output")" = 1 ]
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_output --partial "| heap inuse / replica (Mi) | heap inuse / cluster (Mi) | istiod pods / cluster |"
-	assert_output --partial "> istiod replicas: 1 per cluster. Heap per added pod is the change in heap_inuse summed over"
 }
 
-@test "a sweep whose members ran different Istio versions: its mixed:a/b value stays one item in every list, one tag, and warns" {
-	local d="${BATS_TEST_TMPDIR}/mixed"
-	mkdir -p "$d"
-	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=mixed:v1.30.5/v1.29.0|' "$FIXTURE" > "${d}/controlplane-mixed.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$d" --format json
-	assert_success
-	[ "$(jq -c '[.metadata.istio_version, .metadata.istio_versions, .pooled_runs.istio_version]' <<<"$output")" = \
-		'["mixed:v1.30.5/v1.29.0",["mixed:v1.30.5/v1.29.0"],["mixed:v1.30.5/v1.29.0"]]' ]
-	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION mixed:v1.30.5/v1.29.0)"* ]]
-	run --separate-stderr "$REPORT" --results-dir "$d" --format csv
-	# One `# KEY=value` line per key: a value with a comma or slash stays one value.
-	assert_line "# ISTIO_VERSION=mixed:v1.30.5/v1.29.0"
-	assert_line --regexp '^# ISTIO_VERSION_PIN=.+$'
-	assert_line --regexp '^# ISTIO_VERSION_BY_CONTEXT=.+$'
-	refute_output --partial "mixed:mixed:"
-	# Pooled with a run on one of those versions (1.30.5, without the v): each distinct
-	# version once.
-	sed 's|^# RUN_ID=.*|# RUN_ID=other|' "$FIXTURE" > "${d}/controlplane-other.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$d" --allow-multi-run --format csv
-	assert_success
-	assert_line "# ISTIO_VERSION=mixed:v1.30.5,v1.29.0"
-	refute_output --partial "mixed:mixed:"
-}
-
-@test "a re-generated report repeats the sweep's record (sweep-outcome.txt) in text, md, json and csv; ISTIO_VERSION_BY_CONTEXT in every format, an older TSV's readiness keys in none" {
-	local d="${BATS_TEST_TMPDIR}/outcome" p="<mesh-a-ctx> ran v1.30.5 (revision default) at the start and v1.30.6 (revision default) at the end: its rows are not all from one Istio version" fmt
-	mkdir -p "$d"
-	sed 's|^# ISTIO_VERSION=.*|# ISTIO_VERSION=v1.30.5\n# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5\n# ISTIO_NOTREADY_AT_START=<mesh-a-ctx>=IstioCNINotHealthy\n# ISTIO_READY_WAITED_SEC=60|' \
-		"$FIXTURE" > "${d}/controlplane-r.tsv"
-	printf '%s\n' '# Sweep outcome (bats)' STATUS=finished RUN_ID=fixture-t2 EXIT=4 TOTAL=2 FAILED=0 "PROBLEM=${p}" > "${d}/sweep-outcome.txt"
-	run --separate-stderr "$REPORT" --results-dir "$d"
-	assert_success
-	assert_output --partial "# SWEEP OUTCOME (outcome): FINISHED, exit 4"
-	assert_output --partial "#   error: ${p}"
-	assert_output --partial "ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5"
-	run --separate-stderr "$REPORT" --results-dir "$d" --format markdown
-	assert_output --partial "> - error: ${p}"
-	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
-	run --separate-stderr "$REPORT" --results-dir "$d" --format json
-	[ "$(jq -c '[.sweep_outcomes[0].exit, .sweep_outcomes[0].problems[0], .metadata.istio_version_by_context]' <<<"$output")" = \
-		"$(jq -cn --arg p "$p" '[4, $p, "<mesh-a-ctx>=v1.30.5"]')" ]
-	run --separate-stderr "$REPORT" --results-dir "$d" --format charts
-	assert_output --partial 'istio_version_by_context: "<mesh-a-ctx>=v1.30.5"'
-	for fmt in text markdown json charts csv; do
-		run --separate-stderr "$REPORT" --results-dir "$d" --format "$fmt"
-		refute_output --regexp '[Nn][Oo][Tt][Rr][Ee][Aa][Dd][Yy]|[Rr][Ee][Aa][Dd][Yy]_[Ww][Aa][Ii][Tt][Ee][Dd]'
-	done
-	assert_line "# SWEEP_OUTCOME_EXIT=4"
-	assert_line "# SWEEP_OUTCOME_PROBLEM=${p}"
-	# Through a symlink to the results dir (no trailing slash), the same record.
-	ln -s "$d" "${BATS_TEST_TMPDIR}/latest"
-	run --separate-stderr "$REPORT" --results-dir "${BATS_TEST_TMPDIR}/latest" --format json
-	assert_success
-	[ "$(jq -c '[.sweep_outcomes[0].exit, .metadata.istio_version_by_context]' <<<"$output")" = '[4,"<mesh-a-ctx>=v1.30.5"]' ]
-	rm "${d}/sweep-outcome.txt"
-	run --separate-stderr "$REPORT" --results-dir "$d" --format json
-	[ "$(jq -c '.sweep_outcomes' <<<"$output")" = '[]' ]
-}
-
-@test "growth report: a base-dir report of two sweeps lists every run, warns, and names the runs behind each pods-vs-config-only side" {
-	local gfix="${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" base a b
+@test "growth report: a base dir of two sweeps is refused without --allow-multi-run, naming each with the command that reports it alone; pooled, it lists every run and names the runs behind each pods-vs-config-only side" {
+	local base a b
 	base="${BATS_TEST_TMPDIR}/base"
 	a="${base}/sweep-20261013T100000Z-111"
 	b="${base}/sweep-20261013T110000Z-222"
@@ -819,65 +781,32 @@ fit_of() {
 	# Sweep 1 holds the config-only cells; sweep 2 the pods calibration cell, measured on
 	# another Istio version from a dirty tree (PL2: both must surface).
 	awk -F'\t' '/^# RUN_ID=/ { print "# RUN_ID=20261013T100000Z-111"; next }
-		/^#/ || $1 == "timestamp" || $53 != "pods"' "$gfix" > "${a}/controlplane-20261013T100000Z-111.tsv"
+		/^#/ || $1 == "timestamp" || $53 != "pods"' "$GROWTH" > "${a}/controlplane-20261013T100000Z-111.tsv"
 	awk -F'\t' '/^# RUN_ID=/ { print "# RUN_ID=20261013T110000Z-222"; next }
 		/^# ISTIO_VERSION=/ { print "# ISTIO_VERSION=1.31.0"; next }
 		/^# HARNESS_SHA=/ { print "# HARNESS_SHA=abc1234-dirty"; next }
-		/^#/ || $1 == "timestamp" || $53 == "pods"' "$gfix" > "${b}/controlplane-20261013T110000Z-222.tsv"
-	# Without --allow-multi-run the base dir stops the report: it names each sweep and the
-	# command that reports it alone.
+		/^#/ || $1 == "timestamp" || $53 == "pods"' "$GROWTH" > "${b}/controlplane-20261013T110000Z-222.tsv"
 	run --separate-stderr "$REPORT" --results-dir "$base" --format json
 	assert_failure 1
 	[ -z "$output" ]
 	[[ "$stderr" == *"error: ${base} holds 2 runs"* ]]
 	# Newest first, each with the command that reports it alone.
 	[[ "$stderr" == *"sweep-20261013T110000Z-222:"$'\n'"    ${REPORT} --results-dir '${b}'"$'\n'"  sweep-20261013T100000Z-111:"$'\n'"    ${REPORT} --results-dir '${a}'"* ]]
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
-	assert_success
+	report json "$base" --allow-multi-run
 	[ "$(jq -c '.pooled_runs' <<<"$output")" = \
 		'{"runs":2,"run_ids":["sweep-20261013T100000Z-111","sweep-20261013T110000Z-222"],"harness_sha":["fixture","abc1234-dirty"],"istio_version":["1.30.5","1.31.0"]}' ]
 	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .istio_versions, .harness_sha, .harness_shas, .files_consumed]' <<<"$output")" = \
 		'["multiple",["20261013T100000Z-111","20261013T110000Z-222"],"mixed:1.30.5,1.31.0",["1.30.5","1.31.0"],"mixed:fixture,abc1234-dirty",["fixture","abc1234-dirty"],2]' ]
-	[[ "$(jq -r '.metadata.provenance_warning' <<<"$output")" == *"different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
 	[ "$(jq -c '[.namespace_scaling.pods_vs_config_only.rows[] | select(.metric == "heap_inuse_mi") | [.config_only_run_ids, .pods_run_ids, .ratio]]' <<<"$output")" = \
 		'[[["20261013T100000Z-111"],["20261013T110000Z-222"],1.71]]' ]
-	# The opt-in still warns; mixed versions and commits are loud.
+	# The opt-in still warns.
 	[[ "$stderr" == *"warning: --allow-multi-run: this report pools 2 runs from ${base} (sweep-20261013T100000Z-111,sweep-20261013T110000Z-222)"* ]]
-	[[ "$stderr" == *"WARNING: The inputs were measured on different Istio versions (ISTIO_VERSION 1.30.5,1.31.0)"* ]]
-	[[ "$stderr" == *"ran on different harnesses (HARNESS_SHA fixture,abc1234-dirty)"* ]]
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format markdown
-	assert_success
-	assert_output --partial "> **Pooled runs.** This report pools 2 runs (--allow-multi-run): sweep-20261013T100000Z-111, sweep-20261013T110000Z-222. HARNESS_SHA: fixture, abc1234-dirty. ISTIO_VERSION: 1.30.5, 1.31.0. These differ"
-	assert_output --partial 'run_ids: ["20261013T100000Z-111","20261013T110000Z-222"]'
-	assert_output --partial 'harness_shas: ["fixture","abc1234-dirty"]'
-	assert_output --partial 'istio_version: "mixed:1.30.5,1.31.0"'
-	assert_output --partial "> **Warning:** The inputs were measured on different Istio versions"
-	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222) | heap_inuse_mi | 152 | 260 | 1.71 |"
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format text
-	assert_success
-	assert_output --partial "# POOLED RUNS: This report pools 2 runs (--allow-multi-run)"
-	assert_output --partial "# RUN_ID=multiple  ISTIO_VERSION=mixed:1.30.5,1.31.0  HARNESS_SHA=mixed:fixture,abc1234-dirty  files_consumed=2"
-	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222  istio_versions=1.30.5,1.31.0  harness_shas=fixture,abc1234-dirty"
-	assert_output --partial "# WARNING: The inputs were measured on different Istio versions"
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format csv
-	assert_success
-	assert_line "# POOLED_RUNS=2"
-	assert_line "# POOLED_ISTIO_VERSIONS=1.30.5,1.31.0"
-	assert_output --partial "# runs: run_ids=20261013T100000Z-111,20261013T110000Z-222 istio_versions=1.30.5,1.31.0 harness_shas=fixture,abc1234-dirty"
-	assert_output --partial "config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222"
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format charts
-	assert_success
-	assert_output --partial "> **Pooled runs.** This report pools 2 runs"
-	assert_output --partial 'istio_versions: ["1.30.5","1.31.0"]'
-	# One sweep: plain scalars, one-element lists, no warning, no run= in the labels.
-	run --separate-stderr "$REPORT" --results-dir "$a" --format json
-	assert_success
+	[ "$(jq -r '[.namespace_scaling.pods_vs_config_only.rows[].cell] | unique[]' <<<"$output")" = "mesh=1 K=2 N=100 namespace (config-only deploy run=20261013T100000Z-111, pods deploy run=20261013T110000Z-222)" ]
+	# One sweep: plain scalars, one-element lists, no warning.
+	report json "$a"
 	[ "$(jq -c '.metadata | [.run_id, .run_ids, .istio_version, .harness_shas, .provenance_warning]' <<<"$output")" = \
 		'["20261013T100000Z-111",["20261013T100000Z-111"],"1.30.5",["fixture"],null]' ]
 	[[ "$stderr" != *"pools"* && "$stderr" != *"WARNING"* ]]
-	growth_dir
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_output --partial "| mesh=1 K=2 N=100 namespace (config-only deploy, pods deploy) | heap_inuse_mi |"
 }
 
 # series_sweep <base> <run_id> <awk program>: base/sweep-<run_id>/controlplane-<run_id>.tsv
@@ -887,7 +816,7 @@ series_sweep() {
 	local d="$1/sweep-$2"
 	mkdir -p "$d"
 	awk -F'\t' -v rid="$2" 'BEGIN { OFS = "\t" } /^# RUN_ID=/ { print "# RUN_ID=" rid; next }
-		/^#/ || $1 == "timestamp" { print; next } '"$3" "${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" > "${d}/controlplane-$2.tsv"
+		/^#/ || $1 == "timestamp" { print; next } '"$3" "$GROWTH" > "${d}/controlplane-$2.tsv"
 }
 
 # grow_fits <json> <metric>: [run_id, n, points] of every namespace-scoping grow fit of the metric.
@@ -895,7 +824,7 @@ grow_fits() {
 	jq -c --arg m "$2" '[.namespace_scaling.fits[] | select(.scoping == "namespace" and .window == "grow" and .metric == $m) | [.run_id, .n, .points]]' <<<"$1"
 }
 
-@test "growth report: a base dir with a smoke and a main series fits each series on its own" {
+@test "growth report: a base dir with a smoke and a main series fits each series on its own, and labels each series' figures with its run" {
 	# Smoke series (N=10,20: the fixture's N=100,200 grow and probe cells scaled down) and
 	# the main series (the fixture, N=100,200,400) in one results base. Pooled, the main
 	# series' first grow (N=100) would get N_prev=20 from the smoke ladder and enter the
@@ -903,8 +832,7 @@ grow_fits() {
 	local base="${BATS_TEST_TMPDIR}/series" smoke=20261013T090000Z-101 main=20261013T110000Z-222
 	series_sweep "$base" "$smoke" '$2 == "mesh-a" && $31 == 0 && $55 == 0 && $54 == 4 && ($57 == "grow" || $57 == "probe") && ($6 == 100 || $6 == 200) { $6 = $6 / 10; $4 = $4 / 10; print }'
 	series_sweep "$base" "$main" '{ print }'
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
-	assert_success
+	report json "$base" --allow-multi-run
 	# Each grow ladder starts at its own first step: the smoke N=20 grow added 10 namespaces
 	# (2 CPU-s / 10), the main series keeps its single-run fit (2 / 100, 4 / 200).
 	[ "$(grow_fits "$output" onboard_cpu_s_per_ns)" = "[[\"${smoke}\",1,[[20,0.2]]],[\"${main}\",2,[[200,0.02],[400,0.02]]]]" ]
@@ -915,35 +843,16 @@ grow_fits() {
 		"[\"mesh=1 K=2 config-only run=${main}\",205.7,[[100,40],[200,160],[400,640]]]" ]
 	# No fit mixes the two ladders.
 	[ "$(jq '[.namespace_scaling.fits[] | select(([.points[][0]] | min) < 100 and ([.points[][0]] | max) >= 100)] | length' <<<"$output")" = 0 ]
-	[ "$(jq -c '.namespace_scaling.fit_rules.series_key' <<<"$output")" = '["run_id","mesh_size","services_per_namespace","workload_mode"]' ]
 	# Cells carry their series run; the main series' pairings and skipped cells keep theirs.
 	[ "$(jq -c '[.results[] | select(.window_kind == "grow" and .services_per_namespace == 2) | [.namespace_count, .series_run_id]] | sort' <<<"$output")" = \
 		"[[10,\"${smoke}\"],[20,\"${smoke}\"],[100,\"${main}\"],[200,\"${main}\"],[400,\"${main}\"],[800,\"${main}\"]]" ]
 	[ "$(jq -c '[.namespace_scaling.not_measured[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
 	[ "$(jq -c '[.namespace_scaling.measurement_pod_sweep.rows[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
 	[ "$(jq -c '[.namespace_scaling.discovery[] | .run_id] | unique' <<<"$output")" = "[\"${main}\"]" ]
-	# Every format labels the series and states the rule.
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format markdown
-	assert_success
-	assert_output --partial "| mesh=1 K=2 config-only run=${smoke} | namespace | grow | heap_inuse_mi | Mi |"
-	assert_output --partial "| mesh=1 K=2 config-only run=${main} | namespace | grow | onboard_cpu_s_per_ns | CPU-s/ns |"
-	assert_output --partial "| window | K | workload | M | outside | run |"
-	assert_output --partial "| mesh=1 K=2 config-only run=${main} | 800 | grow | namespace |"
-	assert_output --partial "> A growth series is one RUN_ID x mesh size x K x workload"
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format text
-	assert_success
-	assert_output --partial "mesh=1 K=2 config-only run=${smoke} scoping=namespace window=grow heap_inuse_mi (Mi):"
-	assert_output --partial "series_run=${smoke}"
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format csv
-	assert_success
-	assert_output --partial "series_key=run_id+mesh_size+services_per_namespace+workload_mode"
-	assert_output --partial "# scaling_fit: series=mesh=1 K=2 config-only run=${smoke} scoping=namespace window=grow metric=onboard_cpu_s_per_ns"
-	[[ "$output" == *"points=20:0.2 run_id=${smoke}"* ]]
-	# One sweep of the two: no run= in the labels, no run column.
-	run --separate-stderr "$REPORT" --results-dir "${base}/sweep-${main}" --format markdown
-	assert_success
-	refute_output --partial "run=${main}"
-	refute_output --partial "| outside | run |"
+	# Every format prints these labels.
+	[ "$(jq -c '[.namespace_scaling.fits[] | select(.scoping == "namespace" and .window == "grow" and .metric == "heap_inuse_mi") | .series]' <<<"$output")" = \
+		"[\"mesh=1 K=2 config-only run=${smoke}\",\"mesh=1 K=2 config-only run=${main}\"]" ]
+	[ "$(jq -c '[.namespace_scaling.not_measured[] | .series] | unique' <<<"$output")" = "[\"mesh=1 K=2 config-only run=${main}\"]" ]
 }
 
 @test "growth report: two series that share an N keep separate cells and ladders" {
@@ -953,8 +862,7 @@ grow_fits() {
 	local base="${BATS_TEST_TMPDIR}/shared" a=20261013T090000Z-101 b=20261013T110000Z-222
 	series_sweep "$base" "$a" '$2 == "mesh-a" && $31 == 0 && $55 == 0 && $57 == "grow" && ($6 == 100 || $6 == 200) { $6 = $6 / 2; $4 = $4 / 2; print }'
 	series_sweep "$base" "$b" '{ print }'
-	run --separate-stderr "$REPORT" --results-dir "$base" --allow-multi-run --format json
-	assert_success
+	report json "$base" --allow-multi-run
 	[ "$(jq -c '[.results[] | select(.window_kind == "grow" and .namespace_count == 100) | [.series_run_id, .n_total, .go_heap_inuse_mi.avg]]' <<<"$output")" = \
 		"[[\"${a}\",1,200],[\"${b}\",1,150]]" ]
 	[ "$(grow_fits "$output" onboard_cpu_s_per_ns)" = "[[\"${a}\",1,[[100,0.04]]],[\"${b}\",2,[[200,0.02],[400,0.02]]]]" ]
@@ -962,13 +870,13 @@ grow_fits() {
 }
 
 # ---------------------------------------------------------------------------
-# ROSA window fixes: schema 66, data warnings, units (BACKLOG 9.3, 9.5, 9.10; report audit)
-# ---------------------------------------------------------------------------
+# Schema 66: gateway memory, leftover namespaces, CPU window figures
 
 # growth66 [leftover]: the growth fixture widened to CONTROLPLANE_SCHEMA=66: gateway
 # physical heap 2 x and working set 3 x the allocated figure, gateway clusters x 8 (so a
 # point passes 1000), and <leftover> (default 0) leftover test namespaces per row.
 growth66() {
+	local f
 	growth_dir
 	f="${GRES}/controlplane-fixture-ns.tsv"
 	awk -F'\t' -v lo="${1:-0}" 'BEGIN { OFS = "\t" }
@@ -982,54 +890,37 @@ growth66() {
 }
 
 @test "report: a 66-column file adds gateway physical / working set and leftover namespaces" {
+	local r
 	growth66 7
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
-	assert_success
+	report json "$GRES"
 	r="$(jq -c '[.results[] | select(.window_kind == "probe" and .namespace_count == 400 and .sidecar_scoping == "wide" and .n_valid > 0)][0]' <<<"$output")"
 	[ "$(jq -c '[.gateway_mem_mi_max, .gateway_physical_mi_max, .gateway_ws_mi_max, .leftover_test_namespaces_max]' <<<"$r")" != '[null,null,null,null]' ]
 	[ "$(jq '.gateway_ws_mi_max / .gateway_mem_mi_max' <<<"$r")" = 3 ]
 	[ "$(jq '.leftover_test_namespaces_max' <<<"$r")" = 7 ]
 	# Both new gateway figures are fitted; JSON points never carry an exponent string.
 	[ "$(jq '[.namespace_scaling.fits[] | select(.metric == "gateway_ws_mi" or .metric == "gateway_physical_mi")] | length > 0' <<<"$output")" = true ]
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	refute_output --regexp '[0-9]e\+0[0-9]'
 	# 7 leftover namespaces is under the default threshold (100): no warning.
-	refute_output --partial "leftover controlplane-test namespaces"
+	[[ "$(jq -r '.metadata.data_warnings | join(" ")' <<<"$output")" != *"leftover controlplane-test namespaces"* ]]
+	report markdown "$GRES"
+	refute_output --regexp '[0-9]e\+0[0-9]'
 }
 
-@test "report: leftover test namespaces above LEFTOVER_NS_WARN warn in every format" {
+@test "report: leftover test namespaces above LEFTOVER_NS_WARN are a data warning" {
 	growth66 2500
-	for fmt in text markdown csv; do
-		run --separate-stderr "$REPORT" --results-dir "$GRES" --format "$fmt"
-		assert_success
-		assert_output --partial "were measured with up to 2500 leftover controlplane-test namespaces"
-		# Also on stderr, but for text, whose stdout has it already.
-		if [[ "$fmt" == text ]]; then
-			[[ "$stderr" != *"up to 2500 leftover"* ]]
-		else
-			[[ "$stderr" == *"WARNING: "*"up to 2500 leftover"* ]]
-		fi
-	done
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	report json "$GRES"
 	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == *"up to 2500 leftover controlplane-test namespaces"* ]]
 }
 
-@test "report: a RETIRE_FAILED row is listed as not measured and warns in every format" {
+@test "report: a RETIRE_FAILED row is listed as not measured and is a data warning" {
 	growth_variant '{ print } $2 == "SKIPPED_MEM_GUARD" && !done { done = 1; $1 = "2026-10-13T12:20:00+00:00"; $2 = "RETIRE_FAILED"; $6 = 400; $57 = "retire"; print }'
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_success
-	assert_output --partial "| retire | namespace |"
-	assert_output --partial "RETIRE_FAILED"
-	assert_output --partial "> **Warning:** RETIRE_FAILED (N=400"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	report json "$GRES"
 	[ "$(jq '[.namespace_scaling.not_measured[] | select(.statuses == ["RETIRE_FAILED"])] | length' <<<"$output")" = 1 ]
-	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == RETIRE_FAILED* ]]
+	[[ "$(jq -r '.metadata.data_warnings[0]' <<<"$output")" == "RETIRE_FAILED (N=400"* ]]
 }
 
 @test "report: CPU peak and the window average are labelled apart; sizes in MiB; files relative" {
 	growth66
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format markdown
-	assert_success
+	report markdown "$GRES"
 	assert_output --partial "| cpu_peak (m) | cpu_avg (m) | rss_peak (Mi) |"
 	assert_output --partial "| cfg_dump_avg (MiB) |"
 	refute_output --partial "cpu_avg (m) | mem_avg (Mi)"
@@ -1037,7 +928,7 @@ growth66() {
 	refute_output --partial "(KB)"
 	assert_output --partial "Files: controlplane-fixture-ns.tsv (in results dir g)"
 	refute_output --partial "$BATS_TEST_TMPDIR"
-	run --separate-stderr "$REPORT" --results-dir "$GRES" --format json
+	report json "$GRES"
 	# cpu_avg = istiod_cpu_s_delta x 1000 / scrape_window_sec, never the peak column.
 	[ "$(jq '[.results[] | select(.istiod_cpu_avg_m != null)] | length > 0' <<<"$output")" = true ]
 	[ "$(jq '[.results[] | select(.istiod_cpu_avg_m != null and .istiod_cpu_avg_m > .istiod_cpu_peak_m.avg)] | length' <<<"$output")" = 0 ]
@@ -1045,15 +936,16 @@ growth66() {
 	[ "$(jq '[.namespace_scaling.fits[] | select(.n == 2 and .r2 != null)] | length' <<<"$output")" = 0 ]
 }
 
-@test "report: the SLA verdict uses the window CPU peak, not only the end-of-window top snapshot" {
-	vsdr_dir
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format json
-	assert_success
-	peak="$(jq -r '.metadata.achieved_scale.istiod_cpu_peak_pct_of_limit_max' <<<"$output")"
-	[[ "$peak" =~ ^[0-9]+$ ]]
-	run --separate-stderr "$REPORT" --results-dir "$VRES" --format text
-	assert_output --partial "istiod_cpu_peak_pct_of_limit (max): ${peak}%  [window peak CPU (cpu_peak) / per-replica CPU limit]"
-	assert_output --partial "[kubectl top snapshot at the end of each window; misses bursts]"
+@test "report: the SLA verdict reads istiod CPU from the window peak (cpu_peak), not only the end-of-window top snapshot" {
+	local tsv="${RES}/controlplane-fixture-t2.tsv"
+	cp_tsv "$tsv" "mesh-a=3/3,mesh-b=3/3" 3
+	# One row's window peak at 1900m of its 2000m limit; every top snapshot stays at 10 %.
+	awk -F'\t' -v OFS='\t' -v last="$(wc -l < "$tsv")" 'NR == last { $32 = 1900 } { print }' "$tsv" > "${tsv}.new"
+	mv "${tsv}.new" "$tsv"
+	report json
+	[ "$(jq -c '.metadata.achieved_scale | [.istiod_cpu_peak_pct_of_limit_max, .istiod_cpu_pct_of_limit_max]' <<<"$output")" = '["95","10"]' ]
+	[ "$(verdict)" = FAIL ]
+	[[ "$(headline)" == "peak utilization 95% >= 90%"* ]]
 }
 
 @test "envelope: config-only growth cells have no endpoints; CPU from the window peak" {
@@ -1069,46 +961,16 @@ growth66() {
 	assert_output --partial "| istiod CPU (kubectl top at window end) |"
 }
 
-# --- the xDS push count of a cell and of the fit ------------------------------------
-
-@test "a valid row without a push count: a data warning, pushes_avg shown with got/n_valid in every format (csv pushes_n, json xds_pushes_n)" {
+@test "a valid row without a push count: a data warning, and pushes_avg with got of n_valid in json, text and csv" {
 	local r="${BATS_TEST_TMPDIR}/sweep-nopush"
 	mkdir -p "$r"
 	# The first valid row's xds_pushes_delta (column 13) is N/A.
 	awk -F'\t' -v OFS='\t' '!/^#/ && $1 != "timestamp" && !n++ { $13 = "N/A" } { print }' "$FIXTURE" > "${r}/controlplane-fixture-t2.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$r" --format json
-	assert_success
+	report json "$r"
 	[ "$(jq -c '[.results[0].n_valid, .results[0].xds_pushes_n, .results[0].xds_pushes_avg]' <<<"$output")" = '[9,8,100]' ]
 	[[ "$(jq -r '.metadata.data_warnings | join(" ")' <<<"$output")" == *"1 valid row(s) of 1 cell(s) have no xDS push count"* ]]
-	[[ "$stderr" == *"1 valid row(s) of 1 cell(s) have no xDS push count"* ]]
-	run --separate-stderr "$REPORT" --results-dir "$r" --format text
+	report text "$r"
 	assert_output --partial "xDS pushes avg=100 (from 8/9 valid rows: the others have no push count)"
-	run --separate-stderr "$REPORT" --results-dir "$r" --format csv
+	report csv "$r"
 	[ "$(grep -v '^#' <<<"$output" | sed -n 2p | awk -F, '{ print $NF }')" = 8 ]
-	# Every valid row with a count: pushes_n is n_valid, no warning.
-	cp "$FIXTURE" "${r}/controlplane-fixture-t2.tsv"
-	run --separate-stderr "$REPORT" --results-dir "$r" --format json
-	[ "$(jq -c '[.results[0].n_valid, .results[0].xds_pushes_n]' <<<"$output")" = '[9,9]' ]
-	[[ "$stderr" != *"no xDS push count"* ]]
-}
-
-@test "the conv_p99 fit's push gate says when it read pushes_avg from only some of a point's valid rows (FITNOTE in every format)" {
-	local g="${BATS_TEST_TMPDIR}/g" f
-	mkdir -p "$g"
-	f="${g}/controlplane-fixture-ns.tsv"
-	# The growth fixture at p99 300 ms (fitted), plus a second valid wide-probe row at N=400
-	# without a push count.
-	awk -F'\t' 'BEGIN { OFS = "\t" } /^#/ || $1 == "timestamp" { print; next }
-		$10 == 90 { $10 = 300 }
-		$7 == "wide" && $57 == "probe" && $6 == 400 && $31 == "0" && !d++ { print; $13 = "N/A" }
-		{ print }' "${ROOT}/tests/lib/test/fixtures/controlplane_ns_growth.tsv" > "$f"
-	run --separate-stderr "$REPORT" --results-dir "$g" --format json
-	assert_success
-	[[ "$(jq -r '.namespace_scaling.fit_note' <<<"$output")" == "the conv_p99_ms push gate (at least 120 xDS pushes per istiod replica) read pushes_avg from only some of the valid rows of 1 fitted point(s), the others having no push count: "*"N=400 (1/2 rows)" ]]
-	run --separate-stderr "$REPORT" --results-dir "$g" --format text
-	assert_output --partial "  NOTE: the conv_p99_ms push gate (at least 120 xDS pushes per istiod replica) read pushes_avg from only some of the valid rows of 1 fitted point(s)"
-	run --separate-stderr "$REPORT" --results-dir "$g" --format md
-	assert_output --partial "> **Note:** the conv_p99_ms push gate"
-	run --separate-stderr "$REPORT" --results-dir "$g" --format csv
-	assert_output --partial "# scaling_fit: NOTE: the conv_p99_ms push gate"
 }

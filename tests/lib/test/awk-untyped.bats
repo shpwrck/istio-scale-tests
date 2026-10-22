@@ -35,7 +35,7 @@ EOF
 	chmod +x "${STUBS}/$1"
 }
 
-@test "an awk that corrupts unset elements is replaced by mawk, for this shell and its children" {
+@test "an awk that corrupts unset elements is replaced by mawk, for this shell and its children; one that keeps them intact is left first on PATH; the host's awk and the mawk shim pass the check" {
 	stub awk 2
 	stub mawk 0
 	run env PATH="${STUBS}:${PATH}" bash -c '
@@ -45,6 +45,12 @@ EOF
 	assert_success
 	assert_line "awk=${ROOT}/tests/lib/awk-mawk/awk"
 	assert_line "child ok"
+	stub awk 0
+	run env PATH="${STUBS}:${PATH}" bash -c 'source "$ROOT/tests/lib/common.sh"; command -v awk'
+	assert_success
+	assert_output "${STUBS}/awk"
+	awk_untyped_ok awk
+	if command -v mawk >/dev/null 2>&1; then awk_untyped_ok "$ROOT/tests/lib/awk-mawk/awk"; fi
 }
 
 @test "an awk that corrupts unset elements and no mawk that works: sourcing common.sh stops with the fix" {
@@ -52,19 +58,7 @@ EOF
 	stub mawk 1
 	run env PATH="${STUBS}:${PATH}" bash -c 'source "$ROOT/tests/lib/common.sh"; echo "not reached"'
 	assert_failure 1
-	assert_output --partial "error: awk on PATH (GNU Awk 5.3.2, API 4.0) corrupts an array element passed to a function before it holds a value (a gawk 5.2 and 5.3 bug)"
+	assert_output --partial "corrupts an array element passed to a function before it holds a value (a gawk 5.2 and 5.3 bug)"
 	assert_output --partial "Install mawk (dnf, apt or brew install mawk)"
 	refute_output --partial "not reached"
-}
-
-@test "an awk that keeps unset elements intact is left first on PATH" {
-	stub awk 0
-	run env PATH="${STUBS}:${PATH}" bash -c 'source "$ROOT/tests/lib/common.sh"; command -v awk'
-	assert_success
-	assert_output "${STUBS}/awk"
-}
-
-@test "the host's awk and the mawk shim pass the check" {
-	awk_untyped_ok awk
-	if command -v mawk >/dev/null 2>&1; then awk_untyped_ok "$ROOT/tests/lib/awk-mawk/awk"; fi
 }

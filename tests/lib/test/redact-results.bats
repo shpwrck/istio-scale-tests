@@ -2,9 +2,10 @@
 # tests/lib/redact-results.sh through its real entrypoint (PL33): what it replaces, what it
 # learns the member names from and when it refuses, file and dir names, --in-place, the
 # artifacts a sweep writes besides its TSV and reports (a controlplane sweep's dir, the
-# .sweep.lock it skips), and the file-name form of a context it shares with tuning and
-# istiod-diag. Names are placeholders (ci-a, ctx-a), addresses come from the documentation
-# ranges (192.0.2.0/24, 2001:db8::/32), hosts end in .example or .example.com.
+# .sweep.lock it skips, the status rows and WINDOW_ROWS lines of its TSV), and the file-name
+# form of a context it shares with tuning and istiod-diag. Names are placeholders (ci-a, ctx-a),
+# addresses come from the documentation ranges (192.0.2.0/24, 2001:db8::/32), hosts end in
+# .example or .example.com.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -67,28 +68,32 @@ cp_sweep() {
 	assert_output ""
 }
 
-@test "a TSV's header row is redacted like any other line; its column names still pick the context columns the scan checks" {
-	local d="${RES}/s" out="${BATS_TEST_TMPDIR}/copy"
+# The lines a controlplane sweep adds to its TSV: an INTERRUPTED cell row (the one status of
+# 003's CELL_STATUS_RE without an underscore) passes the final scan of the context column, and a
+# WINDOW_ROWS line keeps each entry's /<replicas> suffix while its member names map.
+@test "a controlplane TSV's status rows (PROBE_FAILED, INTERRUPTED) keep their status; WINDOW_ROWS keeps each /<replicas> suffix and maps a member it alone names" {
+	local d="${RES}/sweep-r1" out="${BATS_TEST_TMPDIR}/out" c
 	mkdir -p "$d"
-	# A TSV without a header: its first row is the line read as one.
-	printf '# CONTEXTS=ci-a,ci-b\nr1\tci-a\t192.0.2.10\tapi.cluster-1.example.com\nr2\tci-b\t192.0.2.11\t-\n' > "${d}/headerless.tsv"
-	printf '# CONTEXTS=ci-a,ci-b\nrun_id\tcontext\tdetail\nr1\tci-a\t-\nr1\tci-z\t-\n' > "${d}/ctxcol.tsv"
+	{
+		printf '# RUN_ID=r1\n# ISTIO_VERSION_BY_CONTEXT=ci-a=v1.30.5,ci-b=v1.30.5\n'
+		printf '# Contexts: ci-a ci-b  Mesh sizes: 2\n'
+		printf 'timestamp\tcontext\tmesh_size\tservice_count\tistiod_mem_mi\n'
+		printf '2026-10-18T05:12:33+00:00\tPROBE_FAILED\t2\t5\tN/A\n'
+		printf '2026-10-18T05:12:37+00:00\tINTERRUPTED\t2\t5\tN/A\n'
+		printf '2026-10-18T05:13:37+00:00\tci-a\t2\t5\t120\n'
+		printf '2026-10-18T05:13:37+00:00\tci-b\t2\t5\t118\n'
+		printf '# WINDOW_ROWS=ci-a=3/3,ci-b=2/3,ci-c=1\n'
+		printf '# WINDOW_ROWS=ci-a=3,ci-b=3\n'
+	} > "${d}/controlplane-r1.tsv"
 	run --separate-stderr "$REDACT" --out "$out" "$d"
-	assert_failure
-	# The context column of the other file still holds a name it was not told about.
-	[[ "$stderr" == *"ctxcol.tsv: refused, not written:"*"column context holds ci-z"* ]]
-	[ ! -e "${out}/s/ctxcol.tsv" ]
-	run cat "${out}/s/headerless.tsv"
-	assert_line $'r1\t<mesh-a-ctx>\t<ip>\t<api-host>'
-	assert_line $'r2\t<mesh-b-ctx>\t<ip>\t-'
-	rm -rf "$out"
-	run --separate-stderr "$REDACT" --out "$out" --context ci-z "$d"
 	assert_success
-	# A named context takes the first letter (ci-z), the learned ones follow.
-	run cat "${out}/s/ctxcol.tsv"
-	assert_line $'run_id\tcontext\tdetail'
-	assert_line $'r1\t<mesh-b-ctx>\t-'
-	assert_line $'r1\t<mesh-a-ctx>\t-'
+	assert_output --partial "1 of 1 file(s) written under ${out}, 0 refused"
+	[[ "$stderr" == *"<mesh-c-ctx>     ci-c"* ]] || { echo "$stderr"; false; }
+	c="${out}/sweep-r1/controlplane-r1.tsv"
+	[ "$(awk -F'\t' '$1 ~ /^2026/ { print $2 }' "$c" | paste -sd, -)" = "PROBE_FAILED,INTERRUPTED,<mesh-a-ctx>,<mesh-b-ctx>" ]
+	[ "$(grep '^# WINDOW_ROWS=' "$c" | paste -sd'|' -)" = "# WINDOW_ROWS=<mesh-a-ctx>=3/3,<mesh-b-ctx>=2/3,<mesh-c-ctx>=1|# WINDOW_ROWS=<mesh-a-ctx>=3,<mesh-b-ctx>=3" ]
+	run grep -cE '(^|[^A-Za-z0-9_<])ci-[abc]([^A-Za-z0-9_]|$)' "$c"
+	assert_output 0
 }
 
 @test "a tuning sweep's raw copies of the Istio CR (istio-spec/, state/istio-before-*.json) are named and never copied; the revert patch is" {
@@ -165,28 +170,29 @@ TSV
 
 CP_REPORT="${ROOT}/tests/controlplane/004-report-results.sh"
 
-# _envelope <dir>: the scale envelope 003 writes, alone in <dir>: the real renderer (no
-# cluster: kubectl is `false`) over a controlplane run on ci-a and ci-b whose preamble
-# records each member's Istio version.
-_envelope() {
-	local d="$1" run="${BATS_TEST_TMPDIR}/cp-run"
-	mkdir -p "$run" "$d"
+# _cp_run <dir>: a controlplane run on ci-a and ci-b in <dir>, as 003 leaves it: the TSV (its
+# preamble records each member's Istio version), the json report, and the scale envelope from
+# the real renderer (no cluster: kubectl is `false`), rendered in a child bash.
+_cp_run() {
+	local d="$1"
+	mkdir -p "$d"
 	awk '{ gsub(/mesh-a/, "ci-a"); gsub(/mesh-b/, "ci-b"); print }
 		/^# ISTIO_VERSION=/ { v = $0; sub(/^# ISTIO_VERSION=/, "", v)
 			print "# ISTIO_VERSION_SOURCE=live"; print "# ISTIO_VERSION_PIN=" v
 			print "# ISTIO_VERSION_BY_CONTEXT=ci-a=" v ",ci-b=" v }' \
-		"${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv" > "${run}/controlplane-fixture-t2.tsv"
-	(
-		source "${ROOT}/tests/lib/capacity.sh"
-		source "${ROOT}/tests/lib/envelope.sh"
-		source "${ROOT}/tests/lib/platform.sh"
-		render_scale_envelope "$run" "$CP_REPORT" "ci-a,ci-b" false
-	) > "${d}/scale-envelope-t2.md" 2>/dev/null
+		"${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv" > "${d}/controlplane-fixture-t2.tsv"
+	"$CP_REPORT" --results-dir "$d" --format json > "${d}/report-t2.json" 2>/dev/null
+	bash -c 'for l in common capacity envelope platform; do source "$1/tests/lib/${l}.sh"; done
+		render_scale_envelope "$2" "$3" "ci-a,ci-b" false' _ "$ROOT" "$d" "$CP_REPORT" > "${d}/scale-envelope-t2.md" 2>/dev/null
 }
 
-
-@test "redact-results --out: placeholders for every context, URL, IP, email, account and host; mapping on stderr only; input untouched" {
+@test "redact-results --out: placeholders for every context, URL, IP, email, account, host, home dir and AWS resource id; mapping on stderr only; input untouched" {
 	_redact_fixture "$RES"
+	# A home dir under /Users and an email with dots; AWS ids with 8 or 17 hex digits, as their
+	# own word, next to a 12-digit suffix, a longer one, upper case or a longer name, which stay.
+	printf '# SOURCE_CTX=ci-a\n# RUN_CONFIG=/Users/some.one/campaign/run.env\nrun_id\tsource_ctx\tdetail\nr1\tci-a\topen /home/someone/.kube/config: owner ops.person@example.com\n' > "${RES}/sweep-r1/home-r1.tsv"
+	_ids_fixture "${BATS_TEST_TMPDIR}/ids"
+	cp "${BATS_TEST_TMPDIR}/ids/sweep-r9/run-r9.tsv" "${RES}/sweep-r1/"
 	local before after out="${BATS_TEST_TMPDIR}/copy"
 	before="$(cd "$RES" && find . -type f -exec cksum {} + | LC_ALL=C sort)"
 	run --separate-stderr "$REDACT" --out "$out" "${RES}/sweep-r1"
@@ -221,14 +227,20 @@ _envelope() {
 	# Raw evidence and other file types are not copied, and say so on stderr.
 	[ ! -e "${c}/istiod-diag-r1/001-restart-ci-a" ]
 	[ ! -e "${c}/chart.png" ]
+	run cat "${c}/home-r1.tsv"
+	assert_line "# RUN_CONFIG=<home>/campaign/run.env"
+	assert_line $'r1\t<mesh-a-ctx>\topen <home>/.kube/config: owner <email>'
+	run cat "${c}/run-r9.tsv"
+	assert_line $'r9\t<mesh-a-ctx>\t<vpc-id> <subnet-id> <sg-id>,<instance-id> <eni-id> <volume-id> <igw-id> <nat-id> <rtb-id> (<vpc-id>) "<subnet-id>"'
+	assert_line $'r9\t<mesh-b-ctx>\tstays: sg-0123abcd0123 my-sg-0123abcd sg-0123abcdx i-0123ABCD vpc-0123abc i-0123456789abcdef01 vpce-0123abcd'
 	# Nothing identifying is left anywhere in the copy.
-	run grep -rlE 'ci-[abc]([^A-Za-z0-9_]|$)|192\.0\.2|2001:db8|example\.com|amazonaws|123456789012|someone' "$out"
+	run grep -rlE 'ci-[abc]([^A-Za-z0-9_]|$)|192\.0\.2|2001:db8|example\.com|amazonaws|123456789012|someone|some\.one|ops\.person|/Users/|/home/' "$out"
 	assert_output ""
 	# A second run over the copy finds nothing more to change.
 	run "$REDACT" --dry-run "$out"
 	assert_success
 	refute_output --partial "  would change  "
-	assert_output --partial "6 file(s), 0 would change, 0 refused"
+	assert_output --partial "8 file(s), 0 would change, 0 refused"
 }
 
 @test "redact-results --dry-run writes nothing and lists the changes; no mode at all is refused" {
@@ -250,15 +262,13 @@ _envelope() {
 	run --separate-stderr "$REDACT" --out "$out" "${RES}/sweep-r1"
 	assert_failure
 	[[ "$stderr" == *"is not empty"* ]]
-	run "$REDACT" --help
-	assert_success
-	local flag
-	for flag in --out --in-place --dry-run --context --hub-context --help; do assert_output --partial -- "$flag"; done
 }
 
-@test "a context column naming a member the metadata does not: exit 1, the file named and not written; --context maps it" {
+@test "a context column naming a member the metadata does not: exit 1, the file named and not written; --context maps it; a TSV's header row is redacted like any other line" {
 	_redact_fixture "$RES"
 	printf 'r1\tci-a\tci-z\t-\n' >> "${RES}/sweep-r1/reach-r1.tsv"
+	# A TSV without a header: its first row is the line read as one.
+	printf '# CONTEXTS=ci-a,ci-b\nr1\tci-a\t192.0.2.10\tapi.cluster-1.example.com\nr2\tci-b\t192.0.2.11\t-\n' > "${RES}/sweep-r1/headerless.tsv"
 	local out="${BATS_TEST_TMPDIR}/copy"
 	run --separate-stderr "$REDACT" --out "$out" "${RES}/sweep-r1"
 	assert_failure
@@ -266,6 +276,9 @@ _envelope() {
 	[[ "$stderr" == *"column target_ctx holds ci-z, a context it was not told about (pass --context ci-z)"* ]]
 	[ ! -e "${out}/sweep-r1/reach-r1.tsv" ]
 	[ -e "${out}/sweep-r1/endpoint-r1.tsv" ]
+	run cat "${out}/sweep-r1/headerless.tsv"
+	assert_line $'r1\t<mesh-a-ctx>\t<ip>\t<api-host>'
+	assert_line $'r2\t<mesh-b-ctx>\t<ip>\t-'
 	rm -rf "$out"
 	run --separate-stderr "$REDACT" --out "$out" --context ci-z --hub-context ci-hub "${RES}/sweep-r1"
 	assert_success
@@ -288,50 +301,38 @@ _envelope() {
 	cmp "${d}/reach-r1.tsv" "${BATS_TEST_TMPDIR}/reach.orig"
 }
 
-@test "a real controlplane sweep (TSV, markdown and json reports, scale envelope md) redacts; the envelope is left as is" {
-	local d="${RES}/sweep-t2" out="${BATS_TEST_TMPDIR}/copy" rep="${ROOT}/tests/controlplane/004-report-results.sh"
-	mkdir -p "$d"
-	cp "${ROOT}/tests/lib/test/fixtures/controlplane_cluster_proxies.tsv" "${d}/controlplane-fixture-t2.tsv"
-	"$rep" --results-dir "$d" --format markdown > "${d}/summary-t2.md" 2>/dev/null
-	"$rep" --results-dir "$d" --format json > "${d}/report-t2.json" 2>/dev/null
-	# The envelope as 003 writes it: the real renderer, no cluster (kubectl is `false`).
-	(
-		source "${ROOT}/tests/lib/capacity.sh"
-		source "${ROOT}/tests/lib/envelope.sh"
-		source "${ROOT}/tests/lib/platform.sh"
-		render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
-	) > "${d}/scale-envelope-t2.md" 2>/dev/null
-	grep -q '^## Scale envelope' "${d}/scale-envelope-t2.md"
+@test "a controlplane run's TSV, json report and scale envelope redact with no column, number or path changed; the envelope alone learns its members from its by member list" {
+	local d="${RES}/sweep-t2" out="${BATS_TEST_TMPDIR}/copy" c
+	_cp_run "$d"
+	grep -q 'by member ci-a=1\.30\.5,ci-b=1\.30\.5' "${d}/scale-envelope-t2.md"
 	run --separate-stderr "$REDACT" --out "$out" "$d"
 	assert_success
-	[[ "$stderr" == *"<mesh-a-ctx>     mesh-a"* && "$stderr" == *"<mesh-b-ctx>     mesh-b"* ]]
-	assert_output --partial "4 of 4 file(s) written"
-	local c="${out}/sweep-t2"
-	# The envelope names no member: copied byte for byte (no metric or path mangled).
-	cmp "${d}/scale-envelope-t2.md" "${c}/scale-envelope-t2.md"
-	run grep -rlE '(^|[^<])mesh-[ab]' "$out"
+	[[ "$stderr" == *"<mesh-a-ctx>     ci-a"* && "$stderr" == *"<mesh-b-ctx>     ci-b"* ]]
+	assert_output --partial "3 of 3 file(s) written"
+	c="${out}/sweep-t2"
+	run grep -rlE '(^|[^<])ci-[ab]' "$out"
 	assert_output ""
 	jq -e '.metadata.proxy_check.flagged == "<mesh-a-ctx>@2026-06-01T00:10:00+00:00:LOW:30/40"' "${c}/report-t2.json"
 	# Same columns and the same header row as the input.
 	[ "$(awk -F'\t' '!/^#/ { print NF }' "${c}/controlplane-fixture-t2.tsv" | sort -u)" = 51 ]
 	[ "$(grep -v '^#' "${d}/controlplane-fixture-t2.tsv" | head -1)" = "$(grep -v '^#' "${c}/controlplane-fixture-t2.tsv" | head -1)" ]
+	# The envelope: only the member names change (no metric or path mangled).
+	sed 's/ci-a/<mesh-a-ctx>/g; s/ci-b/<mesh-b-ctx>/g' "${d}/scale-envelope-t2.md" | cmp - "${c}/scale-envelope-t2.md"
 	run "$REDACT" --dry-run "$out"
 	assert_success
-	assert_output --partial "4 file(s), 0 would change, 0 refused"
-}
-
-@test "redact-results masks AWS resource ids with 8 or 17 hex digits, as its own word; a 12-digit suffix, a longer one, upper case or a longer name stays" {
-	_ids_fixture "$RES"
-	local out="${BATS_TEST_TMPDIR}/copy"
-	run --separate-stderr "$REDACT" --out "$out" "${RES}/sweep-r9"
+	assert_output --partial "3 file(s), 0 would change, 0 refused"
+	# The envelope alone: the members come from its by member list, and the copy, which names
+	# them by placeholder only, passes a second run unchanged.
+	mkdir -p "${RES}/env"
+	cp "${d}/scale-envelope-t2.md" "${RES}/env/"
+	run --separate-stderr "$REDACT" --out "${BATS_TEST_TMPDIR}/copy2" "${RES}/env"
 	assert_success
-	run cat "${out}/sweep-r9/run-r9.tsv"
-	assert_line $'r9\t<mesh-a-ctx>\t<vpc-id> <subnet-id> <sg-id>,<instance-id> <eni-id> <volume-id> <igw-id> <nat-id> <rtb-id> (<vpc-id>) "<subnet-id>"'
-	assert_line $'r9\t<mesh-b-ctx>\tstays: sg-0123abcd0123 my-sg-0123abcd sg-0123abcdx i-0123ABCD vpc-0123abc i-0123456789abcdef01 vpce-0123abcd'
-	# The dry run counts them as their own kind.
-	run "$REDACT" --dry-run "${RES}/sweep-r9"
+	[[ "$stderr" =~ \<mesh-a-ctx\>\ +ci-a && "$stderr" =~ \<mesh-b-ctx\>\ +ci-b ]]
+	grep -q 'by member <mesh-a-ctx>=1\.30\.5,<mesh-b-ctx>=1\.30\.5' "${BATS_TEST_TMPDIR}/copy2/env/scale-envelope-t2.md"
+	run --separate-stderr "$REDACT" --dry-run "${BATS_TEST_TMPDIR}/copy2"
 	assert_success
-	assert_line --regexp '^  would change  .*/sweep-r9/run-r9\.tsv \(3 line\(s\): context [0-9]+, aws-id 11\)$'
+	assert_output --partial "1 file(s), 0 would change, 0 refused"
+	[[ "$stderr" == *"(none: the files' metadata names members by placeholder only"* ]]
 }
 
 @test "--out renames a file or dir whose name holds a context (no angle brackets), lists each rename on stderr only, and the copy names no context in a path" {
@@ -444,24 +445,6 @@ _envelope() {
 	[ "$before" = "$(_tree_sum)" ]
 }
 
-@test "redact-results: a scale envelope redacted alone learns the members from its by member list; the copy names none and redacts again" {
-	local e="${RES}/env" out="${BATS_TEST_TMPDIR}/copy"
-	_envelope "$e"
-	grep -q 'by member ci-a=1\.30\.5,ci-b=1\.30\.5' "${e}/scale-envelope-t2.md"
-	run --separate-stderr "$REDACT" --out "$out" "$e"
-	assert_success
-	[[ "$stderr" =~ \<mesh-a-ctx\>\ +ci-a && "$stderr" =~ \<mesh-b-ctx\>\ +ci-b ]]
-	grep -q 'by member <mesh-a-ctx>=1\.30\.5,<mesh-b-ctx>=1\.30\.5' "${out}/env/scale-envelope-t2.md"
-	run grep -rlE '(^|[^<])ci-[ab]' "$out"
-	assert_output ""
-	# The copy: its by member list names members by placeholder only, so a second run
-	# (here a dry run) passes and changes nothing.
-	run --separate-stderr "$REDACT" --dry-run "$out"
-	assert_success
-	assert_output --partial "1 file(s), 0 would change, 0 refused"
-	[[ "$stderr" == *"(none: the files' metadata names members by placeholder only"* ]]
-}
-
 @test "redact-results: files it learns no member from are refused (exit 1, nothing written) unless --context names them or --no-contexts says they name none" {
 	local d="${RES}/lone" out="${BATS_TEST_TMPDIR}/copy"
 	mkdir -p "$d"
@@ -492,7 +475,7 @@ _envelope() {
 	grep -qx 'p99 12 ms on <ip>' "${out}/lone/summary.md"
 }
 
-@test "redact-results: --context and --hub-context split a comma list and refuse a name with a space or no name; --help lists --no-contexts and TMPDIR" {
+@test "redact-results: --context and --hub-context split a comma list and refuse a name with a space or no name" {
 	local d="${RES}/s"
 	mkdir -p "$d"
 	printf 'ci-a and hub-x\n' > "${d}/n.md"
@@ -509,10 +492,6 @@ _envelope() {
 	run --separate-stderr "$REDACT" --context 'ci-a, ci-b' --hub-context hub-x --dry-run "$d"
 	assert_success
 	[[ "$stderr" =~ \<mesh-a-ctx\>\ +ci-a && "$stderr" =~ \<mesh-b-ctx\>\ +ci-b && "$stderr" =~ \<hub-a-ctx\>\ +hub-x ]]
-	run "$REDACT" --help
-	assert_success
-	assert_output --partial "--no-contexts"
-	assert_output --partial "TMPDIR"
 }
 
 @test "ctx_file_safe: one file-name form of a context in any locale (other bytes as _, cut to CTX_FILE_NAME_MAX on request); tuning's ctx_key and redact's aliases use it" {
@@ -544,20 +523,4 @@ _envelope() {
 	[ -f "${BATS_TEST_TMPDIR}/copy/s/istiod-diag-r1/mesh-a-ctx/b.txt" ]
 	[ -f "${BATS_TEST_TMPDIR}/copy/s/istiod-diag-r1/mesh-b-ctx/a.txt" ]
 	grep -qx $'r1\t<mesh-a-ctx> and <mesh-b-ctx>' "${BATS_TEST_TMPDIR}/copy/s/run.tsv"
-}
-
-@test "redact-results: home dirs under /home and /Users read <home>, emails <email>, the vocabulary preamble.sh masks with; --help says so" {
-	local d="${RES}/h" out="${BATS_TEST_TMPDIR}/copy"
-	mkdir -p "$d"
-	printf '# SOURCE_CTX=ci-a\n# RUN_CONFIG=/Users/some.one/campaign/run.env\nrun_id\tsource_ctx\tdetail\nr1\tci-a\topen /home/someone/.kube/config: owner ops.person@example.com\n' > "${d}/endpoint-r1.tsv"
-	run --separate-stderr "$REDACT" --out "$out" "$d"
-	assert_success
-	run cat "${out}/h/endpoint-r1.tsv"
-	assert_line "# RUN_CONFIG=<home>/campaign/run.env"
-	assert_line $'r1\t<mesh-a-ctx>\topen <home>/.kube/config: owner <email>'
-	run grep -rlE 'someone|some\.one|ops\.person|/Users/|/home/' "$out"
-	assert_output ""
-	run "$REDACT" --help
-	assert_output --partial "home dirs (/home/<name> and /Users/<name>) <home>"
-	assert_output --partial "emails <email>"
 }

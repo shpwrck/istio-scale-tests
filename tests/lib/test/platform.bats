@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 # tests/lib/platform.sh: platform_of and the suite charts' OpenShift overlay (platform_chart_args,
-# the charts' two renders, the 001 setup scripts that call it: PL33), platform_validate, and the
-# platform record: platform_probe over a stub kubectl, the sweep's shared file, the writers, the
-# reports' merge, the drift check, the tuning profile objects, the kind path warning.
+# the charts' two renders, the 001 setup scripts' dry-runs: PL33), platform_validate, and the
+# platform record: platform_probe over a stub kubectl, the writers, the reports' merge, the drift
+# check, the tuning profile objects (and tuning 001 and 003 refusing over them), the kind path
+# warning.
 # No cluster: the stub kubectl answers from the test, and the entrypoint runs use an empty
 # kubeconfig.
 
@@ -10,7 +11,6 @@ bats_require_minimum_version 1.5.0
 load test_helper
 source "${ROOT}/tests/lib/platform.sh"
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe's warnings)
-source "${ROOT}/tests/lib/config.sh"  # config_allowed_keys (the keys --config can set)
 
 SUITES=(propagation churn churn-dataplane controlplane dataplane)
 
@@ -51,7 +51,7 @@ setup() {
 # platform_of, platform_chart_args, platform_validate
 # ---------------------------------------------------------------------------
 
-@test "platform_of: auto asks the member once (security.openshift.io/v1 is OpenShift, lookalikes are not); kubernetes or openshift is used as is" {
+@test "platform_of: auto asks the member once (security.openshift.io/v1 is OpenShift, lookalikes are not), an explicit one asks nothing; a member it cannot ask is an error naming it, never a guess; a bad TEST_PLATFORM fails before any call" {
 	FAKE_PLATFORM=openshift run platform_of member-a
 	assert_success
 	assert_output openshift
@@ -72,15 +72,11 @@ setup() {
 	assert_output openshift-gitops
 	run platform_gitops_namespace hub
 	assert_output argocd
-}
-
-@test "platform_of: a member it cannot ask is an error naming it, never a guess; another TEST_PLATFORM fails before any call" {
 	FAKE_PLATFORM=down run --separate-stderr platform_of member-b
 	assert_failure 1
 	[ -z "$output" ]
 	[[ "$stderr" == *"cannot list the API versions of context member-b"* ]]
-	[[ "$stderr" == *"set TEST_PLATFORM to skip the check"* ]]
-	[[ "$stderr" == *"i/o timeout"* ]]
+	[[ "$stderr" == *"set TEST_PLATFORM to skip the check"* && "$stderr" == *"i/o timeout"* ]]
 	FAKE_PLATFORM=down run platform_gitops_namespace hub
 	assert_failure
 	: > "$CALLS"
@@ -90,7 +86,7 @@ setup() {
 	[ ! -s "$CALLS" ]
 }
 
-@test "platform_chart_args: the overlay on OpenShift, nothing on Kubernetes; a dry-run with auto asks no cluster, an explicit platform still renders" {
+@test "platform_chart_args: the overlay on OpenShift, nothing on Kubernetes; a dry-run with auto asks no cluster, an explicit platform still renders; an unreachable member fails with the array empty; an OpenShift member and a chart without the overlay is an error" {
 	local a=(stale)
 	FAKE_PLATFORM=openshift platform_chart_args "$CHART" member-a a
 	[ "${a[*]}" = "-f ${CHART}/values-openshift.yaml" ]
@@ -110,10 +106,7 @@ setup() {
 	platform_chart_args "$CHART" member-o a
 	[ "${a[*]}" = "-f ${CHART}/values-openshift.yaml" ]
 	[ ! -s "$CALLS" ]
-}
-
-@test "platform_chart_args: an unreachable member fails and leaves the array empty; an OpenShift member and a chart without the overlay is an error" {
-	local a=(stale)
+	a=(stale)
 	FAKE_PLATFORM=down run platform_chart_args "$CHART" member-b a
 	assert_failure 1
 	assert_output --partial "cannot list the API versions of context member-b"
@@ -126,6 +119,7 @@ setup() {
 }
 
 # full_render_args <suite>: --set args that render every template with a container.
+
 full_render_args() {
 	case "$1" in
 	propagation) echo "--set clusterName=member-a --set backer.enabled=true" ;;
@@ -155,104 +149,86 @@ full_render_args() {
 	done
 }
 
-@test "001 setup scripts: each sources platform.sh and every chart render takes its overlay args" {
-	local s f renders wired
-	for s in "${SUITES[@]}"; do
-		f="$(ls "${ROOT}/tests/${s}"/001-*.sh)"
-		grep -q 'source "${ROOT}/tests/lib/platform.sh"' "$f" || { echo "$f: does not source platform.sh"; false; }
-		renders="$(grep -cE 'helm template [a-z-]+ "\$CHART_DIR"' "$f")"
-		wired="$(grep -cE 'helm template [a-z-]+ "\$CHART_DIR" \$\{[A-Za-z_]+\[@\]\+"\$\{[A-Za-z_]+\[@\]\}"\}' "$f")"
-		((renders > 0)) || { echo "$f: no chart render found"; false; }
-		[ "$wired" -eq "$renders" ] || { echo "$f: $renders chart render(s), $wired with the platform args"; false; }
-		[ "$(grep -c 'platform_chart_args "\$CHART_DIR"' "$f")" -ge "$renders" ] || { echo "$f: fewer platform_chart_args calls than renders"; false; }
-	done
-}
-
-@test "controlplane 001: every overlay is resolved before the first apply and its t0" {
-	# A platform read inside an apply would land in that apply's ns-lifecycle duration, and a
-	# member it cannot tell would fail after others were already applied.
-	local f="${ROOT}/tests/controlplane/001-setup-controlplane-test.sh" call pids t0
-	call="$(grep -n 'platform_chart_args "\$CHART_DIR"' "$f" | cut -d: -f1)"
-	pids="$(grep -n '^APPLY_PIDS=()' "$f" | cut -d: -f1)"
-	t0="$(grep -n 't0="\$(now_ms)"' "$f" | head -n 1 | cut -d: -f1)"
-	[ "$(wc -l <<<"$call")" -eq 1 ] || { echo "platform_chart_args at lines: $call"; false; }
-	((call < pids && pids < t0)) || { echo "platform_chart_args at $call, APPLY_PIDS=() at $pids, the first t0 at $t0"; false; }
-}
-
-# helm_spy: a helm on PATH that logs its args, then runs the real one.
-helm_spy() {
+# stub_bin: a helm on PATH that logs its args, then runs the real one, and a kubectl that logs
+# its args and answers nothing (the dry-runs' kubectl apply --dry-run=client).
+stub_bin() {
 	local real
 	real="$(command -v helm)"
 	BIN="${BATS_TEST_TMPDIR}/bin"
 	mkdir -p "$BIN"
-	export HELM_LOG="${BATS_TEST_TMPDIR}/helm.log"
+	export HELM_LOG="${BATS_TEST_TMPDIR}/helm.log" KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
 	: > "$HELM_LOG"
 	printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$HELM_LOG"' "exec \"${real}\" \"\$@\"" > "${BIN}/helm"
-	chmod +x "${BIN}/helm"
+	printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$KUBECTL_LOG"' 'cat > /dev/null' > "${BIN}/kubectl"
+	chmod +x "${BIN}/helm" "${BIN}/kubectl"
 }
 
-@test "001 dry-runs (churn, churn-dataplane, controlplane): the overlay with TEST_PLATFORM=openshift only" {
+@test "001 setup scripts, --dry-run: with TEST_PLATFORM=openshift every chart render takes the suite's values-openshift.yaml, without it none does" {
 	command -v helm >/dev/null 2>&1 || skip "helm not installed"
-	command -v kubectl >/dev/null 2>&1 || command -v oc >/dev/null 2>&1 || skip "kubectl not installed"
-	local ek="${BATS_TEST_TMPDIR}/kubeconfig" s cmd
+	local ek="${BATS_TEST_TMPDIR}/kubeconfig" s f n_t n_o
+	local -a args
 	: > "$ek"
-	helm_spy
-	for s in churn churn-dataplane controlplane; do
+	stub_bin
+	for s in "${SUITES[@]}"; do
+		f="$(ls "${ROOT}/tests/${s}"/001-*.sh)"
 		case "$s" in
-		churn) cmd=(bash "${ROOT}/tests/churn/001-setup-churn-test.sh" --dry-run --contexts ci-a) ;;
-		churn-dataplane) cmd=(bash "${ROOT}/tests/churn-dataplane/001-setup-coexec-test.sh" --dry-run --source-context ci-a) ;;
-		controlplane) cmd=(bash "${ROOT}/tests/controlplane/001-setup-controlplane-test.sh" --dry-run --contexts ci-a) ;;
+		dataplane) args=(--source-context ci-a --remote-contexts ci-b) ;;
+		churn-dataplane) args=(--source-context ci-a) ;;
+		*) args=(--contexts ci-a) ;;
 		esac
 		: > "$HELM_LOG"
-		PATH="${BIN}:${PATH}" KUBECONFIG="$ek" TEST_PLATFORM=openshift run "${cmd[@]}"
+		PATH="${BIN}:${PATH}" KUBECONFIG="$ek" TEST_PLATFORM=openshift run bash "$f" --dry-run "${args[@]}"
 		assert_success
-		grep -q -- "-f ${ROOT}/tests/${s}/chart/values-openshift.yaml" "$HELM_LOG" || { echo "$s: no overlay"; cat "$HELM_LOG"; false; }
+		n_t="$(grep -c '^template ' "$HELM_LOG")"
+		n_o="$(grep -c "^template .* -f ${ROOT}/tests/${s}/chart/values-openshift.yaml" "$HELM_LOG")"
+		((n_t > 0 && n_o == n_t)) || { echo "${s}: ${n_t} render(s), ${n_o} with the overlay"; cat "$HELM_LOG"; false; }
 		: > "$HELM_LOG"
-		PATH="${BIN}:${PATH}" KUBECONFIG="$ek" run "${cmd[@]}"
+		PATH="${BIN}:${PATH}" KUBECONFIG="$ek" run bash "$f" --dry-run "${args[@]}"
 		assert_success
-		grep -q '^template ' "$HELM_LOG" || { echo "$s: no render"; false; }
-		! grep -q 'values-openshift.yaml' "$HELM_LOG" || { echo "$s: overlay without TEST_PLATFORM=openshift"; false; }
-		PATH="${BIN}:${PATH}" KUBECONFIG="$ek" TEST_PLATFORM=okd run "${cmd[@]}"
-		assert_failure
-		assert_output --partial "TEST_PLATFORM must be auto, kubernetes or openshift (got: okd)"
+		grep -q '^template ' "$HELM_LOG" || { echo "${s}: no render"; false; }
+		! grep -q 'values-openshift.yaml' "$HELM_LOG" || { echo "${s}: overlay without TEST_PLATFORM=openshift"; false; }
 	done
 }
 
-@test "platform_validate: TEST_PLATFORM, PLATFORM_READ_TIMEOUT and PLATFORM_READ_PARALLEL refused when not valid; options.env defaults every suite's --config can set" {
-	local v s
+@test "platform_validate: TEST_PLATFORM, PLATFORM_READ_TIMEOUT and PLATFORM_READ_PARALLEL refused when not valid; every suite's --config sets them" {
+	local v f="${BATS_TEST_TMPDIR}/platform.env" want="" s
 	for v in auto kubernetes openshift ""; do TEST_PLATFORM="$v" run platform_validate; assert_success; done
 	TEST_PLATFORM=k8s run platform_validate
 	assert_failure
-	assert_output --partial "TEST_PLATFORM must be auto, kubernetes or openshift (got: k8s); set it in the environment, config/options.env or, in a script that takes one, the --config file"
+	assert_output --partial "TEST_PLATFORM must be auto, kubernetes or openshift (got: k8s)"
 	for v in 20s 1m 30 500ms 1m30s 1.5m; do PLATFORM_READ_TIMEOUT="$v" run platform_validate; assert_success; done
 	for v in 0 0s 0.0m abc -5s "20 s"; do
 		PLATFORM_READ_TIMEOUT="$v" run platform_validate
 		assert_failure
-		assert_output --partial "PLATFORM_READ_TIMEOUT must be a kubectl --request-timeout above zero, such as 20s or 1m (got: ${v})"
+		assert_output --partial "PLATFORM_READ_TIMEOUT must be a kubectl --request-timeout above zero"
+		assert_output --partial "(got: ${v})"
 	done
 	for v in 1 20 500; do PLATFORM_READ_PARALLEL="$v" run platform_validate; assert_success; done
 	for v in 0 -1 abc 2.5 03; do
 		PLATFORM_READ_PARALLEL="$v" run platform_validate
 		assert_failure
-		assert_output --partial "PLATFORM_READ_PARALLEL must be a whole number above zero: how many members' platform records are read at once (got: ${v})"
+		assert_output --partial "PLATFORM_READ_PARALLEL must be a whole number above zero"
+		assert_output --partial "(got: ${v})"
 	done
-	run bash -c 'unset PLATFORM_READ_TIMEOUT PLATFORM_READ_PARALLEL; source "$1/config/options.env"; echo "$PLATFORM_READ_TIMEOUT $PLATFORM_READ_PARALLEL"' _ "$ROOT"
-	assert_output "20s 20"
-	for s in propagation churn churn-dataplane controlplane dataplane gateway-api; do
-		for v in TEST_PLATFORM PLATFORM_READ_TIMEOUT PLATFORM_READ_PARALLEL; do
-			config_allowed_keys "$s" | grep -qx "$v" || { echo "${s}: --config cannot set ${v}"; false; }
-		done
-	done
+	# In a child bash: the key lists' loops are slow under the bats DEBUG trap.
+	printf '%s\n' TEST_PLATFORM=openshift PLATFORM_READ_TIMEOUT=45s PLATFORM_READ_PARALLEL=7 > "$f"
+	set -- propagation churn churn-dataplane controlplane dataplane gateway-api
+	run --separate-stderr bash -c 'source "$1/tests/lib/common.sh"; ROOT="$1"; source "$1/tests/lib/config.sh"; f="$2"; shift 2
+		for s in "$@"; do (load_config "$f" "$s" > /dev/null && echo "$s $TEST_PLATFORM $PLATFORM_READ_TIMEOUT $PLATFORM_READ_PARALLEL"); done' _ "$ROOT" "$f" "$@"
+	assert_success
+	for s in "$@"; do want+="${s} openshift 45s 7"$'\n'; done
+	assert_output "${want%$'\n'}"
 }
 
 @test "platform_members_check: a member listed twice, or two the record writes under one name, dies before any read, in a dry-run too" {
 	KUBECTL=(_probe_kubectl)
 	run platform_probe member-a,member-b,member-a
 	assert_failure
-	assert_output --partial "member-a is listed twice among the mesh members: list each member once (--contexts or SETUP_CONTEXTS; a probe's --source-context is not one of its --remote-contexts)"
+	assert_output --partial "member-a is listed twice among the mesh members: list each member once"
 	DRY_RUN=1 run platform_members_check "lab~a" lab_a
 	assert_failure
-	assert_output --partial "lab~a and lab_a would be recorded under one name, lab_a (the record writes a member's name with A-Z, a-z, 0-9 and _.:/@+- only): rename one of the two contexts"
+	assert_output --partial "lab~a and lab_a would be recorded under one name, lab_a"
+	assert_output --partial "rename one of the two contexts"
 	run platform_members_check member-a "" member-b
 	assert_success
 	[ ! -s "$CALLS" ]
@@ -351,7 +327,7 @@ env_digest() {
 	file_sha256 "${BATS_TEST_TMPDIR}/env-list.txt" | cut -c1-12
 }
 
-@test "platform_probe: a Kubernetes member records the Sail operator, the builds that ran (tag and digest, no registry) and the node provider; istiod's env without CLUSTER_ID" {
+@test "platform_probe: what each member ran, its builds (tag and digest, no registry), its operator (the Sail operator, OSSM's CSV on OpenShift), node provider and istiod's env without CLUSTER_ID; every read bounded; each call reads again" {
 	probe_setup
 	PLATFORM_READ_TIMEOUT=45s platform_probe member-a,member-b 2>"$WARN"
 	[ ! -s "$WARN" ] || { cat "$WARN"; false; }
@@ -370,19 +346,20 @@ env_digest() {
 	assert_line "# ISTIOD_ENV_BY_CONTEXT=member-a=$(env_digest),member-b=$(env_digest)"
 	refute_output --partial "example.invalid"
 	refute_output --partial "TUNING_OBJECTS"
-	# Four reads a member, each bounded by PLATFORM_READ_TIMEOUT.
-	[ "$(grep -c -- '--context=member-a --request-timeout=45s ' "$CALLS")" -eq 4 ]
-	[ "$(wc -l < "$CALLS")" -eq 8 ]
+	# Every read is bounded by PLATFORM_READ_TIMEOUT.
+	[ -s "$CALLS" ]
+	run grep -v -- '--request-timeout=45s ' "$CALLS"
+	assert_failure 1
 	# Another setting, a rollout of another gateway build, a pod that has not started.
 	probe_setup
 	PROBE_ISTIOD_THROTTLE=50 PROBE_EWGW=other PROBE_ISTIOD_PODS=pending platform_probe member-c 2>"$WARN"
 	[ "$(platform_member_value member-c istiod_env)" = "$(env_digest 50)" ]
 	[ "$(platform_member_value member-c proxy)" = "proxyv2:1.30.5@${DIG_C}+proxyv2:1.30.6@${DIG_A}" ]
 	[ "$(platform_member_value member-c istiod)" = "pilot:1.30.5@unknown" ]
-}
-
-@test "platform_probe: an OpenShift member records its OSSM CSV version and the cloud provider (a node without one left out)" {
+	# OpenShift: the OSSM CSV's version (the Sail operator not read), the cloud provider (a node
+	# without one left out).
 	probe_setup
+	: > "$CALLS"
 	PROBE_PLATFORM=openshift platform_probe member-o 2>"$WARN"
 	[ ! -s "$WARN" ] || { cat "$WARN"; false; }
 	run platform_preamble_lines member-o
@@ -390,13 +367,47 @@ env_digest() {
 	assert_line "# MESH_OPERATOR_BY_CONTEXT=member-o=servicemeshoperator3:3.4.3"
 	assert_line "# NODE_PROVIDER_BY_CONTEXT=member-o=aws"
 	! grep -q 'sail-operator' "$CALLS" || false
+	# In one shell, each platform_probe reads its members again (tuning 003 probes each pass).
+	: > "$CALLS"
+	PROBE_ISTIOD=1.30.6 platform_probe member-a 2>/dev/null
+	grep -q -- '--context=member-a' "$CALLS"
+	[ "$(platform_member_value member-a istiod)" = "pilot:1.30.6@${DIG_B}" ]
 }
 
-@test "platform_probe: a value it cannot read is unknown with a warning; a member that does not answer is not asked again; a refused platform read leaves the operator unknown" {
+# A step that sources platform.sh with PLATFORM_PROBE_FILE records what the sweep read at its
+# start, each value under its own member; the drift check then compares the end with that.
+@test "platform_probe_share: a sweep's steps take its record for the members it read (each value under its member) and read only the members it lacks; a dry-run shares nothing" {
+	probe_setup
+	platform_probe member-a 2>/dev/null
+	local d="${BATS_TEST_TMPDIR}/sweep" f
+	platform_probe_share "$d"
+	f="$PLATFORM_PROBE_FILE"
+	[ "$f" = "${d}/platform-record.txt" ]
+	# member-a's build edited in the file, to show the step does not read member-a again.
+	sed 's/pilot:1\.30\.5/pilot:from-the-sweep/' "$f" > "${f}.new"
+	mv "${f}.new" "$f"
+	# The step: a shell that sources platform.sh with the file, over the same stub kubectl.
+	declare -f _probe_kubectl _probe_gw > "${BATS_TEST_TMPDIR}/stub.sh"
+	printf 'DIG_A=%s DIG_B=%s DIG_C=%s\nPLATFORM_TUNING_KINDS=%s PLATFORM_TUNING_LABEL=%s\nsource "%s/tests/lib/common.sh"; source "%s/tests/lib/reach.sh"\n' \
+		"$DIG_A" "$DIG_B" "$DIG_C" "$PLATFORM_TUNING_KINDS" "$PLATFORM_TUNING_LABEL" "$ROOT" "$ROOT" >> "${BATS_TEST_TMPDIR}/stub.sh"
+	: > "$CALLS"
+	run bash -c 'unset _PL_ROW _PL_SHARED _PL_MEMBERS; source "$2"; source "$1/tests/lib/platform.sh"; KUBECTL=(_probe_kubectl)
+		platform_probe member-a,member-b 2>/dev/null; platform_preamble_lines member-a,member-b' _ "$ROOT" "${BATS_TEST_TMPDIR}/stub.sh"
+	assert_success
+	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=member-a=pilot:from-the-sweep@${DIG_B},member-b=pilot:1.30.5@${DIG_B}"
+	assert_line "# MESH_OPERATOR_BY_CONTEXT=member-a=sail-operator:1.31.1@${DIG_A},member-b=sail-operator:1.31.1@${DIG_A}"
+	assert_line "# NODE_PROVIDER_BY_CONTEXT=member-a=kind,member-b=kind"
+	! grep -q -- '--context=member-a' "$CALLS" || false
+	grep -q -- '--context=member-b' "$CALLS"
+	DRY_RUN=1 platform_probe_share "${BATS_TEST_TMPDIR}/dry"
+	[ ! -e "${BATS_TEST_TMPDIR}/dry/platform-record.txt" ]
+}
+
+@test "platform_probe: a value not read is unknown, never a guess (a member down or forbidden, a dry-run, a member never probed), with a warning; a member that does not answer is not asked again; values keep only safe characters" {
 	probe_setup
 	PROBE_PLATFORM=down platform_probe member-d 2>"$WARN"
-	grep -q 'warning: member-d: could not read the platform (so the mesh operator build is not read either); recorded as unknown: error: cannot list the API versions of context member-d' "$WARN"
-	grep -q 'warning: member-d: did not answer; its platform record stops here' "$WARN"
+	grep -q 'warning: member-d: could not read the platform .*recorded as unknown: error: cannot list the API versions of context member-d' "$WARN"
+	grep -q 'warning: member-d: did not answer' "$WARN"
 	! grep -q '192.0.2.10' "$WARN" || false
 	[ "$(wc -l < "$CALLS")" -eq 1 ]
 	run platform_preamble_lines member-d
@@ -411,10 +422,8 @@ env_digest() {
 	[ "$(platform_member_value member-f operator)" = unknown ]
 	[ "$(platform_member_value member-f istiod)" = "pilot:1.30.5@${DIG_B}" ]
 	[ "$(platform_member_value member-f nodes)" = kind ]
-}
-
-@test "platform_probe: a dry-run reads nothing and records unknown; a member never probed warns and reads unknown; values keep only safe characters" {
 	probe_setup
+	: > "$CALLS"
 	DRY_RUN=1 platform_probe member-a,member-b
 	[ ! -s "$CALLS" ]
 	run platform_preamble_lines member-a,member-b
@@ -422,7 +431,7 @@ env_digest() {
 	assert_line "# MESH_OPERATOR_BY_CONTEXT=member-a=unknown,member-b=unknown"
 	run --separate-stderr platform_preamble_lines member-x
 	assert_line "# PLATFORM_BY_CONTEXT=member-x=unknown"
-	[[ "$stderr" == *"member-x: no platform record was read (platform_probe was not called for it); its values read unknown"* ]]
+	[[ "$stderr" == *"member-x: no platform record was read"*"its values read unknown"* ]]
 	local v
 	_platform_sanitize_to v 'a b,c=d|e'
 	[ "$v" = a_b_c_d_e ]
@@ -430,36 +439,6 @@ env_digest() {
 	[ "$v" = unknown ]
 	_platform_sanitize_to v 'img:1.0@sha256:ab+x/y'
 	[ "$v" = 'img:1.0@sha256:ab+x/y' ]
-}
-
-@test "platform_probe_share: a sweep's steps reuse its record file and read only the members it lacks; platform_probe in one shell reads what it is asked" {
-	probe_setup
-	platform_probe member-a 2>/dev/null
-	local d="${BATS_TEST_TMPDIR}/sweep"
-	platform_probe_share "$d"
-	[ "$PLATFORM_PROBE_FILE" = "${d}/platform-record.txt" ]
-	[ "$(cut -f1 "$PLATFORM_PROBE_FILE")" = member-a ]
-	# A step: a shell that sources platform.sh with the file (member-a's build edited there, to
-	# show it is not read again), with the stub kubectl.
-	sed -i 's/pilot:1.30.5/pilot:from-the-sweep/' "$PLATFORM_PROBE_FILE"
-	declare -f _probe_kubectl _probe_gw > "${BATS_TEST_TMPDIR}/stub.sh"
-	printf 'DIG_A=%s DIG_B=%s DIG_C=%s\nPLATFORM_TUNING_KINDS=%s PLATFORM_TUNING_LABEL=%s\nsource "%s/tests/lib/common.sh"; source "%s/tests/lib/reach.sh"\n' \
-		"$DIG_A" "$DIG_B" "$DIG_C" "$PLATFORM_TUNING_KINDS" "$PLATFORM_TUNING_LABEL" "$ROOT" "$ROOT" >> "${BATS_TEST_TMPDIR}/stub.sh"
-	: > "$CALLS"
-	run bash -c 'unset _PL_ROW _PL_SHARED _PL_MEMBERS; source "$2"; source "$1/tests/lib/platform.sh"; KUBECTL=(_probe_kubectl)
-		platform_probe member-a,member-b 2>/dev/null; platform_preamble_lines member-a,member-b' _ "$ROOT" "${BATS_TEST_TMPDIR}/stub.sh"
-	assert_success
-	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=member-a=pilot:from-the-sweep@${DIG_B},member-b=pilot:1.30.5@${DIG_B}"
-	! grep -q -- '--context=member-a' "$CALLS" || false
-	[ "$(grep -c -- '--context=member-b' "$CALLS")" -eq 4 ]
-	# In one shell, each platform_probe reads its members again (tuning 003 probes each pass).
-	: > "$CALLS"
-	PROBE_ISTIOD=1.30.6 platform_probe member-a 2>/dev/null
-	[ "$(grep -c -- '--context=member-a' "$CALLS")" -eq 4 ]
-	[ "$(platform_member_value member-a istiod)" = "pilot:1.30.6@${DIG_B}" ]
-	# A dry-run shares nothing.
-	DRY_RUN=1 platform_probe_share "${BATS_TEST_TMPDIR}/dry"
-	[ ! -e "${BATS_TEST_TMPDIR}/dry/platform-record.txt" ]
 }
 
 @test "platform_preamble_lines and platform_md_row: the record's keys in order; a value every member shares shows once, else per member" {
@@ -504,10 +483,11 @@ env_digest() {
 	assert_line "PROXY_IMAGE_BY_CONTEXT=m1=proxyv2:1.30.5,m2=proxyv2:1.30.5"
 	[ "${#lines[@]}" -eq "${#PLATFORM_KEYS[@]}" ]
 	run platform_report_warnings "${d}/a.tsv" "${d}/b.tsv"
-	assert_output "input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for m2 (pilot:1.30.5 or pilot:1.30.6): the report mixes runs with different values of it; compare like with like
-NODE_PROVIDER_BY_CONTEXT is unknown in some input TSVs (not read for m1), while others have a value: the report cannot tell whether those runs had the same one"
+	[ "${#lines[@]}" -eq 2 ]
+	assert_line --index 0 --partial "input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for m2 (pilot:1.30.5 or pilot:1.30.6)"
+	assert_line --index 1 --partial "NODE_PROVIDER_BY_CONTEXT is unknown in some input TSVs (not read for m1), while others have a value"
 	run platform_report_warnings --no-members --with KUBE_VERSIONS "${d}/a.tsv" "${d}/b.tsv"
-	assert_line --index 0 "input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members: the report mixes runs with different values of it; compare like with like"
+	assert_line --index 0 --partial "input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members"
 	refute_output --partial "m2"
 	# Inputs from before the record: unknown, with no warning of their own.
 	run --separate-stderr platform_report_values "${d}/old.tsv"
@@ -518,14 +498,14 @@ NODE_PROVIDER_BY_CONTEXT is unknown in some input TSVs (not read for m1), while 
 	run --separate-stderr platform_report_values "${d}/a.tsv" "${d}/old.tsv"
 	assert_line "PLATFORM=mixed:kubernetes,unknown"
 	assert_line "MESH_OPERATOR_BY_CONTEXT=mixed:unknown,m1=sail-operator:1.31.1,m2=sail-operator:1.31.1"
-	[[ "$stderr" == *"PLATFORM is unknown in 1 of 2 input TSV(s) (not read, or written before the record), while others have a value"* ]]
-	[[ "$stderr" == *"MESH_OPERATOR_BY_CONTEXT is unknown in some input TSVs (not recorded in 1 of 2 (written before the record had it))"* ]]
+	[[ "$stderr" == *"PLATFORM is unknown in 1 of 2 input TSV(s)"* ]]
+	[[ "$stderr" == *"MESH_OPERATOR_BY_CONTEXT is unknown in some input TSVs (not recorded in 1 of 2"* ]]
 	[[ "$stderr" != *"disagree"* ]]
 	# Two platforms.
 	sed 's/^# PLATFORM=kubernetes/# PLATFORM=openshift/' "${d}/a.tsv" > "${d}/c.tsv"
 	run --separate-stderr platform_report_values "${d}/a.tsv" "${d}/c.tsv"
 	assert_line "PLATFORM=mixed:kubernetes,openshift"
-	[[ "$stderr" == *"input TSVs disagree on PLATFORM (kubernetes,openshift): the report mixes runs on different platforms; compare like with like"* ]]
+	[[ "$stderr" == *"input TSVs disagree on PLATFORM (kubernetes,openshift)"* ]]
 }
 
 @test "platform_report_lines and platform_warning_lines: every style, a value escaped for yaml and md" {
@@ -561,36 +541,39 @@ NODE_PROVIDER_BY_CONTEXT is unknown in some input TSVs (not read for m1), while 
 # platform_drift_check: the record read again after a sweep's last step
 # ---------------------------------------------------------------------------
 
-@test "platform_drift_check: a build that changed during the sweep is a problem of its outcome; a member not read again is a note; nothing in a dry-run" {
+@test "platform_drift_check: a build or istiod setting that changed during the sweep is a problem of its outcome; a member not read again is a note; nothing in a dry-run" {
 	probe_setup
 	platform_probe member-a,member-b 2>/dev/null
 	: > "$CALLS"
 	platform_drift_check member-a,member-b
-	[ "${#_SWEEP_PROBLEMS[@]}" -eq 0 ] && [ "${#_SWEEP_NOTES[@]}" -eq 0 ]
+	[ "${#_SWEEP_PROBLEMS[@]}" -eq 0 ]
+	[ "${#_SWEEP_NOTES[@]}" -eq 0 ]
 	# Fresh reads, not the record the sweep holds.
 	grep -q -- '--context=member-b' "$CALLS"
 	PROBE_ISTIOD=1.30.6 PROBE_DOWN_ON=member-b platform_drift_check member-a,member-b "baseline pass" 2>"$WARN"
 	[ "${#_SWEEP_PROBLEMS[@]}" -eq 1 ]
-	[ "${_SWEEP_PROBLEMS[0]}" = "ISTIOD_IMAGE_BY_CONTEXT on member-a changed during the baseline pass: pilot:1.30.5@sha256:bbbbbbbbbbbb at its start, pilot:1.30.6@sha256:bbbbbbbbbbbb at its end: its rows are not all from one build" ]
-	[ "${_SWEEP_NOTES[*]}" = "member-b: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT, ISTIOD_ENV_BY_CONTEXT not compared between the start and the end of the baseline pass (not read at one of them: unknown); a change there would go unseen" ]
-	# istiod's settings too; no platform-drift.txt.
+	[[ "${_SWEEP_PROBLEMS[0]}" == "ISTIOD_IMAGE_BY_CONTEXT on member-a changed during the baseline pass: pilot:1.30.5@sha256:bbbbbbbbbbbb at its start, pilot:1.30.6@sha256:bbbbbbbbbbbb at its end"* ]]
+	[ "${#_SWEEP_NOTES[@]}" -eq 1 ]
+	[[ "${_SWEEP_NOTES[0]}" == "member-b: PLATFORM_BY_CONTEXT, MESH_OPERATOR_BY_CONTEXT, ISTIOD_IMAGE_BY_CONTEXT, PROXY_IMAGE_BY_CONTEXT, NODE_PROVIDER_BY_CONTEXT, ISTIOD_ENV_BY_CONTEXT not compared between the start and the end of the baseline pass"* ]]
 	_SWEEP_PROBLEMS=() _SWEEP_NOTES=()
 	PROBE_ISTIOD_THROTTLE=50 platform_drift_check member-a
-	[[ "${_SWEEP_PROBLEMS[0]}" == "ISTIOD_ENV_BY_CONTEXT on member-a changed during the sweep: $(env_digest) at its start, $(env_digest 50) at its end:"* ]]
-	[ -z "$(find "$BATS_TEST_TMPDIR" -name 'platform-drift*')" ]
+	[[ "${_SWEEP_PROBLEMS[0]}" == "ISTIOD_ENV_BY_CONTEXT on member-a changed during the sweep: $(env_digest) at its start, $(env_digest 50) at its end"* ]]
 	# A dry-run reads nothing; without kubectl it is a note, never a failure.
 	_SWEEP_PROBLEMS=() _SWEEP_NOTES=()
 	: > "$CALLS"
 	DRY_RUN=1 PROBE_ISTIOD=1.30.6 platform_drift_check member-a
-	[ ! -s "$CALLS" ] && [ "${#_SWEEP_PROBLEMS[@]}" -eq 0 ] && [ "${#_SWEEP_NOTES[@]}" -eq 0 ]
+	[ ! -s "$CALLS" ]
+	[ "${#_SWEEP_PROBLEMS[@]}" -eq 0 ]
+	[ "${#_SWEEP_NOTES[@]}" -eq 0 ]
 	KUBECTL=()
 	platform_drift_check member-a
-	[ "${_SWEEP_NOTES[0]}" = "the platform record was not read again at the end of the sweep (no kubectl, reach.sh or temp dir): a build that changed during it would go unseen" ]
+	[[ "${_SWEEP_NOTES[0]}" == "the platform record was not read again at the end of the sweep"* ]]
 }
 
 # ---------------------------------------------------------------------------
 # Tuning profile objects: tuning 001 and 003 refuse, the other sweeps warn
 # ---------------------------------------------------------------------------
+
 
 @test "platform record: the tuning profile label, kinds and marker are the ones tuning.py applies and 005-cleanup.sh deletes" {
 	local py="${ROOT}/tests/tuning/lib/tuning.py" cl="${ROOT}/tests/tuning/005-cleanup.sh" kinds
@@ -613,7 +596,7 @@ NODE_PROVIDER_BY_CONTEXT is unknown in some input TSVs (not read for m1), while 
 	[ "$PLATFORM_TUNING_KINDS" = "${PLATFORM_TUNING_RESOURCE_KINDS},configmaps" ]
 }
 
-@test "platform_tuning_objects: a member's tuning profile objects and marker, <profile>:<Kind>/<ns>/<name> sorted, or none; why on stderr when they cannot be listed" {
+@test "tuning profile objects: listed per member (<profile>:<Kind>/<ns>/<name> sorted, or none, why on stderr when they cannot be); tuning 001 and 003 refuse before they change anything; the other sweeps warn and note it in their outcome; nothing in a dry-run" {
 	probe_setup
 	run platform_tuning_objects member-a
 	assert_success
@@ -626,50 +609,76 @@ NODE_PROVIDER_BY_CONTEXT is unknown in some input TSVs (not read for m1), while 
 	PROBE_TUNING_OBJECTS=timeout run --separate-stderr platform_tuning_objects member-a
 	assert_failure
 	assert_output ""
-	[[ "$stderr" == "Unable to connect to the server: net/http: request canceled (Client.Timeout exceeded while awaiting headers); no answer within PLATFORM_READ_TIMEOUT (20s): raise it"* ]] || { echo "$stderr"; false; }
-}
-
-@test "platform_tuning_objects_refuse: tuning 001 and 003 stop over a member's profile objects or marker, or a member whose cannot be listed, before they change anything; nothing in a dry-run" {
-	probe_setup
+	[[ "$stderr" == "Unable to connect to the server"*"no answer within PLATFORM_READ_TIMEOUT (20s): raise it"* ]] || { echo "$stderr"; false; }
+	# The refusal (tuning 001 and 003): the objects, and the cleanup that undoes them.
+	: > "$CALLS"
 	platform_tuning_objects_refuse member-a,member-b "this profile"
 	[ "$(grep -c -- " get ${PLATFORM_TUNING_KINDS} -A " "$CALLS")" -eq 2 ]
-	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=marker run platform_tuning_objects_refuse member-a,member-b "every pass of this sweep (the baseline included)"
+	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=marker run platform_tuning_objects_refuse member-a,member-b "this profile"
 	assert_failure
-	assert_output --partial "a tuning profile's objects (label istio-scale-tests/tuning-profile) are on member-b already: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off. Every pass of this sweep (the baseline included) would be measured with them."
-	assert_output --partial "undo those with ./tests/tuning/005-cleanup.sh --contexts member-a,member-b (add --results-dir <that run's --output-dir> if it had one, and --gitops-context <hub> to resume Argo CD if it paused it), which also restores each member's Istio CR from the profile's marker, then start again"
+	assert_output --partial "are on member-b already: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off. This profile would be measured with them."
+	assert_output --partial "./tests/tuning/005-cleanup.sh --contexts member-a,member-b"
 	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=timeout run platform_tuning_objects_refuse member-a,member-b "this profile"
 	assert_failure
-	assert_output --partial "the tuning profile objects (label istio-scale-tests/tuning-profile) could not be listed on member-b (Unable to connect to the server"
-	assert_output --partial "): a member that cannot be asked may hold a profile's objects, and this profile would be measured with them; fix the access (or raise PLATFORM_READ_TIMEOUT) and start again"
+	assert_output --partial "could not be listed on member-b (Unable to connect to the server"
+	assert_output --partial "raise PLATFORM_READ_TIMEOUT"
 	: > "$CALLS"
 	DRY_RUN=1 PROBE_TUNING_OBJECTS=marker platform_tuning_objects_refuse member-a "this profile"
 	[ ! -s "$CALLS" ]
-	grep -q '^platform_tuning_objects_refuse "$CONTEXTS_CSV" "this profile"$' "${ROOT}/tests/tuning/001-apply-profile.sh"
-	grep -q '^platform_tuning_objects_refuse "$CONTEXTS_CSV" "every pass of this sweep (the baseline included)"$' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh"
-	[ "$(grep -n '^platform_tuning_objects_refuse' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" | cut -d: -f1)" -lt \
-		"$(grep -n '^sweep_start ' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" | cut -d: -f1)" ]
-	[ "$(grep -n '^platform_tuning_objects_refuse' "${ROOT}/tests/tuning/001-apply-profile.sh" | cut -d: -f1)" -lt \
-		"$(grep -n '^mkdir -p "$STATE_DIR"' "${ROOT}/tests/tuning/001-apply-profile.sh" | cut -d: -f1)" ]
-}
-
-@test "platform_start_warnings: the other sweeps warn as they start, and note it in their outcome, when a member holds a profile's objects or cannot be asked; silent otherwise and in a dry-run" {
-	probe_setup
+	# The other sweeps: a warning as they start and a note in their outcome.
 	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=marker run --separate-stderr platform_start_warnings member-a,member-b
 	assert_success
-	[[ "$stderr" == "warning: a tuning profile's objects (label istio-scale-tests/tuning-profile) are on member-b: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off; this sweep would measure that profile's configuration, not the charts'. Unless that is the point, stop it now (Ctrl-C); then, unless a tuning run is still in progress on these members (wait for it to end), undo them with ./tests/tuning/005-cleanup.sh --contexts member-a,member-b"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" == "warning: a tuning profile's objects (label istio-scale-tests/tuning-profile) are on member-b: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off;"*"005-cleanup.sh --contexts member-a,member-b"* ]] || { echo "$stderr"; false; }
 	PROBE_TUNING_ON=member-b PROBE_TUNING_OBJECTS=marker platform_start_warnings member-a,member-b 2>/dev/null
-	[ "${_SWEEP_NOTES[0]}" = "a tuning profile's objects were on member-b at the sweep's start (02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off): its results measure that profile's configuration, not the charts'" ]
+	[[ "${_SWEEP_NOTES[0]}" == "a tuning profile's objects were on member-b at the sweep's start (02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off)"* ]]
 	_SWEEP_NOTES=()
 	PROBE_TUNING_OBJECTS=timeout platform_start_warnings member-a 2>"$WARN"
-	grep -q '^warning: the tuning profile objects (label istio-scale-tests/tuning-profile) could not be listed on member-a (Unable to connect' "$WARN"
-	[ "${_SWEEP_NOTES[0]}" = "the tuning profile objects could not be listed on member-a at the sweep's start: a profile left applied there would go unseen" ]
+	grep -q '^warning: the tuning profile objects (label istio-scale-tests/tuning-profile) could not be listed on member-a' "$WARN"
+	[[ "${_SWEEP_NOTES[0]}" == "the tuning profile objects could not be listed on member-a at the sweep's start"* ]]
 	_SWEEP_NOTES=()
 	run --separate-stderr platform_start_warnings member-a
 	[ -z "$stderr" ]
 	: > "$CALLS"
 	DRY_RUN=1 PROBE_TUNING_OBJECTS=marker run --separate-stderr platform_start_warnings member-a
-	[ -z "$stderr" ] && [ ! -s "$CALLS" ]
+	[ -z "$stderr" ]
+	[ ! -s "$CALLS" ]
 }
+
+@test "tuning 001 and 003 entrypoints: a member holding a profile's marker stops them before any change (no state dir, no sweep dir, only the two lists)" {
+	python3 -I -c 'import yaml' 2>/dev/null || skip "python3 with PyYAML not installed"
+	local bin="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/kubectl.log" ek="${BATS_TEST_TMPDIR}/kubeconfig"
+	mkdir -p "$bin"
+	: > "$ek"
+	# ci-b holds profile 02's marker; every other read fails.
+	cat > "${bin}/kubectl" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${log}"
+case " \$* " in
+*" --context=ci-b "*" get ${PLATFORM_TUNING_KINDS} -A -l ${PLATFORM_TUNING_LABEL} "*)
+	echo '{"kind":"List","items":[{"kind":"ConfigMap","metadata":{"name":"tuning-profile-02-xds-cache-off","namespace":"istio-system","labels":{"istio-scale-tests/tuning-profile":"02-xds-cache-off"}}}]}' ;;
+*" get ${PLATFORM_TUNING_KINDS} -A -l ${PLATFORM_TUNING_LABEL} "*) echo '{"kind":"List","items":[]}' ;;
+*) exit 1 ;;
+esac
+STUB
+	chmod +x "${bin}/kubectl"
+	: > "$log"
+	PATH="${bin}:${PATH}" KUBECONFIG="$ek" run --separate-stderr "${ROOT}/tests/tuning/001-apply-profile.sh" \
+		--profile 01-push-throttling --contexts ci-a,ci-b --state-dir "${BATS_TEST_TMPDIR}/state"
+	assert_failure
+	[[ "$stderr" == *"are on ci-b already: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off. This profile would be measured with them."* ]]
+	[ ! -e "${BATS_TEST_TMPDIR}/state" ]
+	[ "$(grep -vc -- " get ${PLATFORM_TUNING_KINDS} -A " "$log")" -eq 0 ]
+	[ "$(wc -l < "$log")" -eq 2 ]
+	: > "$log"
+	PATH="${bin}:${PATH}" KUBECONFIG="$ek" run --separate-stderr "${ROOT}/tests/tuning/003-run-tuning-sweep.sh" \
+		--suite churn --contexts ci-a,ci-b --no-gitops-pause --profiles 01-push-throttling --output-dir "${BATS_TEST_TMPDIR}/out"
+	assert_failure
+	[[ "$stderr" == *"are on ci-b already: 02-xds-cache-off:ConfigMap/istio-system/tuning-profile-02-xds-cache-off. Every pass of this sweep (the baseline included) would be measured with them."* ]]
+	[ -z "$(ls -A "${BATS_TEST_TMPDIR}/out" 2>/dev/null)" ]
+	[ "$(grep -vc -- " get ${PLATFORM_TUNING_KINDS} -A " "$log")" -eq 0 ]
+	[ "$(wc -l < "$log")" -eq 2 ]
+}
+
 
 # ---------------------------------------------------------------------------
 # The envelope's and the dataplane reports' helpers

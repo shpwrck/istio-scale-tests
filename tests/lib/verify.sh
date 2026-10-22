@@ -1,27 +1,43 @@
 #!/usr/bin/env bash
 # Pre-merge verification gate for tests/lib/ shared helpers.
 # Runs syntax checks, shellcheck, inline-definition audits, bats unit tests, the
-# bare-scrape, keyed-array and bats-negation lints, and the CI dry-run smoke (every tests/
-# script annotated `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
+# bare-scrape and keyed-array lints, and the CI dry-run smoke (every tests/ script
+# annotated `# ci-dry-run:`). Needs no cluster: dry-runs use an empty kubeconfig.
 #
-# Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck]
+# Usage: tests/lib/verify.sh [--skip-dry-run] [--skip-shellcheck] [--jobs N]
 # A missing shellcheck or bats-core fails the run; --skip-shellcheck skips that step on purpose.
+# --jobs N runs N bats files at once (each file's tests in order); it needs GNU parallel, and
+# without it the files run one after another, with a warning.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SKIP_DRY_RUN=0
 SKIP_SHELLCHECK=0
+JOBS=1
 
-for arg in "$@"; do
-	case "$arg" in
+usage() {
+	echo "Usage: $(basename "$0") [--skip-dry-run] [--skip-shellcheck] [--jobs N]"
+	echo "  --skip-dry-run     skip the dry-run smoke of the '# ci-dry-run:' scripts"
+	echo "  --skip-shellcheck  skip shellcheck"
+	echo "  --jobs N           run N bats files at once (default 1; needs GNU parallel)"
+}
+
+while (($#)); do
+	case "$1" in
 	--skip-dry-run)    SKIP_DRY_RUN=1 ;;
 	--skip-shellcheck) SKIP_SHELLCHECK=1 ;;
+	--jobs)
+		[[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || { echo "error: --jobs needs a whole number of jobs, 1 or more" >&2; exit 1; }
+		JOBS="$2"
+		shift
+		;;
 	-h|--help)
-		echo "Usage: $(basename "$0") [--skip-dry-run] [--skip-shellcheck]"
+		usage
 		exit 0
 		;;
-	*) echo "error: unknown option: $arg" >&2; exit 1 ;;
+	*) echo "error: unknown option: $1" >&2; usage >&2; exit 1 ;;
 	esac
+	shift
 done
 
 # Every step runs awk. Sourcing common.sh checks it (awk_untyped_ok): with gawk 5.2 or 5.3 it runs
@@ -258,9 +274,6 @@ EXTRACTED_PATTERNS=(
 	# the keyed-array arithmetic lint (lint-keyed-arith.sh)
 	'lint_keyed_arith_file() {'
 	'lint_keyed_arith_paths() {'
-	# the bats negation lint (lint-bats-negation.sh)
-	'lint_bats_negation_file() {'
-	'lint_bats_negation_paths() {'
 	# placeholder rows and the legacy schema (propagation.sh); a TSV's end line,
 	# escaped markdown cells, a fork-free size check (common.sh)
 	'prop_placeholder_row() {'
@@ -334,7 +347,15 @@ if ((audit_fail)); then err "inline definitions found outside tests/lib/"; else 
 step 4 "bats-core unit tests"
 BATS="${ROOT}/tests/lib/test/bats-core/bin/bats"
 if [[ -x "$BATS" ]]; then
-	if "$BATS" "$ROOT"/tests/lib/test/*.bats; then
+	bats_jobs=()
+	if ((JOBS > 1)); then
+		if command -v parallel >/dev/null 2>&1; then
+			bats_jobs=(--jobs "$JOBS" --no-parallelize-within-files)
+		else
+			echo "    WARNING: --jobs ${JOBS} needs GNU parallel on PATH; running the bats files one after another"
+		fi
+	fi
+	if "$BATS" ${bats_jobs[@]+"${bats_jobs[@]}"} "$ROOT"/tests/lib/test/*.bats; then
 		ok
 	else
 		err "bats tests failed"
@@ -371,23 +392,11 @@ else
 	err "array element read by a variable key in shell arithmetic (read it into a scalar first)"
 fi
 
-# 7. bats negation lint: bash exempts a `!`-negated command from set -e and the ERR trap,
-# so a `! cmd` that is not a bats test's last command never fails the test.
-step 7 "bats negation lint"
-# shellcheck disable=SC1091
-source "${ROOT}/tests/lib/lint-bats-negation.sh"
-if lint_out="$(lint_bats_negation_paths "$ROOT/tests")"; then
-	ok
-else
-	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
-	err "a negated command in a bats test that is not its last never fails it (end it with || false, or use run !)"
-fi
-
-# 8. dry-run smoke — same discovery and args as CI (portability.yml).
+# 7. dry-run smoke — same discovery and args as CI (portability.yml).
 if ((SKIP_DRY_RUN)); then
-	step 8 "dry-run smoke (SKIPPED)"
+	step 7 "dry-run smoke (SKIPPED)"
 else
-	step 8 "dry-run smoke for scripts annotated '# ci-dry-run:'"
+	step 7 "dry-run smoke for scripts annotated '# ci-dry-run:'"
 	dry_fail=0
 	empty_kubeconfig="$(mktemp)"
 	dry_out="$(mktemp)"

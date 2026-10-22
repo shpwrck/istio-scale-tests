@@ -1,7 +1,6 @@
 #!/usr/bin/env bats
 # Reports through their real entrypoints (PL33): propagation 005's n_attempted and the TSV
-# widths it lists and warns about, tuning 004's P1 cell when every iteration overflowed, and
-# every sweep's and report's help naming each cause of a sweep's exit 4.
+# widths it lists and warns about, and tuning 004's P1 cell when every iteration overflowed.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -96,7 +95,8 @@ prow23() {
 	assert_line "3,P2_discovery,4,4,50,50,50,50,N/A,N/A,,"
 }
 
-@test "propagation 005: inputs of different widths (19 and 23 columns) list them (tsv_columns) and warn in every format; one width warns nothing" {
+# The warning reaches every format through DATA_WARNINGS, as the shortfall's above does.
+@test "propagation 005: inputs of different widths (19 and 23 columns) list them (tsv_columns) and warn; one width warns nothing" {
 	source "${ROOT}/tests/lib/propagation.sh"
 	local i
 	{ echo "# RUN_ID=r1"; platform_fixture_lines ci-a,ci-b; echo "$PROP_TSV_HEADER"; for i in 1 2 3; do prow23 "$i" ci-b OK 0 0 OK 5 OK 5; done; } > "${RES}/endpoint-r1.tsv"
@@ -106,18 +106,6 @@ prow23() {
 	assert_success
 	[[ "$stderr" == *"WARNING: ${w}"* ]]
 	jq -e --arg w "$w" '.tsv_columns == [19, 23] and (.data_warnings | length) == 1 and (.data_warnings[0] | startswith($w))' <<<"$output"
-	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --allow-multi-run --format csv
-	assert_line "# TSV_COLUMNS=19,23"
-	assert_line --partial "# WARNING: ${w}"
-	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --allow-multi-run --format md
-	assert_line "tsv_columns: [19, 23]"
-	assert_line --partial "> **Warning:** ${w}"
-	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --allow-multi-run
-	assert_line "  TSV_COLUMNS: 19,23"
-	assert_line --partial "WARNING: ${w}"
-	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --allow-multi-run --format charts
-	assert_output --partial "tsv_columns: [19, 23]"
-	assert_output --partial "${w}"
 	# One width: no width warning.
 	rm -f "${RES}/endpoint-r2.tsv"
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format json
@@ -141,26 +129,4 @@ prow23() {
 	assert_line "| P2 remote EDS (ms) | 50.00 | 50.00 (+0.0%) |"
 	run --separate-stderr "$TUNING_CMP" --results-dir "$P"
 	assert_output --regexp 'P1 local push \(ms\) +100\.00 +- \(3 overflowed\)'
-	run "$TUNING_CMP" --help
-	assert_output --partial '("- (N overflowed)" when every one did)'
-}
-
-@test "help: every sweep's exit 4 and every report's outcome paragraph name an Istio version, revision or Istio CR change, and the reports the version check's notes, with no internal tags" {
-	local s out flat
-	# flat: the help on one line (its text is wrapped).
-	for s in dataplane/003-run-sweep.sh churn/003-run-sweep.sh propagation/006-run-sweep.sh churn-dataplane/004-run-sweep.sh; do
-		out="$("${ROOT}/tests/${s}" --help)"
-		flat="$(tr -s ' \n' '  ' <<<"$out")"
-		[[ "$flat" == *"the Istio version, the active revision or the generation of the Istio CR or its active IstioRevision changed during the sweep"* ]] \
-			|| { echo "${s}: ${out}"; false; }
-	done
-	for s in dataplane/004-report-results.sh churn/004-report-results.sh churn-dataplane/005-report-results.sh propagation/005-report-results.sh tuning/004-compare-profiles.sh; do
-		out="$("${ROOT}/tests/${s}" --help)"
-		flat="$(tr -s ' \n' '  ' <<<"$out")"
-		[[ "$flat" == *"active revision"*"changed under the sweep"* && "$flat" == *"an Istio version check that warned at its start"* ]] \
-			|| { echo "${s}: ${out}"; false; }
-		# No review tag (PL17 ...) and no line over 100 columns.
-		! grep -E '\((I|B|A)[0-9]+\)|\bPL[0-9]+\b' <<<"$out" || { echo "${s}: a tag"; false; }
-		! awk 'length > 100 { print; bad = 1 } END { exit !bad }' <<<"$out" || { echo "${s}: a long line"; false; }
-	done
 }

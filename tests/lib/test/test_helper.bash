@@ -31,3 +31,32 @@ platform_fixture_lines() {
 		"MESH_OPERATOR_BY_CONTEXT=${o}" "ISTIOD_IMAGE_BY_CONTEXT=${i}" "PROXY_IMAGE_BY_CONTEXT=${x}" \
 		"NODE_PROVIDER_BY_CONTEXT=${n}" "ISTIOD_ENV_BY_CONTEXT=${e}"
 }
+
+# help_shows_default <value> <name>...: the --help in $output shows the number <value> as the
+# default of the flag or key <name> (any of the names given), whatever the layout: an entry that
+# starts with the name (a line, with the lines it wraps onto) holds "default" (any case) and
+# then <value> as a whole number.
+help_shows_default() {
+	local value="$1"
+	shift
+	printf '%s\n' "$output" | awk -v v="$value" -v names="$*" '
+		BEGIN { k = split(names, want, " ") }
+		function flush(   e, i, n, p, rest) {
+			e = entry
+			sub(/^ +/, "", e)
+			sub(/^-[A-Za-z], */, "", e)
+			for (i = 1; i <= k; i++) {
+				n = want[i]
+				if (substr(e, 1, length(n)) != n || substr(e, length(n) + 1, 1) ~ /[A-Za-z0-9_-]/) continue
+				p = index(tolower(e), "default")
+				if (!p) continue
+				rest = substr(e, p + 7)
+				sub(/^[^0-9]*/, "", rest)
+				if (index(rest, v) == 1 && substr(rest, length(v) + 1, 1) !~ /[0-9]/) found = 1
+			}
+		}
+		/^$/ || /^[^ ]/ || /^ *-/ || /^ *[A-Z][A-Z0-9_]+([ =:,]|$)/ { flush(); entry = $0; next }
+		{ sub(/^ +/, " "); entry = entry $0 }
+		END { flush(); exit !found }' ||
+		{ echo "the help does not show ${value} as the default of $*"; return 1; }
+}

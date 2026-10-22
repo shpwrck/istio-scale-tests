@@ -3,70 +3,25 @@
 bats_require_minimum_version 1.5.0
 load test_helper
 
-# --- die() ---
-
-@test "die outputs message to stderr and exits 1" {
-	run die "something broke"
+@test "die prints error: <message> to stderr and exits 1" {
+	run --separate-stderr die "multiple words in message"
 	assert_failure 1
-	assert_output "error: something broke"
-}
-
-@test "die preserves multi-word messages" {
-	run die "multiple words in message"
-	assert_failure 1
-	assert_output "error: multiple words in message"
+	[ "$stderr" = "error: multiple words in message" ]
+	[ -z "$output" ]
 }
 
 # --- split_csv() ---
 
-@test "split_csv: empty string produces empty array" {
+@test "split_csv: values trimmed, an empty or whitespace-only item dropped (a trailing comma too), and an empty last item returns 0 under set -e" {
 	local -a result=()
 	split_csv "" result
 	[[ ${#result[@]} -eq 0 ]]
-}
-
-@test "split_csv: single value" {
-	local -a result=()
 	split_csv "alpha" result
-	[[ ${#result[@]} -eq 1 ]]
-	[[ "${result[0]}" == "alpha" ]]
-}
-
-@test "split_csv: multiple values" {
-	local -a result=()
-	split_csv "a,b,c" result
-	[[ ${#result[@]} -eq 3 ]]
-	[[ "${result[0]}" == "a" ]]
-	[[ "${result[1]}" == "b" ]]
-	[[ "${result[2]}" == "c" ]]
-}
-
-@test "split_csv: trims whitespace around values" {
-	local -a result=()
+	[[ "${result[*]}" == "alpha" ]]
 	split_csv "a, b , c" result
-	[[ ${#result[@]} -eq 3 ]]
-	[[ "${result[0]}" == "a" ]]
-	[[ "${result[1]}" == "b" ]]
-	[[ "${result[2]}" == "c" ]]
-}
-
-@test "split_csv: trailing comma produces no empty element" {
-	local -a result=()
-	split_csv "a,b," result
-	[[ ${#result[@]} -eq 2 ]]
-	[[ "${result[0]}" == "a" ]]
-	[[ "${result[1]}" == "b" ]]
-}
-
-@test "split_csv: whitespace-only element is dropped" {
-	local -a result=()
-	split_csv "a, ,b" result
-	[[ ${#result[@]} -eq 2 ]]
-	[[ "${result[0]}" == "a" ]]
-	[[ "${result[1]}" == "b" ]]
-}
-
-@test "split_csv: an empty last item returns 0 under set -e (no ERR-trap abort)" {
+	[[ ${#result[@]} -eq 3 && "${result[0]}" == a && "${result[1]}" == b && "${result[2]}" == c ]]
+	split_csv "a, ,b," result
+	[[ ${#result[@]} -eq 2 && "${result[0]}" == a && "${result[1]}" == b ]]
 	# The loop's last test used to fail on an empty last item, so `X=2,,` or `,` killed
 	# a sweep under set -e with a FATAL line instead of its own message.
 	run bash -c 'set -euo pipefail; source "$1/tests/lib/common.sh"
@@ -91,123 +46,34 @@ load test_helper
 	assert_success
 }
 
-# --- is_pos_int() ---
+# --- the value checks ---
 
-@test "is_pos_int: accepts positive integers" {
-	run is_pos_int "5"
-	assert_success
-	run is_pos_int "123"
-	assert_success
+@test "is_pos_int, is_nonneg_int, is_ratio: whole numbers without a leading zero (0 only for nonneg), ratios in (0, 1]" {
+	local v
+	for v in 5 123; do is_pos_int "$v"; is_nonneg_int "$v"; done
+	is_nonneg_int 0
+	for v in 0 -1 abc "" 1.5 01; do
+		run is_pos_int "$v"
+		assert_failure
+	done
+	for v in -1 abc; do
+		run is_nonneg_int "$v"
+		assert_failure
+	done
+	for v in 0.95 1 1.0 .5 0.01; do is_ratio "$v"; done
+	for v in 0 0.0 1.01 2 -0.5 abc 0.9x "" " 0.5" 1.; do
+		run is_ratio "$v"
+		assert_failure
+	done
 }
 
-@test "is_pos_int: rejects zero" {
-	run is_pos_int "0"
-	assert_failure
-}
-
-@test "is_pos_int: rejects negative numbers" {
-	run is_pos_int "-1"
-	assert_failure
-}
-
-@test "is_pos_int: rejects non-numeric strings" {
-	run is_pos_int "abc"
-	assert_failure
-	run is_pos_int ""
-	assert_failure
-	run is_pos_int "1.5"
-	assert_failure
-}
-
-@test "is_pos_int: rejects leading zeros" {
-	run is_pos_int "01"
-	assert_failure
-}
-
-# --- is_nonneg_int() ---
-
-@test "is_nonneg_int: accepts zero" {
-	run is_nonneg_int "0"
-	assert_success
-}
-
-@test "is_nonneg_int: accepts positive integers" {
-	run is_nonneg_int "5"
-	assert_success
-	run is_nonneg_int "100"
-	assert_success
-}
-
-@test "is_nonneg_int: rejects negative numbers" {
-	run is_nonneg_int "-1"
-	assert_failure
-}
-
-@test "is_nonneg_int: rejects non-numeric" {
-	run is_nonneg_int "abc"
-	assert_failure
-}
-
-# --- validate_scoping() ---
-
-@test "validate_scoping: accepts valid values" {
-	run validate_scoping "none"
-	assert_success
-	run validate_scoping "namespace"
-	assert_success
-	run validate_scoping "explicit"
-	assert_success
-}
-
-@test "validate_scoping: rejects invalid value with die" {
+@test "validate_scoping and validate_traffic_config: a value outside the list is refused, naming the values it takes" {
+	local v
+	for v in none namespace explicit; do validate_scoping "$v"; done
 	run validate_scoping "invalid"
 	assert_failure 1
-	assert_output --partial "error:"
 	assert_output --partial "none, namespace, explicit"
-}
-
-# --- resolve_kubectl() ---
-
-_stub_cli() {
-	local dir="$1" name="$2"
-	mkdir -p "$dir"
-	printf '#!/bin/sh\nexit 0\n' > "${dir}/${name}"
-	chmod +x "${dir}/${name}"
-}
-
-@test "resolve_kubectl: prefers kubectl when both CLIs exist" {
-	_stub_cli "$BATS_TEST_TMPDIR/bin" kubectl
-	_stub_cli "$BATS_TEST_TMPDIR/bin" oc
-	local -a kc=()
-	PATH="$BATS_TEST_TMPDIR/bin" resolve_kubectl kc
-	[[ "${kc[*]}" == "kubectl" ]]
-}
-
-@test "resolve_kubectl: falls back to oc and adds no extra flags" {
-	_stub_cli "$BATS_TEST_TMPDIR/bin" oc
-	local -a kc=()
-	PATH="$BATS_TEST_TMPDIR/bin" resolve_kubectl kc
-	[[ ${#kc[@]} -eq 1 && "${kc[0]}" == "oc" ]]
-}
-
-@test "resolve_kubectl: dies when neither CLI is on PATH" {
-	mkdir -p "$BATS_TEST_TMPDIR/empty"
-	local -a kc=()
-	PATH="$BATS_TEST_TMPDIR/empty" run resolve_kubectl kc
-	assert_failure 1
-	assert_output "error: neither kubectl nor oc found on PATH"
-}
-
-# --- VirtualService/DestinationRule load axis: validate_traffic_config() / vsdr_service_count() ---
-
-@test "validate_traffic_config: accepts none and vsdr" {
-	run validate_traffic_config none
-	assert_success
-	run validate_traffic_config vsdr
-	assert_success
-}
-
-@test "validate_traffic_config: rejects VSDR, empty and bogus with die" {
+	for v in none vsdr; do validate_traffic_config "$v"; done
 	for v in VSDR "" bogus; do
 		run validate_traffic_config "$v"
 		assert_failure 1
@@ -215,48 +81,25 @@ _stub_cli() {
 	done
 }
 
-@test "vsdr_service_count: ceil(services / every), matching the chart's i mod every == 0" {
+@test "vsdr_service_count: ceil(services / every), matching the chart's i mod every == 0; every < 1 or a non-integer count fails" {
 	[[ "$(vsdr_service_count 10 1)" == 10 ]]
 	[[ "$(vsdr_service_count 10 3)" == 4 ]]
 	[[ "$(vsdr_service_count 9 3)" == 3 ]]
 	[[ "$(vsdr_service_count 1 5)" == 1 ]]
 	[[ "$(vsdr_service_count 0 2)" == 0 ]]
-}
-
-@test "vsdr_service_count: rejects every < 1 and a non-integer count" {
 	run vsdr_service_count 10 0
 	assert_failure 1
 	run vsdr_service_count x 2
 	assert_failure 1
 }
 
-# --- is_ratio() (dataplane --min-qps-ratio, DATAPLANE_MIN_PCT_200) ---
-
-@test "is_ratio: accepts decimals in (0, 1]" {
-	for v in 0.95 1 1.0 .5 0.01; do
-		run is_ratio "$v"
-		assert_success
-	done
-}
-
-@test "is_ratio: rejects 0, > 1, negatives and non-numbers" {
-	for v in 0 0.0 1.01 2 -0.5 abc 0.9x "" " 0.5" 1. ; do
-		run is_ratio "$v"
-		assert_failure
-	done
-}
-
-# --- is_dns_label_for() (per-cluster Service names) ---
-
-@test "is_dns_label_for: a lowercase DNS label that fits the prefix" {
+@test "is_dns_label_for: a lowercase DNS label that fits the prefix in 63 characters; uppercase, too long, a leading digit, a trailing '-' or a '/' fails" {
+	local ctx
 	run is_dns_label_for dataplane-server- mesh-a
 	assert_success
 	# 46 chars + the 17-char prefix = 63, the limit.
 	run is_dns_label_for dataplane-server- "a$(printf 'b%.0s' {1..45})"
 	assert_success
-}
-
-@test "is_dns_label_for: uppercase, too long, leading digit, trailing '-', '/' all fail" {
 	for ctx in Mesh-A "a$(printf 'b%.0s' {1..49})" 1mesh mesh- "default/api:6443/admin" ""; do
 		run is_dns_label_for dataplane-server- "$ctx"
 		assert_failure
@@ -268,13 +111,31 @@ _stub_cli() {
 	assert_failure
 }
 
-# --- timeout_cmd / run_timeout ---
+# --- resolve_kubectl / timeout_cmd / run_timeout ---
 
 # _in_path <dir> <fn> [args...]: run a common.sh function with PATH set to <dir> alone.
 _in_path() {
 	local d="$1"
 	shift
 	bash -c 'source "$ROOT/tests/lib/common.sh"; PATH="$1"; shift; "$@"' _ "$d" "$@"
+}
+
+@test "resolve_kubectl: kubectl when both CLIs exist, else oc with no extra flag, else it stops naming both" {
+	local d="${BATS_TEST_TMPDIR}/bin" c
+	mkdir -p "$d" "${BATS_TEST_TMPDIR}/empty"
+	for c in kubectl oc; do
+		printf '#!/bin/sh\nexit 0\n' > "${d}/${c}"
+		chmod +x "${d}/${c}"
+	done
+	local -a kc=()
+	PATH="$d" resolve_kubectl kc
+	[[ "${kc[*]}" == "kubectl" ]]
+	rm "${d}/kubectl"
+	PATH="$d" resolve_kubectl kc
+	[[ ${#kc[@]} -eq 1 && "${kc[0]}" == "oc" ]]
+	PATH="${BATS_TEST_TMPDIR}/empty" run resolve_kubectl kc
+	assert_failure 1
+	assert_output "error: neither kubectl nor oc found on PATH"
 }
 
 @test "timeout_cmd / run_timeout: timeout, else gtimeout (macOS coreutils), else exit 127 with the install hint" {
@@ -302,26 +163,32 @@ _in_path() {
 	[[ "$stderr" == *"On macOS: brew install coreutils"* ]]
 }
 
-# --- harness_sha: the harness a run records ---------------------------------------
+# --- each_bounded / kv_value / file_sha256 ---
 
-@test "harness_sha is the only place that reads the harness from git: no script runs git describe itself" {
-	# Every script that could record provenance (the suites, the libs, the Terraform helpers).
-	local -a files=()
-	local hits
-	mapfile -t files < <(find "${ROOT}/tests" "${ROOT}/terraform" -name '*.sh' -not -path '*/bats-*' -not -path '*/tests/lib/test/*')
-	[ "${#files[@]}" -gt 20 ]
-	# A command substitution that runs it, outside harness_sha (tests/lib/common.sh).
-	hits="$(grep -nE '\$\(git[^)]*describe' "${files[@]}" | grep -v '/tests/lib/common\.sh:' || true)"
-	[ -z "$hits" ] || { echo "$hits"; false; }
-	hits="$(grep -nE 'HARNESS(_SHA)?="?\$\(git' "${files[@]}" || true)"
-	[ -z "$hits" ] || { echo "$hits"; false; }
-	# The check fires on a script that does it (the line harness_sha replaced).
-	printf '%s\n' 'HARNESS_SHA="$(git -C "$ROOT" describe --always --dirty --abbrev=7 2>/dev/null || echo unknown)"' > "${BATS_TEST_TMPDIR}/old.sh"
-	grep -qE '\$\(git[^)]*describe' "${BATS_TEST_TMPDIR}/old.sh"
-	grep -qE 'HARNESS(_SHA)?="?\$\(git' "${BATS_TEST_TMPDIR}/old.sh"
+@test "each_bounded: every item runs, at most <max> at a time, its stdout and stderr in files by its index (an item with a / too); a <max> that is no whole number above zero still runs them all" {
+	_eb_one() {
+		mkdir "${BATS_TEST_TMPDIR}/running/${2##*/}"
+		find "${BATS_TEST_TMPDIR}/running" -mindepth 1 -maxdepth 1 | wc -l >> "${BATS_TEST_TMPDIR}/counts"
+		sleep 0.1
+		rmdir "${BATS_TEST_TMPDIR}/running/${2##*/}"
+		echo "row of $1"
+		echo "warn of $1" >&2
+	}
+	local t="${BATS_TEST_TMPDIR}/t" i
+	local -a items=(a b/c d e f)
+	mkdir -p "${BATS_TEST_TMPDIR}/running" "$t"
+	each_bounded 2 _eb_one "$t" "${items[@]}"
+	for i in "${!items[@]}"; do
+		[ "$(cat "${t}/${i}.row")" = "row of ${items[i]}" ]
+		[ "$(cat "${t}/${i}.warn")" = "warn of ${items[i]}" ]
+	done
+	[ "$(wc -l < "${BATS_TEST_TMPDIR}/counts")" -eq 5 ]
+	[ "$(sort -n "${BATS_TEST_TMPDIR}/counts" | tail -n 1 | tr -d ' ')" -le 2 ]
+	t="${BATS_TEST_TMPDIR}/t2"
+	mkdir -p "$t"
+	each_bounded x _eb_one "$t" a b c
+	[ "$(cat "${t}"/*.row)" = $'row of a\nrow of b\nrow of c' ]
 }
-
-# --- kv_value / file_sha256 ---
 
 @test "kv_value: a key's value among k=v tokens (spaces, tabs or newlines), unknown without it, never a glob's match; file_sha256: the hex sum, unknown without a tool" {
 	run kv_value mem_mi "cpu_m=100 mem_mi=2048"

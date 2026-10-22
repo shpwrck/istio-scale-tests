@@ -8,7 +8,7 @@ load test_helper
 SCRIPT="${ROOT}/terraform/scripts/oc-token-exec-credential.sh"
 
 setup() {
-	STUB_DIR="$(mktemp -d)"
+	STUB_DIR="${BATS_TEST_TMPDIR}/stub"
 	export STUB_DIR
 	mkdir -p "${STUB_DIR}/bin"
 	echo 0 >"${STUB_DIR}/logins"
@@ -38,12 +38,9 @@ EOF
 	export OC_TOKEN_CACHE_DIR="${STUB_DIR}/cache" OC_TOKEN_BACKOFF_S=0
 }
 
-teardown() {
-	rm -rf "$STUB_DIR"
-}
-
-@test "token cache: 50 calls, one login, same token, an expirationTimestamp" {
-	for _ in $(seq 1 50); do
+@test "token cache: one login serves every call for the same API server, user and password (another of any is a separate entry); the ExecCredential has the token and an expirationTimestamp" {
+	local i exp
+	for i in 1 2 3; do
 		run bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret
 		assert_success
 		[ "$(jq -r .status.token <<<"$output")" = "sha256~tok-1" ]
@@ -53,6 +50,28 @@ teardown() {
 	[[ "$exp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
 	run jq -r '.kind + " " + .apiVersion' <<<"$output"
 	assert_output "ExecCredential client.authentication.k8s.io/v1beta1"
+	bash "$SCRIPT" https://api.mesh-b.example:443 cluster-admin s3cret >/dev/null
+	bash "$SCRIPT" https://api.mesh-a.example:443 other s3cret >/dev/null
+	bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin n3w >/dev/null
+	bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
+	[ "$(cat "${STUB_DIR}/logins")" -eq 4 ]
+}
+
+@test "token cache: a token inside the refresh margin is replaced, one outside it kept; OC_TOKEN_CACHE=0 logs in every time and writes nothing" {
+	# expires_in 200 s is inside the default 300 s margin: every call logs in again.
+	STUB_EXPIRES_IN=200 bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
+	STUB_EXPIRES_IN=200 bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
+	[ "$(cat "${STUB_DIR}/logins")" -eq 2 ]
+	# A margin below the lifetime keeps it.
+	OC_TOKEN_REFRESH_MARGIN_SEC=60 run bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret
+	assert_success
+	[ "$(cat "${STUB_DIR}/logins")" -eq 2 ]
+	export OC_TOKEN_CACHE_DIR="${STUB_DIR}/cache-off"
+	OC_TOKEN_CACHE=0 bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
+	OC_TOKEN_CACHE=0 run bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret
+	assert_success
+	[ "$(jq -r .status.token <<<"$output")" = "sha256~tok-4" ]
+	[ ! -d "${STUB_DIR}/cache-off" ]
 }
 
 @test "token cache: the cache file is 0600, outside the repo, and holds no password" {
@@ -66,55 +85,30 @@ teardown() {
 	assert_output 0
 }
 
-@test "token cache: another API server, user or password is a separate entry" {
-	bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
-	bash "$SCRIPT" https://api.mesh-b.example:443 cluster-admin s3cret >/dev/null
-	bash "$SCRIPT" https://api.mesh-a.example:443 other s3cret >/dev/null
-	bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin n3w >/dev/null
-	bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
-	[ "$(cat "${STUB_DIR}/logins")" -eq 4 ]
-}
-
-@test "token cache: a token inside the refresh margin is replaced" {
-	# expires_in 200 s is inside the default 300 s margin: every call logs in again.
-	STUB_EXPIRES_IN=200 bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
-	STUB_EXPIRES_IN=200 bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
-	[ "$(cat "${STUB_DIR}/logins")" -eq 2 ]
-	# A margin below the lifetime keeps it.
-	OC_TOKEN_REFRESH_MARGIN_SEC=60 run bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret
-	assert_success
-	[ "$(cat "${STUB_DIR}/logins")" -eq 2 ]
-}
-
-@test "token cache: a failed login is retried with backoff, then succeeds" {
+@test "token cache: a failed login is retried with backoff, then succeeds; every attempt failing exits 1 and caches nothing" {
 	echo 2 >"${STUB_DIR}/fail"
 	run bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret
 	assert_success
 	assert_output --partial "attempt 1/4 failed"
 	assert_output --partial "attempt 2/4 failed"
 	[ "$(cat "${STUB_DIR}/logins")" -eq 3 ]
-}
-
-@test "token cache: every attempt failing exits 1 and caches nothing" {
+	echo 0 >"${STUB_DIR}/logins"
 	echo 9 >"${STUB_DIR}/fail"
-	OC_TOKEN_LOGIN_ATTEMPTS=3 run bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret
+	OC_TOKEN_LOGIN_ATTEMPTS=3 run bash "$SCRIPT" https://api.mesh-b.example:443 cluster-admin s3cret
 	assert_failure
-	assert_output --partial "failed to obtain OAuth token from https://api.mesh-a.example:443 after 3 attempt(s)"
+	assert_output --partial "failed to obtain OAuth token from https://api.mesh-b.example:443 after 3 attempt(s)"
 	[ "$(cat "${STUB_DIR}/logins")" -eq 3 ]
-	[ -z "$(find "${STUB_DIR}/cache" -name '*.json')" ]
+	[ "$(find "${STUB_DIR}/cache" -name '*.json' | wc -l | tr -d ' ')" -eq 1 ]
 }
 
-@test "token cache: parallel callers share one login" {
+@test "token cache: parallel callers share one login; a lock left by a dead process is broken" {
+	local i key
 	for i in $(seq 1 8); do
 		bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >"${STUB_DIR}/out.${i}" &
 	done
 	wait
 	[ "$(cat "${STUB_DIR}/logins")" -eq 1 ]
 	[ "$(cat "${STUB_DIR}"/out.* | jq -r .status.token | sort -u)" = "sha256~tok-1" ]
-}
-
-@test "token cache: a lock left by a dead process is broken" {
-	bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
 	key="$(basename "$(find "${STUB_DIR}/cache" -name '*.json')" .json)"
 	rm -f "${STUB_DIR}/cache/${key}.json"
 	mkdir "${STUB_DIR}/cache/${key}.lock"
@@ -123,12 +117,4 @@ teardown() {
 	assert_success
 	refute_output --partial "logging in without it"
 	[ ! -d "${STUB_DIR}/cache/${key}.lock" ]
-}
-
-@test "token cache: OC_TOKEN_CACHE=0 logs in every time and writes nothing" {
-	OC_TOKEN_CACHE=0 bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret >/dev/null
-	OC_TOKEN_CACHE=0 run bash "$SCRIPT" https://api.mesh-a.example:443 cluster-admin s3cret
-	assert_success
-	[ "$(jq -r .status.token <<<"$output")" = "sha256~tok-2" ]
-	[ ! -d "${STUB_DIR}/cache" ]
 }

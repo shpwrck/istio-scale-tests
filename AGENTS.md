@@ -106,9 +106,9 @@ which wins over the upstream docs there when they disagree.
   body; a sweep calls `platform_probe_share` right after its `platform_probe`, then
   `platform_start_warnings`, and `platform_drift_check` after its last step, before `sweep_finish`
   (tuning 003: around each pass's probes). Tuning 001 and 003 refuse to start on a profile's
-  objects; the other sweeps warn. Every script that sources it calls `platform_validate`
-  (`config-suites.bats` checks these pairings); `TEST_PLATFORM`, `PLATFORM_READ_TIMEOUT` and
-  `PLATFORM_READ_PARALLEL` are keys of every suite (`CONFIG_SHARED_PREFIXES`).
+  objects; the other sweeps warn. Every script that sources it calls `platform_validate`;
+  `TEST_PLATFORM`, `PLATFORM_READ_TIMEOUT` and `PLATFORM_READ_PARALLEL` are keys of every suite
+  (`CONFIG_SHARED_PREFIXES`).
 
 ## Repository map
 

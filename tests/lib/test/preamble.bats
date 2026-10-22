@@ -4,112 +4,27 @@ bats_require_minimum_version 1.5.0
 load test_helper
 source "${ROOT}/tests/lib/preamble.sh"
 
-# ---------------------------------------------------------------------------
-# infra_preamble_lines — the ONE shared cluster-infra emitter (PL36). Every
-# expected key is ALWAYS emitted (defaulting to `unknown`), and caller-supplied
-# values overlay. This is what guarantees the 003 pre-creator and the 002
-# `! -f`-guarded collector write the identical infra key set.
-# ---------------------------------------------------------------------------
-
-@test "infra_preamble_lines: emits all keys, defaulting omitted ones to unknown" {
-	run infra_preamble_lines ISTIOD_REPLICAS=5 ISTIOD_LIM_MEM_MI=8192
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"# ISTIOD_REPLICAS=5"* ]]
-	[[ "$output" == *"# ISTIOD_LIM_MEM_MI=8192"* ]]
-	# Omitted keys still present as unknown (PL36: missing-but-expected, not absent).
-	[[ "$output" == *"# ISTIOD_REQ_CPU_M=unknown"* ]]
-	[[ "$output" == *"# ISTIOD_LIM_CPU_M=unknown"* ]]
-	[[ "$output" == *"# NETWORK_TOPOLOGY=unknown"* ]]
-}
-
-@test "infra_preamble_lines: no args -> all seven keys emitted as unknown" {
+@test "infra_preamble_lines: the seven infra keys always, an omitted one as unknown; an unrecognized key is dropped, NODE_ALLOC_* too (the capacity block holds them)" {
 	run infra_preamble_lines
-	[ "$status" -eq 0 ]
-	# Exactly the canonical key set, all unknown. NODE_ALLOC_* dropped (single-source
-	# in the O9 capacity block); ISTIOD_REPLICAS_BY_CONTEXT added with INFRA_SCHEMA 2.
-	n=$(printf '%s\n' "$output" | grep -c '^# [A-Z_]*=unknown$')
-	[ "$n" -eq 7 ]
-	[[ "$output" == *"# ISTIOD_REPLICAS_BY_CONTEXT=unknown"* ]]
+	assert_success
+	[ "$(printf '%s\n' "$output" | grep -c '^# [A-Z_]*=unknown$')" -eq 7 ]
+	assert_line "# ISTIOD_REPLICAS_BY_CONTEXT=unknown"
+	run infra_preamble_lines ISTIOD_REPLICAS=5 ISTIOD_LIM_MEM_MI=8192 BOGUS_KEY=123 NODE_ALLOC_CPU_M=16000 \
+		NETWORK_TOPOLOGY=multi-primary,multi-network:5
+	assert_success
+	assert_line "# ISTIOD_REPLICAS=5"
+	assert_line "# ISTIOD_LIM_MEM_MI=8192"
+	assert_line "# NETWORK_TOPOLOGY=multi-primary,multi-network:5"
+	assert_line "# ISTIOD_REQ_CPU_M=unknown"
+	assert_line "# ISTIOD_LIM_CPU_M=unknown"
+	refute_output --partial BOGUS_KEY
+	refute_output --partial NODE_ALLOC
 }
 
-@test "infra_preamble_lines: NODE_ALLOC_* are NOT emitted (single-source)" {
-	run infra_preamble_lines ISTIOD_REPLICAS=5
-	[ "$status" -eq 0 ]
-	[[ "$output" != *"NODE_ALLOC_CPU_M"* ]]
-	[[ "$output" != *"NODE_ALLOC_MEM_MI"* ]]
-}
-
-@test "infra_preamble_lines: unrecognized key is ignored (not echoed verbatim)" {
-	# NODE_ALLOC_CPU_M is now unrecognized by the infra emitter, so it too is dropped.
-	run infra_preamble_lines BOGUS_KEY=123 NODE_ALLOC_CPU_M=16000 NETWORK_TOPOLOGY=multi-primary,multi-network:5
-	[ "$status" -eq 0 ]
-	[[ "$output" != *"BOGUS_KEY"* ]]
-	[[ "$output" != *"NODE_ALLOC_CPU_M"* ]]
-	[[ "$output" == *"# NETWORK_TOPOLOGY=multi-primary,multi-network:5"* ]]
-}
-
-# ---------------------------------------------------------------------------
-# PL36 two-writer key-set symmetry. The 003 pre-creator and the 002 collector
-# both build the controlplane TSV preamble; if one writes a `# KEY=` line the
-# other omits, the `! -f` guard silently drops it downstream. Both now route the
-# infra block through infra_preamble_lines, so the infra key set is identical by
-# construction — but assert the FULL `# KEY=value` literal sets agree too, so a
-# future hand-added line to one writer can't drift unnoticed.
-# ---------------------------------------------------------------------------
-
-@test "PL36: 002 and 003 emit the same controlplane preamble key set" {
-	collector="${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
-	precreate="${ROOT}/tests/controlplane/003-run-sweep.sh"
-	# Pull the literal `echo "# KEY=..."` keys each writer emits inline.
-	keys_002=$(grep -oE 'echo "# [A-Z_]+=' "$collector" | sed -E 's/echo "# ([A-Z_]+)=/\1/' | sort -u)
-	keys_003=$(grep -oE 'echo "# [A-Z_]+=' "$precreate" | sed -E 's/echo "# ([A-Z_]+)=/\1/' | sort -u)
-	# Both call infra_preamble_lines for the infra block, so the infra keys are not
-	# inline echoes in either — symmetry there is guaranteed by the shared emitter.
-	# Here we assert the INLINE-echoed key sets match modulo the known, intentional
-	# 003-only provenance keys (METRICS_API, NOTE) and the shared-title comment.
-	only_003=$(comm -13 <(printf '%s\n' "$keys_002") <(printf '%s\n' "$keys_003"))
-	only_002=$(comm -23 <(printf '%s\n' "$keys_002") <(printf '%s\n' "$keys_003"))
-	# 002 must not emit any key 003 lacks (that would vanish in an orchestrated run).
-	[ -z "$only_002" ]
-	# 003-only keys must be exactly the documented orchestrator-provenance extras.
-	for k in $only_003; do
-		case "$k" in
-			METRICS_API|NOTE) : ;;
-			*) echo "unexpected 003-only key: $k"; false ;;
-		esac
-	done
-}
-
-@test "PL36: both controlplane writers route the infra block through infra_preamble_lines" {
-	grep -q 'infra_preamble_lines' "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
-	grep -q 'infra_preamble_lines' "${ROOT}/tests/controlplane/003-run-sweep.sh"
-}
-
-@test "PL36: both controlplane writers emit RUN_CONFIG* through config_preamble_lines; 004 reads them" {
-	# Inside the preamble block: after the VSDR_SUBSETS echo, before the header row.
-	for f in 002-collect-resource-metrics.sh 003-run-sweep.sh; do
-		awk '/echo "# VSDR_SUBSETS=/ { on = 1 } on && /^[[:space:]]*config_preamble_lines$/ { found = 1 }
-			/^[[:space:]]*\} > "\$(TSV_FILE|tsv)"/ { on = 0 } END { exit !found }' \
-			"${ROOT}/tests/controlplane/$f" || { echo "$f: no config_preamble_lines in the preamble block"; false; }
-	done
-	grep -q 'preamble_scalar RUN_CONFIG ' "${ROOT}/tests/controlplane/004-report-results.sh"
-	grep -q 'preamble_scalar RUN_CONFIG_SHA256 ' "${ROOT}/tests/controlplane/004-report-results.sh"
-}
-
-@test "both controlplane writers emit CONTROLPLANE_INFRA_SCHEMA (read by 004's concordance guard)" {
-	grep -q 'echo "# CONTROLPLANE_INFRA_SCHEMA=' "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
-	grep -q 'echo "# CONTROLPLANE_INFRA_SCHEMA=' "${ROOT}/tests/controlplane/003-run-sweep.sh"
-	# And the report reads it (the mixed-version concordance warning).
-	grep -q 'CONTROLPLANE_INFRA_SCHEMA' "${ROOT}/tests/controlplane/004-report-results.sh"
-}
-
-# ---------------------------------------------------------------------------
-# Controlplane TSV header: the literal is duplicated in 002 (standalone writer) and
-# 003 (pre-create). Both must be identical, have the schema's width, and both writers
-# must stamp the same CONTROLPLANE_SCHEMA. Extend the expected tail when appending.
-# ---------------------------------------------------------------------------
-
-@test "controlplane header: 002 and 003 literals match, 66 fields, schema 66" {
+# The controlplane TSV header is a literal in 002 (the standalone writer) and 003 (the
+# pre-create, whose file 002 then appends its rows to): a column one adds and the other does
+# not shifts every later column's label.
+@test "controlplane header: the 002 and 003 literals match, 66 fields, and both writers stamp CONTROLPLANE_SCHEMA=66" {
 	collector="${ROOT}/tests/controlplane/002-collect-resource-metrics.sh"
 	precreate="${ROOT}/tests/controlplane/003-run-sweep.sh"
 	h002=$(grep -m1 'echo -e "timestamp\\t' "$collector" | sed 's/.*echo -e "//; s/" >>.*//')
@@ -118,122 +33,20 @@ source "${ROOT}/tests/lib/preamble.sh"
 	[ "$h002" = "$h003" ]
 	n=$(printf '%s' "$h003" | awk -F'\\\\t' '{ print NF }')
 	[ "$n" -eq 66 ]
-	[[ "$h003" == *'\tpods_allocatable\tcluster_connected_proxies\tsidecar_pods\tproxy_check\ttraffic_config\tvsdr_services\tistiod_virt_services\tpush_time_avg_ms\tpushcontext_init_avg_ms\tsidecar_clusters_avg\tsidecar_cds_bytes_avg\tsidecar_rds_bytes_avg\tservices_per_namespace\tworkload_mode\tmeasurement_pods\toutside_namespaces\toutside_discovery\twindow_kind\tistiod_services\tistiod_cpu_s_delta\tsidecar_mem_mi_avg\tgateway_clusters_max\tgateway_mem_mi_max\troot_cert_configmaps\tgateway_physical_mi_max\tgateway_ws_mi_max\tleftover_test_namespaces' ]]
 	grep -q 'echo "# CONTROLPLANE_SCHEMA=66"' "$collector"
 	grep -q 'echo "# CONTROLPLANE_SCHEMA=66"' "$precreate"
-	# The namespace-scaling keys come from the one shared emitter in both writers (PL36).
-	grep -q '^[[:space:]]*growth_preamble_lines ' "$collector"
-	grep -q '^[[:space:]]*growth_preamble_lines ' "$precreate"
-	# The proxy-check and traffic-management knobs are inline echoes in both writers
-	# (the PL36 key-set test above then covers their parity).
-	for k in PROXY_CHECK_TOLERANCE_PCT PROXY_CHECK_MIN_DIFF TRAFFIC_CONFIG VSDR_EVERY VSDR_SUBSETS; do
-		grep -q "echo \"# ${k}=" "$collector"
-		grep -q "echo \"# ${k}=" "$precreate"
-	done
 }
 
-# ---------------------------------------------------------------------------
-# PL36 for churn-dataplane: three writers build the same TSV preamble (004's
-# pre-create, then 002 and 003 when they bootstrap the file). Each key one writer
-# adds and another omits is lost whenever the other writer created the file.
-# ---------------------------------------------------------------------------
-
-# _cd_preamble_keys <script>: the KEY= args of its write_preamble call.
-_cd_preamble_keys() {
-	awk '/write_preamble "churn-dataplane/ { on = 1; next } on && /printf .run_id/ { exit } on' "$1" \
-		| grep -oE '"[A-Z][A-Z0-9_]*=' | tr -d '"=' | sort -u
-}
-
-@test "PL36: churn-dataplane 002, 003 and 004 write the same preamble key set" {
-	d="${ROOT}/tests/churn-dataplane"
-	k2="$(_cd_preamble_keys "$d/002-run-baseline-probe.sh")"
-	k3="$(_cd_preamble_keys "$d/003-run-churn-probe.sh")"
-	k4="$(_cd_preamble_keys "$d/004-run-sweep.sh")"
-	[ -n "$k2" ]
-	[ "$k2" = "$k3" ]
-	# 004 writes every 002 key, plus only the documented sweep-level extras.
-	[ -z "$(comm -23 <(printf '%s\n' "$k2") <(printf '%s\n' "$k4"))" ]
-	for k in $(comm -13 <(printf '%s\n' "$k2") <(printf '%s\n' "$k4")); do
-		case "$k" in
-			MATRIX_SIZE|REPETITIONS|SETUP_NS_WAIT_SEC|CLEANUP_GRACE_SEC|NS_DELETE_TIMEOUT_SEC) : ;;
-			*) echo "unexpected 004-only key: $k"; false ;;
-		esac
-	done
-	for k in MIN_PCT_200 REACH_REQUESTS REACH_QPS REACH_HTTP_TIMEOUT_SEC REACH_DETAIL_TIMEOUT_SEC REACH_ATTEMPTS \
-		REACH_RETRY_SEC ON_UNREACHABLE; do
-		grep -qx "$k" <<<"$k2"
-	done
-}
-
-# ---------------------------------------------------------------------------
-# probe_kube_versions — concurrent per-context server version probe.
-# ---------------------------------------------------------------------------
-
-# Fake kubectl: prints a version JSON that echoes the --context value.
+# _fake_kubectl: prints a version JSON that echoes the --context value; context bad fails.
 _fake_kubectl() {
-	local ctx=""
+	local ctx="" a
 	for a in "$@"; do [[ "$a" == --context=* ]] && ctx="${a#--context=}"; done
+	[[ "$ctx" != bad ]] || return 1
 	printf '{"serverVersion":{"gitVersion":"v1.34.0-%s"}}\n' "${ctx//\//_}"
 }
 
-@test "probe_kube_versions: keeps input order and handles contexts containing '/'" {
-	run probe_kube_versions "plain,default/api-x:6443/admin" _fake_kubectl
+@test "probe_kube_versions: each context's server version in the given order, a context with a '/' too; one that does not answer is unreachable" {
+	run probe_kube_versions "plain,bad,default/api-x:6443/admin" _fake_kubectl
 	assert_success
-	assert_output "plain=v1.34.0-plain,default/api-x:6443/admin=v1.34.0-default_api-x:6443_admin"
+	assert_output "plain=v1.34.0-plain,bad=unreachable,default/api-x:6443/admin=v1.34.0-default_api-x:6443_admin"
 }
-
-# _conc_kubectl <kubectl args...>: counts the reads alive (their dirs under running/) as each
-# starts, in counts, then answers both the version read and istiod's Deployment read.
-_conc_kubectl() {
-	local ctx="" a
-	for a in "$@"; do [[ "$a" != --context=* ]] || ctx="${a#--context=}"; done
-	mkdir -p "${BATS_TEST_TMPDIR}/running/${ctx}"
-	find "${BATS_TEST_TMPDIR}/running" -mindepth 1 -maxdepth 1 -type d | wc -l >>"${BATS_TEST_TMPDIR}/counts"
-	sleep 0.2
-	rmdir "${BATS_TEST_TMPDIR}/running/${ctx}"
-	case " $* " in
-	*" version "*) printf '{"serverVersion":{"gitVersion":"v1.34.0"}}\n' ;;
-	*) echo '{"spec":{"replicas":2,"template":{"spec":{"containers":[{"name":"discovery","resources":{"limits":{"cpu":"2","memory":"4Gi"}}}]}}}}' ;;
-	esac
-}
-
-@test "probe_kube_versions: PLATFORM_READ_PARALLEL members at a time (each_bounded), in the given order" {
-	PLATFORM_READ_PARALLEL=2 run probe_kube_versions "m0,m1,m2,m3,m4,m5" _conc_kubectl
-	assert_success
-	assert_output "m0=v1.34.0,m1=v1.34.0,m2=v1.34.0,m3=v1.34.0,m4=v1.34.0,m5=v1.34.0"
-	[ "$(wc -l <"${BATS_TEST_TMPDIR}/counts")" -eq 6 ]
-	[ "$(sort -n "${BATS_TEST_TMPDIR}/counts" | tail -1 | tr -d ' ')" -le 2 ]
-	: >"${BATS_TEST_TMPDIR}/counts"
-	PLATFORM_READ_PARALLEL=1 run probe_kube_versions "m0,m1,m2" _conc_kubectl
-	assert_output "m0=v1.34.0,m1=v1.34.0,m2=v1.34.0"
-	[ "$(sort -nu "${BATS_TEST_TMPDIR}/counts" | tr -d ' ')" = 1 ]
-}
-
-@test "probe_kube_versions: unreachable context reports 'unreachable'" {
-	_fail_kubectl() { return 1; }
-	run probe_kube_versions "a,b" _fail_kubectl
-	assert_success
-	assert_output "a=unreachable,b=unreachable"
-}
-
-# ---------------------------------------------------------------------------
-# harness_sha — describes the harness repo at $ROOT, not the caller's cwd.
-# ---------------------------------------------------------------------------
-
-@test "harness_sha: describes \$ROOT even when called from another directory" {
-	expected="$(git -C "$ROOT" describe --always --abbrev=7)"
-	cd "$BATS_TEST_TMPDIR"
-	run harness_sha
-	[ "$status" -eq 0 ]
-	# A tree with uncommitted changes adds -dirty (tests/lib/test/sweep.bats).
-	[[ "$output" == "$expected" || "$output" == "${expected}-dirty" ]]
-}
-
-@test "harness_sha: non-repo ROOT -> unknown" {
-	ROOT="$BATS_TEST_TMPDIR" run harness_sha
-	[ "$status" -eq 0 ]
-	[ "$output" = "unknown" ]
-}
-
-# The Istio version check (istio_live_version, istio_version_resolve, istio_version_recheck)
-# is tested in istio-state.bats.

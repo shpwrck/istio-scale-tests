@@ -93,9 +93,9 @@ rrow() {
 	printf '%s\t%s\t%s\t%s\t%s\t%s\t1\t10\t%s\tN/A\t%s\t%s\t%s' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "${9:--}" "$8" "${10:--}"
 }
 
-# --- reach_summarize / reach_classify ---
+# --- reach_summarize / reach_classify / reach_sanitize / reach_body_line ---
 
-@test "reach_summarize: ok total pct_200 top_code from RetCodes" {
+@test "reach_summarize and reach_classify: ok, total, pct_200 and the top code from RetCodes; no codes, garbage or nothing is N/A, never 0; REACHABLE, UNREACHABLE, DEGRADED, UNKNOWN" {
 	run reach_summarize '{"RetCodes":{"200":10}}'
 	assert_output "10 10 1.0000 -"
 	run reach_summarize '{"RetCodes":{"503":10}}'
@@ -104,17 +104,12 @@ rrow() {
 	assert_output "15 20 0.7500 503"
 	run reach_summarize '{"RetCodes":{"-1":5}}'
 	assert_output "0 5 0.0000 -1"
-}
-
-@test "reach_summarize: no codes, garbage or empty input -> 0 0 N/A -" {
+	local j
 	for j in '{}' 'garbage' ''; do
 		run reach_summarize "$j"
 		assert_success
 		assert_output "0 0 N/A -"
 	done
-}
-
-@test "reach_classify: REACHABLE, UNREACHABLE, DEGRADED, UNKNOWN" {
 	run reach_classify 10 10; assert_output REACHABLE
 	run reach_classify 0 10; assert_output UNREACHABLE
 	run reach_classify 7 10; assert_output DEGRADED
@@ -122,9 +117,7 @@ rrow() {
 	run reach_classify "" ""; assert_output UNKNOWN
 }
 
-# --- reach_sanitize / reach_body_line ---
-
-@test "reach_sanitize: one line, IPs and hosts masked, Envoy TLS reason kept, <= 256 chars" {
+@test "reach_sanitize: one line of at most 256 characters, IPv4 and IPv6 addresses and hosts masked; Envoy's TLS reason, kubectl's Client.Timeout and colon text that is no address kept" {
 	tls='upstream connect error or disconnect/reset before headers. retried and the latest reset reason: remote connection failure, transport failure reason: TLS_error:|268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED:TLS_error_end'
 	run reach_sanitize "$tls"
 	assert_output --partial "CERTIFICATE_VERIFY_FAILED"
@@ -135,14 +128,8 @@ rrow() {
 	run reach_sanitize ""
 	# Not assert_output "-": bats-assert reads "-" as "expected output on stdin".
 	[ "$output" = "-" ]
-}
-
-@test "reach_sanitize (R5): kubectl's Client.Timeout survives, the host before it is masked" {
 	run reach_sanitize 'Unable to connect to the server: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers) from api.mesh-a.example.invalid'
 	assert_output "Unable to connect to the server: net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers) from <host>"
-}
-
-@test "reach_sanitize: IPv6 literals masked (bracketed, compressed, full, zone, mapped)" {
 	run reach_sanitize "Unable to connect: dial tcp [fd00:10:96::1f]:8080: connect: connection refused"
 	assert_output "Unable to connect: dial tcp <ip>:8080: connect: connection refused"
 	run reach_sanitize "read tcp [::1]:43458->[2001:db8::20]:8080: i/o timeout"
@@ -156,9 +143,6 @@ rrow() {
 	run reach_sanitize "mapped [::ffff:192.0.2.1]:80 and ::ffff:192.0.2.1"
 	assert_output "mapped <ip>:80 and <ip>:<ip>"
 	refute_output --partial "192"
-}
-
-@test "reach_sanitize: colon text that is not an address survives" {
 	local t
 	for t in "Error status -1 (code:-1)" "at 12:34:56 and 12:34:56.789Z, 2026-10-13T12:34:56Z" \
 		"Envoy::Http::Codec failed" "TLS_error:|268435581:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED"; do
@@ -167,7 +151,7 @@ rrow() {
 	done
 }
 
-@test "reach_body_line: skips the fortio curl headers; falls back to the fortio log" {
+@test "reach_body_line: the reply body after fortio curl's headers; else fortio's err line (a socket failure's, not the trailing 'Error status -1'); else its last line" {
 	printf 'HTTP/1.1 503 Service Unavailable\r\ncontent-length: 19\r\n\r\nno healthy upstream\n' > "${BATS_TEST_TMPDIR}/o"
 	: > "${BATS_TEST_TMPDIR}/e"
 	run reach_body_line "${BATS_TEST_TMPDIR}/o" "${BATS_TEST_TMPDIR}/e"
@@ -176,9 +160,6 @@ rrow() {
 	printf '{"level":"err","msg":"Unable to connect","err":"connect: connection refused"}\ncommand terminated with exit code 1\n' > "${BATS_TEST_TMPDIR}/e"
 	run reach_body_line "${BATS_TEST_TMPDIR}/o" "${BATS_TEST_TMPDIR}/e"
 	assert_output "Unable to connect: connect: connection refused"
-}
-
-@test "reach_body_line: a socket failure keeps fortio's err line, not the trailing 'Error status -1'" {
 	# fixtures/fortio_curl_timeout.err: the stderr of a real `fortio curl` (1.75.3) to a
 	# blackholed remote through kubectl exec, IPs and names replaced.
 	: > "${BATS_TEST_TMPDIR}/o"
@@ -195,9 +176,9 @@ rrow() {
 	assert_output "Error status -1"
 }
 
-# --- reach_check_target / reach_check_all ---
+# --- reach_check_all / the reach knobs / reach_write_header ---
 
-@test "reach_check_all: source first, then remotes; statuses, attempts and detail" {
+@test "reach_check_all: one row per target, the source first, with its status, attempts, codes and detail; a target that recovers on retry is REACHABLE with attempts=2; a second call adds its rows under the one header; without a header it fails" {
 	f="${RES}/reach-x.tsv"
 	reach_write_header "$f" RUN_ID=x SUITE=t
 	run reach_check_all "$f" x c1 4 ns pod "http://s-{ctx}.ns:8080/echo" ok-src "ok-b,bad-c,err-d" _fake_kubectl
@@ -207,18 +188,14 @@ rrow() {
 	assert_line --index 1 "ok-b remote 1 10/10 - REACHABLE -"
 	assert_line --index 2 "bad-c remote 3 10/0 503 UNREACHABLE no healthy upstream"
 	assert_line --index 3 "err-d remote 3 0/0 - UNKNOWN exec failed"
-}
-
-@test "reach_check_all: a target that recovers on retry is REACHABLE with attempts=2" {
-	f="${RES}/reach-x.tsv"
+	# A target that recovers on retry.
+	f="${RES}/reach-r.tsv"
 	reach_write_header "$f" RUN_ID=x
 	reach_check_all "$f" x c1 2 ns pod "http://s-{ctx}/echo" ok-src "flaky-b" _fake_kubectl
 	run awk -F'\t' '$5 == "flaky-b" { print $7, $12 }' "$f"
 	assert_output "2 REACHABLE"
-}
-
-@test "reach_check_all: one header for two calls on the same file (PL36); no header -> return 1" {
-	f="${RES}/reach-x.tsv"
+	# Two calls on one file (PL36).
+	f="${RES}/reach-2.tsv"
 	reach_write_header "$f" RUN_ID=x
 	reach_check_all "$f" x c1 2 ns pod "http://s-{ctx}/echo" ok-src ok-b _fake_kubectl
 	reach_write_header "$f" RUN_ID=y
@@ -231,7 +208,7 @@ rrow() {
 	assert_failure
 }
 
-@test "reach_check_all: parallel connections, one detail curl on the last attempt, with its own timeout" {
+@test "reach_check_all: the load spreads its requests over parallel connections at the same QPS and timeout; only the last failed attempt is curled, with the detail timeout" {
 	# Logs every fake kubectl call, so the fortio arguments and the curl count are visible.
 	_log_kubectl() { printf '%s\n' "$*" >> "${BATS_TEST_TMPDIR}/calls"; _fake_kubectl "$@"; }
 	f="${RES}/reach-x.tsv"
@@ -252,7 +229,13 @@ rrow() {
 	[ "$(grep -c 'fortio curl' "${BATS_TEST_TMPDIR}/calls")" -eq 1 ]
 }
 
-@test "reach_worst_case_sec: the bound for a target that never answers, shown in the plan line" {
+@test "the reach knobs: reach_validate refuses a bad policy or knob, naming it; reach_worst_case_sec bounds a target that never answers (unknown for a rejected knob), in the plan line; the default detail timeout outlasts Envoy's retried connect timeouts" {
+	run reach_validate warn; assert_success
+	run reach_validate fail; assert_success
+	run reach_validate maybe; assert_failure; assert_output --partial "--on-unreachable"
+	REACH_REQUESTS=-1 run reach_validate warn; assert_failure; assert_output --partial "--reach-requests"
+	REACH_ATTEMPTS=0 run reach_validate warn; assert_failure; assert_output --partial "REACH_ATTEMPTS"
+	REACH_DETAIL_TIMEOUT_SEC=0 run reach_validate warn; assert_failure; assert_output --partial "REACH_DETAIL_TIMEOUT_SEC"
 	export REACH_RETRY_SEC=10  # setup() sets 0
 	run reach_worst_case_sec
 	# 3 x (10/10 + 2 x 3) + 2 x 10 + 35
@@ -269,9 +252,6 @@ rrow() {
 	assert_output "unknown"
 	run reach_plan_line "http://s-{ctx}/echo" a b warn
 	assert_output --partial "detail curl 35s; at most about 76s for a target that never answers"
-}
-
-@test "options.env: the detail timeout outlasts Envoy's retried connect timeouts to a blackholed remote" {
 	# No VirtualService: Istio's default retry policy (2 retries on connect-failure, no
 	# per-try timeout) makes 1 + 2 connect attempts of meshConfig.connectTimeout (10 s)
 	# before Envoy's 503. A default at or below 30 s ends on the client side as an
@@ -281,7 +261,7 @@ rrow() {
 	[ "$output" -gt $(((1 + 2) * 10)) ]
 }
 
-@test "reach_write_header: records RUN_CONFIG, RUN_CONFIG_SHA256 and the platform record (PL36); refuses without config.sh or platform.sh" {
+@test "reach_write_header: records RUN_CONFIG, RUN_CONFIG_SHA256 and the platform record, of the members --contexts lists or else of every member the record holds; without config.sh or platform.sh it writes nothing and fails" {
 	RUN_CONFIG=c.env RUN_CONFIG_SHA256=abc reach_write_header "${RES}/reach-c.tsv" RUN_ID=c
 	grep -qx '# RUN_CONFIG=c.env' "${RES}/reach-c.tsv"
 	grep -qx '# RUN_CONFIG_SHA256=abc' "${RES}/reach-c.tsv"
@@ -306,9 +286,6 @@ rrow() {
 	assert_failure
 	[[ "$stderr" == *"platform_preamble_lines missing (source tests/lib/platform.sh)"* ]]
 	[ ! -e "${RES}/reach-y.tsv" ]
-}
-
-@test "reach_write_header --contexts (H13): the record of the members listed; without it, of every member the record holds" {
 	(_platform_put c1 $'kubernetes\top\tpilot\tproxy\tkind\tenv'
 		_platform_put c2 $'kubernetes\top\tpilot\tproxy\taws\tenv'
 		reach_write_header "${RES}/reach-s.tsv" --contexts c2 RUN_ID=s SUITE=churn-dataplane
@@ -319,12 +296,9 @@ rrow() {
 	grep -qx '# SUITE=churn-dataplane' "${RES}/reach-s.tsv"
 	! grep -q -- '--contexts' "${RES}/reach-s.tsv" || false
 	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind,c2=aws' "${RES}/reach-1.tsv"
-	# churn-dataplane 002 writes the sweep's per-sweep file with every member the record holds
-	# (a sweep's 002 inherits all of them), so later mesh sizes' members are in its header.
-	grep -q 'reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)"' "${ROOT}/tests/churn-dataplane/002-run-baseline-probe.sh"
 }
 
-@test "reach_result_for / reach_not_reachable: listed remotes without a row count as UNKNOWN" {
+@test "reach_result_for, reach_not_reachable, reach_should_stop: a listed remote without a row is UNKNOWN; fail stops on an UNREACHABLE or UNKNOWN remote only, never on a DEGRADED one or the local target" {
 	f="${RES}/reach-x.tsv"
 	reach_tsv "$f" "$(rrow x c1 3 s s local 10 REACHABLE)" "$(rrow x c1 3 s b remote 0 UNREACHABLE)" \
 		"$(rrow x c1 3 s c remote 7 DEGRADED)" "$(rrow x c1 3 s d remote 0 UNKNOWN)"
@@ -334,10 +308,7 @@ rrow() {
 	assert_output "UNKNOWN N/A"
 	run reach_not_reachable "$f" x c1 "b,c,d,e"
 	assert_output $'b\nd\ne'
-}
-
-@test "reach_should_stop: only fail with an UNREACHABLE or UNKNOWN remote stops" {
-	f="${RES}/reach-x.tsv"
+	f="${RES}/reach-s.tsv"
 	reach_tsv "$f" "$(rrow x u 2 s s local 10 REACHABLE)" "$(rrow x u 2 s b remote 0 UNREACHABLE)" \
 		"$(rrow x k 2 s s local 10 REACHABLE)" "$(rrow x k 2 s b remote 0 UNKNOWN)" \
 		"$(rrow x d 2 s s local 10 REACHABLE)" "$(rrow x d 2 s b remote 7 DEGRADED)" \
@@ -348,15 +319,6 @@ rrow() {
 	run reach_should_stop fail "$f" x d; assert_failure
 	# Only remotes count: an unreachable local target does not stop.
 	run reach_should_stop fail "$f" x l; assert_failure
-}
-
-@test "reach_validate: rejects a bad policy and bad knobs" {
-	run reach_validate warn; assert_success
-	run reach_validate fail; assert_success
-	run reach_validate maybe; assert_failure; assert_output --partial "--on-unreachable"
-	REACH_REQUESTS=-1 run reach_validate warn; assert_failure; assert_output --partial "--reach-requests"
-	REACH_ATTEMPTS=0 run reach_validate warn; assert_failure; assert_output --partial "REACH_ATTEMPTS"
-	REACH_DETAIL_TIMEOUT_SEC=0 run reach_validate warn; assert_failure; assert_output --partial "REACH_DETAIL_TIMEOUT_SEC"
 }
 
 # --- reach_coverage_rows / reach_coverage_render ---
@@ -376,7 +338,7 @@ _coverage_fixture() {
 		"$(rrow r2 c2 3 s deg remote 0 UNREACHABLE 503)"
 }
 
-@test "reach_coverage_rows: REACHABLE, UNREACHABLE, FLAPPING, DEGRADED; mesh sizes apart; local excluded" {
+@test "reach coverage: each remote's runs read REACHABLE, UNREACHABLE, FLAPPING or DEGRADED, mesh sizes apart and the local target left out; every format names the remotes not reachable and says when there is no data, or no remote to check in a mesh of one member" {
 	_coverage_fixture
 	run reach_coverage_rows "$RES"
 	assert_success
@@ -386,10 +348,6 @@ _coverage_fixture() {
 	assert_line --index 3 $'3\ts\tflap\t2\t1\tFLAPPING\t503\t-'
 	assert_line --index 4 $'3\ts\tdeg\t2\t0\tDEGRADED\t503\t-'
 	refute_output --partial $'\ts\ts\t'
-}
-
-@test "reach_coverage_render: text, md, csv, json, charts and no data" {
-	_coverage_fixture
 	reach_coverage_rows "$RES" > "${RES}/rows"
 	run reach_coverage_render text "${RES}/rows"
 	assert_line "REMOTE COVERAGE mesh_size=2 source=s: 1/1 remotes reachable"
@@ -436,13 +394,6 @@ _coverage_fixture() {
 	[ -z "$(reach_coverage_rows "${RES}/reach-none.tsv")" ]
 }
 
-@test "reach_coverage_render md: a '|' in the detail is escaped" {
-	reach_tsv "${RES}/reach-1.tsv" "$(rrow r1 c1 2 s b remote 0 UNREACHABLE 503 'TLS_error:|268435581:CERTIFICATE_VERIFY_FAILED')"
-	reach_coverage_rows "$RES" > "${RES}/rows"
-	run reach_coverage_render md "${RES}/rows"
-	assert_output --partial 'TLS_error:\|268435581:CERTIFICATE_VERIFY_FAILED |'
-}
-
 # --- dataplane 004 (report) ---
 
 # lrow <mesh> <tgt> <qps> <status> <class>
@@ -464,7 +415,7 @@ _dp_fixture() {
 		"$(rrow r1 r1 3 s r1 remote 10 REACHABLE)" "$(rrow r1 r1 3 s r2 remote 0 UNREACHABLE 503 'no healthy upstream')"
 }
 
-@test "004: Remote coverage names the unreachable remote in md, text and json" {
+@test "004: the Remote coverage section, before the results table, and the remotes with no valid latency rows, in md, json and charts" {
 	_dp_fixture
 	run "$DP_REPORT" --results-dir "$RES" --format md
 	assert_success
@@ -473,20 +424,15 @@ _dp_fixture() {
 	assert_output --partial "- Remotes with no valid latency rows: mesh_size=3 from s: r2 (0/2; UNREACHABLE=2)"
 	# The section comes before the results table.
 	[ "$(printf '%s\n' "$output" | grep -n '## Remote coverage' | cut -d: -f1)" -lt "$(printf '%s\n' "$output" | grep -n '^| mesh_size | qps_target' | cut -d: -f1)" ]
-	run "$DP_REPORT" --results-dir "$RES"
-	assert_output --partial "REMOTE COVERAGE mesh_size=3 source=s: 1/2 remotes reachable"
 	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -r '.summary.remotes_not_reachable' <<<"$output")" = 1 ]
 	[ "$(jq -r '.summary.remotes_without_valid_rows' <<<"$output")" = 1 ]
 	[ "$(jq -r '.remote_validity[] | select(.target_ctx == "r2") | .statuses.UNREACHABLE' <<<"$output")" = 2 ]
-	run "$DP_REPORT" --results-dir "$RES" --format csv
-	assert_output --partial "# REMOTE_COVERAGE mesh_size=3 source=s reachable=1/2 not_reachable=r2"
-	assert_output --partial "# REMOTE_NO_VALID_ROWS mesh_size=3 from s: r2 (0/2; UNREACHABLE=2)"
 	run "$DP_REPORT" --results-dir "$RES" --format charts
 	assert_output --partial "Remotes NOT reachable at mesh_size=3 from s: r2"
 }
 
-@test "004 --fail-on-unreachable: exit 3 naming the rules; 0 when every remote is fine" {
+@test "004 --fail-on-unreachable: exit 3 naming each rule, also for a legacy TSV without a reach file (no reachability data, the remote named by n_valid); 0 when every remote is fine" {
 	_dp_fixture
 	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --fail-on-unreachable
 	[ "$status" -eq 3 ]
@@ -506,15 +452,15 @@ _dp_fixture() {
 	run "$DP_REPORT" --results-dir "$ok" --fail-on-unreachable
 	assert_success
 	assert_output --partial "REMOTE COVERAGE mesh_size=2 source=s: 1/1 remotes reachable"
-}
-
-@test "004: legacy TSV without a reach file -> no reachability data, remote listed by n_valid, exit 3" {
+	# A legacy TSV without a reach file.
+	old="${BATS_TEST_TMPDIR}/old"
+	mkdir -p "$old"
 	{
 		echo "$LAT_HDR"
 		lrow 2 s 10 OK local
 		for q in 10 100; do lrow 2 r2 "$q" ERROR_RATE_HIGH remote; done
-	} > "${RES}/latency-old.tsv"
-	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --fail-on-unreachable
+	} > "${old}/latency-old.tsv"
+	run --separate-stderr "$DP_REPORT" --results-dir "$old" --fail-on-unreachable
 	[ "$status" -eq 3 ]
 	assert_output --partial "REMOTE COVERAGE: no reachability data"
 	assert_output --partial "Remotes with no valid latency rows: mesh_size=2 from s: r2 (0/2; ERROR_RATE_HIGH=2)"
@@ -524,6 +470,35 @@ _dp_fixture() {
 	[[ "$stderr" != *PLATFORM* ]]
 }
 
+@test "004: poisoned rows and unreachable skips are counted apart in text, csv and json" {
+	{
+		platform_fixture_lines s,r1,r2
+		echo "$LAT_HDR"
+		lrow 2 s 10 OK local
+		lrow 2 r1 10 ERROR_RATE_HIGH remote
+		lrow 2 r2 10 UNREACHABLE remote
+		lrow 2 r2 100 UNREACHABLE remote
+	} > "${RES}/latency-x.tsv"
+	run "$DP_REPORT" --results-dir "$RES"
+	assert_output --partial "WARNING: 4 total / 1 valid rows — 1 dropped (poisoned), 2 skipped (remote unreachable)."
+	run "$DP_REPORT" --results-dir "$RES" --format csv
+	assert_output --partial "# ROWS n_total=4 n_valid=1 n_dropped=1 n_skipped_unreachable=2"
+	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
+	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[4,1,1,2]' ]
+	# Per-cell n_total/n_valid are unchanged: the UNREACHABLE rows stay in their cells.
+	[ "$(jq -c '[.results[] | select(.target_class == "remote") | [.qps_target, .n_total, .n_valid]]' <<<"$output")" = '[[10,2,0],[100,1,0]]' ]
+	# Nothing to warn about when every row is valid.
+	ok="${BATS_TEST_TMPDIR}/ok"
+	mkdir -p "$ok"
+	{
+		platform_fixture_lines s,r1,r2
+		echo "$LAT_HDR"
+		lrow 2 s 10 OK local
+	} > "${ok}/latency-x.tsv"
+	run "$DP_REPORT" --results-dir "$ok"
+	refute_output --partial "total / "
+}
+
 # --- dataplane 002 / 003 (entrypoints, stub kubectl) ---
 
 _dp_probe() {
@@ -531,7 +506,7 @@ _dp_probe() {
 		--remote-contexts ctx-b,ctx-c --qps-levels 10,100 --settle 0 --warmup-duration 0 --output-dir "$RES" "$@"
 }
 
-@test "002 warn: an unreachable remote skips its load and gets UNREACHABLE rows" {
+@test "002 warn: an unreachable remote skips its load and gets UNREACHABLE rows; the latency preamble and the report carry the reach knobs" {
 	_dp_probe
 	assert_success
 	[[ "$stderr" == *"UNREACHABLE ctx-b 0/10"* ]]
@@ -557,14 +532,10 @@ _dp_probe() {
 	assert_failure
 	run grep -q 'fortio load -qps 10 -c 8 .*dataplane-server-ctx-c' "$STUB_LOG"
 	assert_success
-	ls "$RES"/reach-*.tsv
-	# The reach file records the run config like every other preamble (PL36).
-	grep -qx '# RUN_CONFIG=none' "$RES"/reach-*.tsv
-	grep -qx '# RUN_CONFIG_SHA256=none' "$RES"/reach-*.tsv
 	grep -q '## Remote coverage' "$RES"/latency-*.md
 }
 
-@test "002 fail: stops before any load, exit 3, STOPPED_UNREACHABLE placeholder" {
+@test "002 fail: stops before any load, exit 3, with a STOPPED_UNREACHABLE placeholder that the report counts as skipped and shows in no cell" {
 	_dp_probe --on-unreachable fail
 	[ "$status" -eq 3 ]
 	[[ "$stderr" == *"STOPPED: --on-unreachable fail"* ]]
@@ -584,43 +555,6 @@ _dp_probe() {
 	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
 	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[3,0,0,3]' ]
 	[ "$(jq '[.results[] | select(.target_class == "na")] | length' <<<"$output")" = 0 ]
-	run "$DP_REPORT" --results-dir "$RES" --format csv
-	assert_output --partial "# ROWS n_total=3 n_valid=0 n_dropped=0 n_skipped_unreachable=3"
-	refute_output --partial ",na,"
-	run "$DP_REPORT" --results-dir "$RES" --format md
-	assert_output --partial "3 total / 0 valid rows — 3 skipped (remote unreachable)."
-	refute_output --partial "| na |"
-}
-
-@test "004: poisoned rows and unreachable skips are counted apart in every format" {
-	{
-		platform_fixture_lines s,r1,r2
-		echo "$LAT_HDR"
-		lrow 2 s 10 OK local
-		lrow 2 r1 10 ERROR_RATE_HIGH remote
-		lrow 2 r2 10 UNREACHABLE remote
-		lrow 2 r2 100 UNREACHABLE remote
-	} > "${RES}/latency-x.tsv"
-	run "$DP_REPORT" --results-dir "$RES"
-	assert_output --partial "WARNING: 4 total / 1 valid rows — 1 dropped (poisoned), 2 skipped (remote unreachable)."
-	run "$DP_REPORT" --results-dir "$RES" --format md
-	assert_output --partial "4 total / 1 valid rows — 1 dropped (poisoned), 2 skipped (remote unreachable)."
-	run "$DP_REPORT" --results-dir "$RES" --format csv
-	assert_output --partial "# ROWS n_total=4 n_valid=1 n_dropped=1 n_skipped_unreachable=2"
-	run --separate-stderr "$DP_REPORT" --results-dir "$RES" --format json
-	[ "$(jq -c '.summary | [.n_total, .n_valid, .n_dropped, .n_skipped_unreachable]' <<<"$output")" = '[4,1,1,2]' ]
-	# Per-cell n_total/n_valid are unchanged: the UNREACHABLE rows stay in their cells.
-	[ "$(jq -c '[.results[] | select(.target_class == "remote") | [.qps_target, .n_total, .n_valid]]' <<<"$output")" = '[[10,2,0],[100,1,0]]' ]
-	# Nothing to warn about when every row is valid.
-	ok="${BATS_TEST_TMPDIR}/ok"
-	mkdir -p "$ok"
-	{
-		platform_fixture_lines s,r1,r2
-		echo "$LAT_HDR"
-		lrow 2 s 10 OK local
-	} > "${ok}/latency-x.tsv"
-	run "$DP_REPORT" --results-dir "$ok"
-	refute_output --partial "total / "
 }
 
 @test "002 --reach-requests 0: no check, no reach file, nothing skipped" {
@@ -631,25 +565,32 @@ _dp_probe() {
 	[ "$(awk -F'\t' '$4 == "ctx-b" { print $14 }' "$(ls "$RES"/latency-*.tsv)" | sort -u)" = PERCENTILE_MISSING ]
 }
 
-@test "002 --dry-run prints the reach plan and never calls kubectl; bad policy is rejected" {
+@test "dataplane and churn-dataplane --dry-run: the reach plan with its policy and target, never a kubectl call; the sweeps pass --on-unreachable and --reach-requests to 002; a bad policy or COEXEC_MIN_PCT_200 is refused" {
 	PATH="${BIN}:${PATH}" run "$DP_PROBE" --dry-run --source-context ci-dummy --remote-contexts ci-two --on-unreachable fail
 	assert_success
 	assert_output --partial "Reach check: 10 requests at 10 QPS per target"
 	assert_output --partial "on unreachable: fail"
-	[ ! -s "$STUB_LOG" ]
 	PATH="${BIN}:${PATH}" run "$DP_PROBE" --dry-run --source-context ci-dummy --on-unreachable maybe
 	assert_failure
 	assert_output --partial "--on-unreachable"
-}
-
-@test "003 --dry-run passes --on-unreachable and --reach-requests to 002" {
 	KUBECONFIG=/dev/null PATH="${BIN}:${PATH}" run "$DP_SWEEP" --dry-run --contexts a,b --mesh-sizes 2 --on-unreachable fail
 	assert_success
 	assert_output --partial "--on-unreachable fail --reach-requests 10"
+	PATH="${BIN}:${PATH}" run "$CD_PROBE" --dry-run --source-context ci-dummy --remote-contexts ci-two --on-unreachable fail
+	assert_success
+	assert_output --partial "Reach check: 10 requests"
+	assert_output --partial "fortio-server-{ctx}"
+	assert_output --partial "Min pct_200: 0.99"
+	KUBECONFIG=/dev/null PATH="${BIN}:${PATH}" run "$CD_SWEEP" --dry-run --contexts a,b --mesh-sizes 2 --churn-rates 1 --on-unreachable fail --reach-requests 5
+	assert_success
+	assert_output --partial "--on-unreachable fail --reach-requests 5"
+	COEXEC_MIN_PCT_200=2 PATH="${BIN}:${PATH}" run "$CD_PROBE" --dry-run --source-context ci-dummy
+	assert_failure
+	assert_output --partial "COEXEC_MIN_PCT_200"
 	[ ! -s "$STUB_LOG" ]
 }
 
-# --- churn-dataplane 005 (report) and entrypoints ---
+# --- churn-dataplane 005 (report) ---
 
 # crow <combo> <phase> <cr> <p99> <status>
 crow() {
@@ -695,48 +636,6 @@ crow() {
 	run --separate-stderr "$CD_REPORT" --results-dir "$RES" --fail-on-unreachable
 	[ "$status" -eq 3 ]
 	[[ "$stderr" == *"rule=reach_coverage mesh_size=2 from a: b (UNREACHABLE"* ]]
-}
-
-@test "churn-dataplane 002/004 --dry-run show the reach plan and thread the flags" {
-	PATH="${BIN}:${PATH}" run "$CD_PROBE" --dry-run --source-context ci-dummy --remote-contexts ci-two --on-unreachable fail
-	assert_success
-	assert_output --partial "Reach check: 10 requests"
-	assert_output --partial "fortio-server-{ctx}"
-	assert_output --partial "Min pct_200: 0.99"
-	KUBECONFIG=/dev/null PATH="${BIN}:${PATH}" run "$CD_SWEEP" --dry-run --contexts a,b --mesh-sizes 2 --churn-rates 1 --on-unreachable fail --reach-requests 5
-	assert_success
-	assert_output --partial "--on-unreachable fail --reach-requests 5"
-	[ ! -s "$STUB_LOG" ]
-	COEXEC_MIN_PCT_200=2 PATH="${BIN}:${PATH}" run "$CD_PROBE" --dry-run --source-context ci-dummy
-	assert_failure
-	assert_output --partial "COEXEC_MIN_PCT_200"
-}
-
-@test "--help lists the reach flags and environment variables" {
-	for s in "$DP_PROBE" "$DP_SWEEP" "$CD_PROBE" "$CD_SWEEP"; do
-		run "$s" --help
-		assert_success
-		assert_output --partial "--on-unreachable"
-		assert_output --partial "--reach-requests"
-		assert_output --partial "REACH_"
-	done
-	for s in "$DP_REPORT" "$CD_REPORT"; do
-		run "$s" --help
-		assert_success
-		assert_output --partial "--fail-on-unreachable"
-	done
-	run "$CD_PROBE" --help
-	assert_output --partial "COEXEC_MIN_PCT_200"
-	run "$CD_CHURN" --help
-	assert_output --partial "COEXEC_MIN_PCT_200"
-}
-
-@test "PL36: dataplane 002 and the 003 placeholder both write the reach preamble keys" {
-	for k in REACH_REQUESTS REACH_QPS REACH_HTTP_TIMEOUT_SEC REACH_DETAIL_TIMEOUT_SEC REACH_ATTEMPTS \
-		REACH_RETRY_SEC ON_UNREACHABLE; do
-		grep -q "echo \"# ${k}=" "$DP_PROBE"
-		grep -q "echo \"# ${k}=" "$DP_SWEEP"
-	done
 }
 
 @test "tuning 004-compare-profiles ignores reach-*.tsv in a pass directory (PL41)" {

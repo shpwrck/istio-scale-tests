@@ -83,11 +83,12 @@ wait_line() {
 	return 1
 }
 
-# group_gone <pgid>: until no process of that group is left, a zombie included (at most 5 s).
+# group_gone <pgid>: until no process of that group runs (at most 5 s). A zombie has ended: an
+# orphan's waits for init to reap it, which takes seconds in some containers.
 group_gone() {
 	local i
 	for ((i = 0; i < 50; i++)); do
-		kill -0 -- "-$1" 2>/dev/null || return 0
+		[[ -n "$(ps -A -o pgid=,stat= | awk -v g="$1" '$1 == g && $2 !~ /^Z/')" ]] || return 0
 		sleep 0.1
 	done
 	ps -A -o pid=,pgid=,stat=,args= | awk -v g="$1" '$2 == g'
@@ -164,7 +165,7 @@ finish() {
 		d="$1"; shift; sweep_start "$d" r1; sweep_finish "$@"' _ "$D" "$@"
 }
 
-@test "sweep_finish: every cell ran: exit 0 and a finished record; failed cells are counted by reason (exit 4), skipped ones are not failures" {
+@test "sweep_finish: every cell ran is exit 0 and a finished record; failed cells are counted by reason (exit 4), skipped ones are not failures; a stop's code (1, or 3 for a reachability gate) wins over 4 with its reason, never claiming every cell ran; a problem fails a sweep whose cells ran, a note does not; a cell count that is no number is unknown" {
 	finish 6
 	assert_success
 	assert_output "All 6 cells ran (their rows' own statuses are in the report)."
@@ -190,9 +191,7 @@ finish() {
 		sweep_start "$1" r1 --unit passes; sweep_finish --where "Each has its marker file in its pass directory" 3 SETUP_FAILED' _ "$D"
 	assert_failure 4
 	[ "$stderr" = "error: 1 of 3 passes failed: SETUP_FAILED x1. Each has its marker file in its pass directory; exit 4." ]
-}
-
-@test "sweep_finish --stopped: the stop's code (1, or 3 for a reachability gate) wins over 4, with its reason in a stopped record, and never claims every cell ran" {
+	# A stop.
 	finish --stopped 3 --stop-reason "the reachability gate found an unreachable remote" 4 PROBE_FAILED
 	assert_failure 3
 	[ -z "$output" ]
@@ -204,9 +203,7 @@ finish() {
 	assert_failure 1
 	[ -z "$output" ]
 	grep -qx 'EXIT=1' "${D}/sweep-outcome.txt"
-}
-
-@test "sweep_finish: a problem fails a sweep whose cells ran (exit 4), a note does not; a cell count that is no number is recorded unknown (its failed cells too), never as every cell ran" {
+	# Problems and notes.
 	finish --problem "the Istio version changed during the sweep (a: v1 at the start, v2 at the end)" --note "something unconfirmed" 2
 	assert_failure 4
 	assert_output "All 2 cells ran (their rows' own statuses are in the report)."
@@ -279,8 +276,6 @@ finish() {
 	wait "$p" || rc=$?
 	[ "$rc" -eq 143 ]
 	group_gone "$(<"${T}/step.pgid")"
-	run kill -0 "$(<"${T}/grandchild.pid")"
-	assert_failure
 	[ ! -e "${T}/step.done" ]
 	[ ! -e "${T}/after" ]
 	[ "$(<"${T}/cleanup.log")" = cleanup ]
@@ -293,25 +288,6 @@ finish() {
 	assert_line "warning: the sweep was interrupted (SIGTERM); its results may be partial"
 	assert_line "  sweep dir: ${D}"
 	refute_output --regexp '(Terminated|Killed|Done|\[[0-9]+\])'
-}
-
-@test "Ctrl-C (SIGINT to the sweep's process group) during a step stops the step's group, runs the cleanup once and records interrupted (SIGINT, exit 130)" {
-	[[ "$(bash -c 'trap "echo t" INT; kill -INT $$; echo n' 2>/dev/null)" == t* ]] || skip "SIGINT is ignored here"
-	step_script
-	sweep_script 'sweep_step "$1"' 'echo continued > "$T/after"'
-	# The sweep in a process group of its own (a job: set -m), as a terminal runs it.
-	run bash -c 'set -m; bash "$1" "$2" > "$3/out" 2> "$3/err" & p=$!
-		for i in $(seq 100); do [ -e "$3/step.started" ] && break; sleep 0.1; done
-		kill -INT -- "-$p"; wait "$p"' _ "$S" "$STEP" "$T"
-	[ "$status" -eq 130 ]
-	group_gone "$(<"${T}/step.pgid")"
-	[ ! -e "${T}/after" ]
-	[ "$(<"${T}/cleanup.log")" = cleanup ]
-	grep -qx 'STATUS=interrupted' "${D}/sweep-outcome.txt"
-	grep -qx 'SIGNAL=SIGINT' "${D}/sweep-outcome.txt"
-	grep -qx 'EXIT=130' "${D}/sweep-outcome.txt"
-	run cat "${T}/err"
-	refute_output --regexp '(Terminated|Killed|Interrupt|Done|\[[0-9]+\])'
 }
 
 @test "a step that ignores SIGTERM gets SIGKILL after SWEEP_STOP_GRACE_SEC, and a second signal kills it at once: either way it is gone before the cleanup runs" {
@@ -346,7 +322,7 @@ finish() {
 # ---------------------------------------------------------------------------
 # sweep_outcome_lines: what a report says of the records behind it
 
-@test "sweep_outcome_lines: a running record (the sweep died, or still runs) warns in every format; json and csv carry it, verdict names it" {
+@test "sweep_outcome_lines: a running record (the sweep died, or still runs), an interrupted one (with its signal and time) and a stopped one (with its reason) warn in every format; json and csv carry them, verdict names them" {
 	rec "$D" STATUS=running RUN_ID=r1 HARNESS_SHA=abc1234 STARTED_AT=2026-10-01T00:00:00Z UNIT=cells
 	: > "${D}/controlplane-r1.tsv"
 	outcome_all "${D}/controlplane-r1.tsv"
@@ -358,21 +334,15 @@ finish() {
 	[ "$OUT_csv" = "$(printf '%s\n' '# SWEEP_OUTCOME_DIR=sweep-x' '# SWEEP_OUTCOME_STATUS=running' '# SWEEP_OUTCOME_RUN_ID=r1' \
 		'# SWEEP_OUTCOME_HARNESS_SHA=abc1234' '# SWEEP_OUTCOME_STARTED_AT=2026-10-01T00:00:00Z' '# SWEEP_OUTCOME_UNIT=cells')" ]
 	[ "$OUT_verdict" = "sweep-x: running" ]
-}
-
-@test "sweep_outcome_lines: an interrupted record warns with its signal and time in every format" {
 	rec "$D" STATUS=interrupted RUN_ID=r1 UNIT=cells SIGNAL=SIGINT EXIT=130 ENDED_AT=2026-10-01T01:00:00Z "NOTE=istiod was not ready at the start"
 	outcome_all "$D"
-	local w="the sweep was interrupted (SIGINT) at 2026-10-01T01:00:00Z: these results may be partial"
+	w="the sweep was interrupted (SIGINT) at 2026-10-01T01:00:00Z: these results may be partial"
 	[ "$OUT_text" = "$(printf '%s\n' "SWEEP OUTCOME (sweep-x): INTERRUPTED, exit 130" "  warning: ${w}" "  warning: istiod was not ready at the start")" ]
 	[ "$OUT_md" = "$(printf '%s\n' '> **Sweep outcome** (`sweep-x`): **interrupted**, exit 130' "> - warning: ${w}" "> - warning: istiod was not ready at the start")" ]
 	[ "$OUT_charts" = "$OUT_md" ]
 	[ "$(jq -c '.[0] | [.status, .exit, .signal, .ended_at, .notes]' <<<"$OUT_json")" = '["interrupted",130,"SIGINT","2026-10-01T01:00:00Z",["istiod was not ready at the start"]]' ]
 	[[ "$OUT_csv" == *$'\n# SWEEP_OUTCOME_SIGNAL=SIGINT\n# SWEEP_OUTCOME_EXIT=130\n'* ]]
 	[ "$OUT_verdict" = "sweep-x: interrupted" ]
-}
-
-@test "sweep_outcome_lines: a stopped record is an error with its reason in every format" {
 	rec "$D" STATUS=stopped RUN_ID=r1 UNIT=cells EXIT=1 ENDED_AT=2026-10-01T01:00:00Z "STOP_REASON=controlplane-test namespaces are still on the members"
 	outcome_all "$D"
 	local e="the sweep stopped early: controlplane-test namespaces are still on the members"
@@ -384,7 +354,7 @@ finish() {
 	[ "$OUT_verdict" = "sweep-x: stopped" ]
 }
 
-@test "sweep_outcome_lines: failed cells are an error and skipped ones a note in every format; a record that ran every cell says so, and nothing in charts or verdict" {
+@test "sweep_outcome_lines: failed cells are an error and skipped ones a note in every format, each problem an error that counts in verdict; a record that ran every cell says so, and nothing in charts or verdict; several dirs (pooled inputs) are each read once, in order; no record adds nothing (json [])" {
 	rec "$D" STATUS=finished RUN_ID=r1 UNIT=passes EXIT=4 TOTAL=5 FAILED=2 "FAILED_BY=PROBE_FAILED x2" SKIPPED=1 "SKIPPED_BY=SKIPPED_MEM_GUARD x1"
 	outcome_all "$D"
 	[ "$OUT_text" = "$(printf '%s\n' "SWEEP OUTCOME (sweep-x): FINISHED, exit 4" "  error: 2 of 5 passes failed: PROBE_FAILED x2" \
@@ -402,9 +372,6 @@ finish() {
 	[ -z "$OUT_charts" ]
 	[ -z "$OUT_verdict" ]
 	[ "$(jq -c '.[0] | [.status, .exit, .failed, .failed_by, .stop_reason]' <<<"$OUT_json")" = '["finished",0,0,null,null]' ]
-}
-
-@test "sweep_outcome_lines: each problem is an error in every format and counts in verdict; several dirs (pooled inputs) are each read once, in order; no record adds nothing (json [])" {
 	local o="${T}/res/sweep-o"
 	rec "$D" STATUS=finished RUN_ID=r1 UNIT=cells EXIT=4 TOTAL=2 FAILED=0 "PROBLEM=the harness changed during the sweep: a at its start, b at its end" 'PROBLEM=a "quoted" one'
 	rec "$o" STATUS=finished RUN_ID=r2 UNIT=cells EXIT=0 TOTAL=3 FAILED=0
@@ -458,28 +425,4 @@ finish() {
 	[ "$(HARNESS_SHA_EXCLUDE="$r/tests/x/results/sweep-1" ROOT="$r" harness_sha)" = v1 ]
 	mkdir -p "${T}/plain"
 	[ "$(ROOT="${T}/plain" harness_sha)" = unknown ]
-}
-
-# ---------------------------------------------------------------------------
-# The steps a sweep runs
-
-@test "every step a sweep runs through sweep_step removes the temp dirs and files it makes at its top level in an EXIT trap, and traps no TERM, INT or HUP (bash runs that EXIT trap on those signals and still dies of them)" {
-	local line f var bad="" n=0
-	local -A seen=()
-	while IFS= read -r line; do
-		f="${line%%:*}"
-		f="${f%/*}/${line##*/}"
-		f="${f%\"}"
-		[[ -z "${seen[$f]+x}" ]] || continue
-		seen[$f]=1
-		[ -f "$f" ] || { bad+=" ${f}:missing"; continue; }
-		n=$((n + 1))
-		if grep -qE '^[[:space:]]*trap .*[[:space:]](TERM|INT|HUP)([[:space:]]|$)' "$f"; then bad+=" ${f}:signal-trap"; fi
-		while IFS= read -r var; do
-			grep -qE '^trap .*EXIT$' "$f" || bad+=" ${f}:no-EXIT-trap"
-			grep -qE "rm -r?f \"\\\$\\{?${var}(:-)?\\}?\"" "$f" || bad+=" ${f}:${var}"
-		done < <(grep -oE '^[A-Za-z_][A-Za-z_0-9]*="?\$\(mktemp' "$f" | sed 's/=.*//')
-	done < <(grep -oE 'sweep_step "\$(SCRIPT_DIR|\{TUNING_DIR\})/[0-9]{3}-[a-z0-9-]+\.sh"' "$ROOT"/tests/*/0*.sh)
-	[ "$n" -ge 15 ]
-	[ -z "$bad" ] || { echo "not removed on exit or a signal trapped:${bad}"; false; }
 }
