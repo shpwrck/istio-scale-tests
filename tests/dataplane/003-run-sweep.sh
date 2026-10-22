@@ -67,10 +67,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE        Run config of KEY=value lines (config/options.env keys; see
-                       tests/dataplane/README.md, "Run config"). The steps the sweep
-                       runs inherit it. Precedence: flag > --config > environment >
-                       default.
+For each mesh size: 001 deploys, 002 probes --repetitions times, 005 cleans up; then the
+reports, in sweep-<RUN_ID>/ under the output dir.
+
+  --config FILE        Run config of KEY=value lines (config/options.env keys); the steps
+                       inherit it. Precedence: flag > --config > environment > default.
   --contexts CSV       All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV     Cluster counts to test (default: ${mesh_sizes_default}).
   --qps-levels CSV     QPS levels to test (default: $QPS_LEVELS).
@@ -80,61 +81,28 @@ Usage: $(basename "$0") [options]
   --warmup-duration SEC
                        Envoy warmup per probe, 0 to disable (default: $WARMUP_DURATION).
   --output-dir DIR     Base results directory (default: ${DATAPLANE_RESULTS_DIR}).
-                       A per-sweep subdir sweep-\${RUN_ID}/ is created here.
   --repetitions N      Probe repetitions per mesh size (default: $REPETITIONS).
   --server-replicas N  fortio server pods per cluster, passed to 001 (default: $SERVER_REPLICAS).
-  --min-qps-ratio R    Below R x target QPS a row is QPS_SHORTFALL, passed to 002
-                       (default: $MIN_QPS_RATIO).
+  --min-qps-ratio R    QPS_SHORTFALL below R x target QPS, passed to 002 (default: $MIN_QPS_RATIO).
   --on-unreachable POLICY
-                       warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
-                       fail, a remote that is UNREACHABLE or UNKNOWN before the load
-                       stops the sweep after that mesh size's cleanup (exit 3).
-  --reach-requests N   Reach-check requests per target, passed to 002; 0 turns the
-                       check off (default: $REACH_REQUESTS).
+                       warn or fail, passed to 002 (default: $ON_UNREACHABLE).
+  --reach-requests N   Reach-check requests per target, passed to 002; 0 = off (default: $REACH_REQUESTS).
   --force-large-matrix Bypass the ${MAX_MATRIX}-combo matrix safety cap.
   --dry-run            Show plan without executing.
   -h, --help           Show this help.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  SETUP_CONTEXTS, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
-  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
-  DATAPLANE_MAX_MATRIX, DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS,
-  DATAPLANE_SERVER_REPLICAS, DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200 (read by 002),
-  REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002).
-  DATAPLANE_MESH_SIZES (--mesh-sizes), DATAPLANE_RESULTS_DIR (--output-dir; relative
-  to the repo root),
-  DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
-  The sweep checks every numeric one of them, and the flags that set them, before the
-  first setup, --dry-run included.
-  TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and
-  PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the platform record's reads (config/options.env).
-  SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
-  before SIGKILL. Environment only (config/options.env).
+Environment (config/options.env describes each): SETUP_CONTEXTS, DATAPLANE_MESH_SIZES and
+the other DATAPLANE_* keys (DATAPLANE_INTER_COMBO_SETTLE_SEC, DATAPLANE_REPETITIONS, and
+the keys 001, 002 and 005 read), REACH_* (read by 002), TEST_PLATFORM (${TEST_PLATFORM:-auto}),
+PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}), PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}).
+Environment only: DATAPLANE_MAX_MATRIX, DATAPLANE_TEST_NAMESPACE, ISTIO_VERSION_CHECK,
+ISTIO_VERSION_READY_WAIT_SEC, SWEEP_STOP_GRACE_SEC.
 
-Exit codes:
-  0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
-     counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition (or another live run holds the
-     sweep dir: .sweep.lock names its PID), or an unexpected error; after its start,
-     sweep-outcome.txt records the stop and its reason (STATUS=stopped, STOP_REASON)
-  3  --on-unreachable fail stopped the sweep (the reports are written)
-  4  the sweep finished and wrote its reports, but N cells failed (setup or probe
-     exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
-     version, the active revision or the generation of the Istio CR or its active
-     IstioRevision changed during the sweep (read again at its end), or a member's
-     platform record (a build, istiod's env: read again at its end), or the harness
-     (a file under tests/, config/, charts/ or terraform/) changed during the sweep
-     (HARNESS_SHA read at its start and its end); the outcome is also in
-     sweep-outcome.txt and every report
-  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): the running step's process group
-     gets SIGTERM, and SIGKILL SWEEP_STOP_GRACE_SEC later; sweep-outcome.txt records
-     STATUS=interrupted with the signal and its time
+Exit codes: 0 every mesh size ran; 1 stopped (a bad flag or precondition, an error);
+3 --on-unreachable fail stopped it; 4 failed cells or a problem (sweep-outcome.txt);
+129, 130, 143 a signal.
+
+See tests/dataplane/README.md.
 EOF
 }
 

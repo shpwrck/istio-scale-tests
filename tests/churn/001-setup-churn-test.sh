@@ -35,22 +35,25 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE          Run config of KEY=value lines (config/options.env keys; see
-                         tests/churn/README.md, "Run config"). Precedence: flag >
-                         --config > environment > default.
+Deploys the churn target deployments and the watcher on every context, and waits for them.
+
+  --config FILE          Run config of KEY=value lines (config/options.env keys).
+                         Precedence: flag > --config > environment > default.
   --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
   --deployment-count N   Number of churn target deployments (default: $DEPLOYMENT_COUNT).
   --base-replicas N      Initial replicas per deployment (default: $BASE_REPLICAS).
-  --dry-run              Render the chart and run apply --dry-run=client; contexts
-                         missing from the kubeconfig get the render only.
+  --dry-run              Render the chart and run apply --dry-run=client (render only for
+                         a context missing from the kubeconfig).
   --wait-timeout N       Seconds to wait for pods (default: $WAIT_TIMEOUT).
   -h, --help             Show this help.
 
-Environment:
-  SETUP_CONTEXTS, CHURN_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
-  CHURN_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
-  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
+Environment (config/options.env describes each): SETUP_CONTEXTS, CHURN_TEST_NAMESPACE,
+CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS, CHURN_WAIT_TIMEOUT_SEC, TEST_PLATFORM
+(${TEST_PLATFORM:-auto}); BUSYBOX_VERSION (config/versions.env).
+
+Exit codes: 0 deployed and ready (or the --dry-run passed); 1 an error or a timeout.
+
+See tests/churn/README.md.
 EOF
 }
 

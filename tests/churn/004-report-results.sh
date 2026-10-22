@@ -43,67 +43,29 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/churn/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
-  --results-dir DIR  Results directory (default: ${CHURN_RESULTS_DIR}). Every
-                     churn-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
-  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
-                     with different run ids). Without it the report stops, lists the
-                     runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values,
-                     and repeats the sweep-outcome.txt of each pooled sweep.
-  --format FMT       Output format: text, csv, md (or markdown), charts (default: text).
+Reports every churn-*.tsv under the results dir: convergence and push figures per mesh size
+and churn intensity, istiod restart diagnostics, what the inputs record and each sweep dir's
+outcome. Row statuses: OK, TIMEOUT_LOCAL, TIMEOUT_REMOTE, TIMEOUT_REMOTE_EDS,
+POISONED_RESTART, SCRAPE_INCOMPLETE, SCRAPE_INCOMPLETE_REMOTE_EDS, MISSING_VALUE,
+SETUP_FAILED, PROBE_FAILED; only OK rows feed the averages (n_valid of n_total).
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
+  --results-dir DIR  Results directory, read recursively; a sweep-*/ dir is one run
+                     (default: ${CHURN_RESULTS_DIR}).
+  --allow-multi-run  Pool several runs (default: a dir with more than one stops the report).
+  --format FMT       text, csv, md (or markdown) or charts (default: text).
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
 
 Example (one sweep, as 003 runs it; from the repo root):
   tests/churn/$(basename "$0") --results-dir ${CHURN_RESULTS_DIR}/sweep-<RUN_ID> --format md
 
-Row statuses (column 21): only OK rows feed the averages (n_valid); every row counts in
-n_total.
-  OK                  every measured column has a number
-  TIMEOUT_LOCAL       the source watcher did not see the scale-up in --timeout
-  TIMEOUT_REMOTE      a remote watcher did not see it in --timeout
-  TIMEOUT_REMOTE_EDS  the remote EDS push never came (convergence_remote_eds_ms)
-  POISONED_RESTART    an istiod restarted in the window (or its state is unknown)
-  SCRAPE_INCOMPLETE   a per-pod istiod scrape failed, so the summed deltas undercount
-  SCRAPE_INCOMPLETE_REMOTE_EDS
-                      a remote's EDS poll never completed a scrape of its istiod, so
-                      convergence_remote_eds_ms was not measured (N/A), no remote
-                      timed out
-  MISSING_VALUE       another measured column has no number (a watcher that did not
-                      list every churn target, or a push counter in neither scrape)
-  SETUP_FAILED        an iteration failed before it measured (002)
-  PROBE_FAILED        the probe failed for the whole cell (003 placeholder)
-A row an older 002 wrote as OK without a number in a measured column is counted as
-TIMEOUT_REMOTE_EDS or MISSING_VALUE, with a warning on stderr.
+Environment (config/options.env describes it): CHURN_RESULTS_DIR (relative to the repo root).
 
-text and md end with an "istiod restart diagnostics" section: the rows of every
-istiod-diag-*/index.tsv under the results dir (what changed, the cause, the evidence
-folder) and a tally by cause.
+Exit codes: 0 the report was written (or the files listed); 1 an error.
 
-harness_sha and istio_version come from the TSV preambles (what 002 recorded), never
-from this checkout: "unknown (not recorded)" for a TSV written before 002 recorded
-them; inputs that differ read mixed:<value>,<value> with each distinct value once
-(mixed:v1.30.5,v1.29.0, also when one run's own value was mixed:v1.30.5/v1.29.0).
-istio_version is each member's active IstioRevision .spec.version as 002 read it
-(istio_version_by_context: which member ran which). A mixed harness_sha (the inputs
-ran on more than one harness) adds a warning in every format.
-Each dir that holds input TSVs and a sweep-outcome.txt (003 writes it: STATUS=running
-at its start, its outcome at its end) gets that record repeated in every format (csv
-"# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something to say): a sweep
-that has not finished (it died, or still runs), was interrupted or stopped early, its
-failed cells by reason, its problems (the Istio version, the active revision or the
-generation of the Istio CR or its active IstioRevision changed under the sweep, or the
-harness changed) and notes (an Istio version check that warned at its start, a member
-not ready or not confirmed at its end).
-Histogram p99 columns (queue time, push time) show the worst bucket any valid row
-hit, or "overflow (N rows)" when N rows had their p99 above the highest finite bucket;
-csv adds worst_bucket and n_overflow columns.
-
-Environment:
-  CHURN_RESULTS_DIR  --results-dir default (relative to the repo root).
+See tests/churn/README.md.
 EOF
 }
 

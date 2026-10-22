@@ -79,22 +79,17 @@ before its first change), and compares its Istio CR `spec` with the sweep's star
 a difference (an incomplete revert, or an edit no revert undid, since they restore only the
 profiles' keys) is a problem naming the differing paths, with both specs in `istio-spec/`.
 
-Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or precondition, also
-another live run that holds the sweep dir's `.sweep.lock`; a failed suite setup, a failed
-revert, or an unexpected error); `4` it finished, reverted every profile and wrote
-`sweep-comparison.md`, but some passes failed (`SETUP_FAILED`: the profile did not apply;
-`PROBE_FAILED`: the probe exited non-zero, including a reachability stop), or the mesh changed
-under it: the Istio version or active revision changed during the sweep, the Istio CR or a
-member's platform record changed during a pass (above and below), or the last revert left the
-Istio CR's spec unlike the start; or its
-harness (`HARNESS_SHA`) changed during the sweep (read at its start and its end). Each is an
-`error:` line on stderr; the failed passes' line says how many, by reason. `sweep-outcome.txt` keeps the outcome
-(`STATUS=running` until the sweep ends, then `finished`, `stopped` or `interrupted`), and
-`sweep-comparison.md` repeats it. When a sweep did not finish and no sweep runs any more, check
-that no profile is still applied (`005-cleanup.sh`) and that Argo CD auto-sync is resumed
-(`006-gitops-pause.sh --resume`), then run the sweep again into a new dir. `130` / `143` / `129`:
-interrupted (Ctrl-C, SIGTERM, SIGHUP), after reverting the active profile; `sweep-outcome.txt`
-then says when and by which signal, with the problems found until then.
+Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or precondition, a
+failed suite setup, a failed revert, or an unexpected error); `4` it finished, reverted every
+profile and wrote `sweep-comparison.md`, but some passes failed (`SETUP_FAILED`: the profile did
+not apply; `PROBE_FAILED`: the probe exited non-zero, including a reachability stop), or it
+recorded a problem (those of [every sweep](../../README.md#how-a-sweep-ends); the Istio CR or a
+member's platform record changed during a pass, above and below; or the last revert left the
+Istio CR's spec unlike the start); `130` / `143` / `129`: interrupted (Ctrl-C, SIGTERM, SIGHUP),
+after reverting the active profile. `sweep-comparison.md` repeats `sweep-outcome.txt`. When a
+sweep did not finish and no sweep runs any more, check that no profile is still applied
+(`005-cleanup.sh`) and that Argo CD auto-sync is resumed (`006-gitops-pause.sh --resume`), then run
+the sweep again into a new dir.
 
 ## Results
 
@@ -186,15 +181,11 @@ settings (`(partly unknown)` after it when some were not read), `unknown` when n
 `mixed` when the members, the TSVs or a member's istiod pods differ (a rollout caught midway), and
 `-` for a pass without data. 001 verifies that its apply reached istiod.
 
-`TEST_PLATFORM` (`config/options.env`; `auto`, `kubernetes` or `openshift`) sets the platform
-instead of asking each cluster, for the probe suite's chart overlay and, with
-`TUNING_GITOPS_NAMESPACE` empty, for the hub whose Argo CD namespace 006 pauses in;
-`TUNING_GITOPS_NAMESPACE` overrides that namespace. The platform record still asks each member
-what it serves, and warns when that is not `TEST_PLATFORM`. 001 and 003 also read every member
-before they change anything (a profile's objects or marker), and 003 reads every member's record
-twice per pass (before and after its probe): each read is bounded by `PLATFORM_READ_TIMEOUT`
-(20 s by default) and `PLATFORM_READ_PARALLEL` members (20) are read at once, so raise the first
-for slow API servers and lower the second on a small runner.
+`TEST_PLATFORM` ([the platform record](../../README.md#the-platform-record)) also sets, with
+`TUNING_GITOPS_NAMESPACE` empty, the platform of the hub whose Argo CD namespace 006 pauses in;
+`TUNING_GITOPS_NAMESPACE` overrides that namespace. 001 and 003 read every member for a profile's
+objects or marker before they change anything, and 003 reads every member's record twice per pass
+(before and after its probe), each read within `PLATFORM_READ_TIMEOUT`.
 
 ## One profile by hand
 
@@ -219,7 +210,12 @@ there are none).
   profile's objects are on a member, 001 and 003 refuse to start and the other sweeps
   warn, so a profile that only sets istiod's env shows too. It refuses to overwrite a resource
   that already exists, so it never touches baseline objects, and refuses to start while
-  any member holds a profile's objects or marker.
+  any member holds a profile's objects or marker. A new apply first clears what an earlier
+  apply and its revert left in the state dir (`revert-started`, `istio-edited-during-pass`,
+  `istio-generations-applied`). After the apply it checks each member (`--skip-verify` skips
+  this): the profile's values in the live Istio CR, its `pilot.env` in istiod's `discovery`
+  container, its resources and the marker; it exits `2` when the profile applied but a check
+  failed.
 - **002** applies that patch, deletes the profile's resources, then checks that those
   paths and resources match the pre-apply state. Only when the check passes does it
   delete the markers. On failure it exits 3 and keeps the `active-profile` state and

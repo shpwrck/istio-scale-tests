@@ -110,115 +110,50 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE          Run config of KEY=value lines (config/options.env keys; see
-                         tests/controlplane/README.md, "Run config").
+Deploys the dummy services on every context and waits for them. Growth mode
+(--services-per-namespace K > 0) applies one step, or one part, of a namespace series.
+
+  --config FILE          Run config of KEY=value lines (config/options.env keys).
                          Precedence: flag > --config > environment > default.
   --contexts CSV         Kube contexts to target (default: \$SETUP_CONTEXTS).
   --service-count N      Number of dummy services per cluster (default: $SERVICE_COUNT).
-                         Growth mode ignores it (namespaces x services per namespace).
   --replicas N           Replicas per service (default: $REPLICAS).
-  --namespace-count N    Spread services across N namespaces (default: $NAMESPACE_COUNT).
-                         N=1 -> single namespace named '$NS'.
-                         N>1 -> namespaces '${NS}-0' .. '${NS}-(N-1)';
-                         service i lands in namespace (i mod N).
-                         Growth mode: the series has namespaces 0..N-1.
-  --sidecar-scoping MODE Sidecar CR scoping: none|namespace|wide|explicit (default: $SIDECAR_SCOPING).
-                         none      - no Sidecar CRs (baseline; worst-case config size).
-                         namespace - one Sidecar per workload namespace.
-                         wide      - one Sidecar per workload namespace with egress */*
-                                     (unscoped, without touching the root Sidecar).
-                         explicit  - one Sidecar per Deployment with workloadSelector
-                                     (legacy layout only).
-  --traffic-config MODE  Traffic management per service: none|vsdr (default: $TRAFFIC_CONFIG).
-                         none - no VirtualService/DestinationRule (baseline).
-                         vsdr - a VirtualService (weighted route over the subsets,
-                                timeout, retries) and a DestinationRule (subsets,
-                                connectionPool, outlierDetection) per configured service.
-                                Its replicas are split across one Deployment per subset
-                                (version=v1..vN); the pod count is unchanged.
-                                Legacy layout only.
+  --namespace-count N    Namespaces; service i lands in namespace i mod N (default: $NAMESPACE_COUNT).
+  --sidecar-scoping MODE none, namespace, wide (egress */*) or explicit (default: $SIDECAR_SCOPING).
+  --traffic-config MODE  none or vsdr: a VirtualService + DestinationRule per configured
+                         service (default: $TRAFFIC_CONFIG).
   --vsdr-every N         vsdr: configure service i when i mod N == 0 (default: $VSDR_EVERY).
   --vsdr-subsets N       vsdr: DestinationRule subsets, at most --replicas (default: $VSDR_SUBSETS).
-                         Run 005 before switching --traffic-config on the same clusters:
-                         an in-place re-apply leaves the other mode's Deployments behind.
 
-Namespace scaling (growth mode; README "Namespace scaling"):
+Namespace scaling (growth mode):
   --services-per-namespace K
-                         K > 0 selects the block layout: namespace n holds
-                         dummy-svc-0..K-1 (default: $SERVICES_PER_NAMESPACE; 0 = legacy layout).
-  --namespace-start N0   Apply only namespaces N0..N-1 of the series (a growth step;
-                         default: 0).
-  --series ID            Series id (lowercase letters, digits, '-'): namespaces are
-                         '${NS}-<ID>-<n>' and every object is labelled
-                         controlplane-test.series=<ID>.
-  --workload-mode MODE   pods|config-only (default: $WORKLOAD_MODE). config-only: Services
-                         without pods plus one measurement pod in each of namespaces
-                         0..M-1 (istio-proxy limit CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT,
-                         default $MEASUREMENT_PROXY_MEM_LIMIT).
+                         Services per namespace; 0 = the layout above (default: $SERVICES_PER_NAMESPACE).
+  --namespace-start N0   Apply only namespaces N0..N-1 of the series (default: 0).
+  --series ID            Series id: lowercase letters, digits, '-' (default: none).
+  --workload-mode MODE   pods or config-only (default: $WORKLOAD_MODE).
   --measurement-pods M   config-only: measurement pods (default: $MEASUREMENT_PODS).
-  --outside-namespaces X Namespaces outside the mesh, '${NS}-<ID>-out-<i>', each with K
-                         Services and no pods (default: $OUTSIDE_NAMESPACES). Applied only
-                         with --parts outside.
-  --outside-mode MODE    none|unlabeled|labeled (default: $OUTSIDE_MODE): labeled adds
-                         istio-discovery=enabled, so istiod discovers them.
-  --parts PART           What to apply (default: all):
-                         all         - the namespaces N0..N-1 with their Services,
-                                       Sidecars and pods (or measurement pods).
-                         sidecars    - the Sidecars of namespaces 0..N-1 for
-                                       --sidecar-scoping (a scoping switch; none
-                                       deletes the series' Sidecars).
-                         outside     - the outside namespaces for --outside-mode.
-                         probe       - one probe namespace (--probe NAME): K Services
-                                       and the scoping's Sidecar, no pods.
-                         measurement - the measurement Deployments of namespaces
-                                       0..M-1 (raise M in place).
-                         Legacy layout (no --services-per-namespace), for a two-phase
-                         VS/DR apply (BACKLOG 9.11; 003 --vsdr-apply split):
-                         workloads   - everything except the VirtualServices and
-                                       DestinationRules (namespaces, Services,
-                                       Sidecars, the per-subset Deployments).
-                         traffic     - only the VirtualServices and DestinationRules
-                                       (needs --traffic-config vsdr and the workloads
-                                       part applied first).
-  --probe NAME           Probe namespace name (with --parts probe).
-  --lifecycle-file FILE  Append apply/readiness timings, objects/s, namespaces/s and API
-                         429s (retried by client-go and exhausted; applies run at
-                         kubectl -v=4 to see them) to this namespace-lifecycle TSV
-                         (003 passes it).
+  --outside-namespaces X Namespaces outside the mesh, for --parts outside (default: $OUTSIDE_NAMESPACES).
+  --outside-mode MODE    none, unlabeled or labeled (default: $OUTSIDE_MODE).
+  --parts PART           all, sidecars, outside, probe or measurement; in the legacy layout
+                         all, workloads or traffic (default: all).
+  --probe NAME           Probe namespace (with --parts probe).
+  --lifecycle-file FILE  Append the namespace-lifecycle rows to this TSV (003 passes it).
 
-  --dry-run              Render the chart and print the plan (objects per kind, apply
-                         batches, the commands); never contacts a cluster.
+  --dry-run              Render the chart and print the plan; contact no cluster.
   --wait-timeout N       Seconds to wait for pods (default: $WAIT_TIMEOUT).
-  --ns-wait-timeout N    Seconds to wait for a pre-existing (Terminating) namespace
-                         to disappear before applying (default: $SETUP_NS_WAIT_SEC;
-                         skipped in --dry-run).
+  --ns-wait-timeout N    Seconds to wait for a Terminating namespace to go (default: $SETUP_NS_WAIT_SEC).
   -h, --help             Show this help.
 
-Environment:
-  SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_SERVICE_COUNT,
-  CONTROLPLANE_REPLICAS_PER_SERVICE, CONTROLPLANE_NAMESPACE_COUNT,
-  CONTROLPLANE_SIDECAR_SCOPING,
-  CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
-  CONTROLPLANE_SERVICES_PER_NAMESPACE, CONTROLPLANE_WORKLOAD_MODE,
-  CONTROLPLANE_MEASUREMENT_PODS, CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT,
-  CONTROLPLANE_OUTSIDE_NAMESPACES, CONTROLPLANE_OUTSIDE_MODE,
-  CONTROLPLANE_SETUP_NS_WAIT_SEC (default: CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, then 300),
-  CONTROLPLANE_APPLY_ATTEMPTS / CONTROLPLANE_APPLY_BACKOFF_S (apply retry, default 3 / 5s),
-  CONTROLPLANE_APPLY_CHUNK_OBJECTS (objects per apply batch, default 200; <=0 disables),
-  CONTROLPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  BUSYBOX_VERSION (dummy workload image tag),
-  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
-  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
+Environment (config/options.env describes each): SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE,
+the flags' CONTROLPLANE_* keys, CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT ($MEASUREMENT_PROXY_MEM_LIMIT),
+CONTROLPLANE_SETUP_NS_WAIT_SEC, CONTROLPLANE_APPLY_ATTEMPTS, CONTROLPLANE_APPLY_BACKOFF_S,
+CONTROLPLANE_APPLY_CHUNK_OBJECTS, CONTROLPLANE_WAIT_TIMEOUT_SEC, SCALE_SIZING_MODE and the
+other SCALE_* sizing keys, SCALE_CPU_PREFLIGHT_ENFORCE, TEST_PLATFORM (${TEST_PLATFORM:-auto});
+BUSYBOX_VERSION (config/versions.env).
 
-  Scale coverage (off by default): SCALE_SIZING_MODE (fixed|auto; auto derives the
-  service count from cluster capacity; legacy layout only), SCALE_TARGET_FRACTION,
-  SCALE_SYSTEM_RESERVE_FRACTION, SCALE_PER_POD_CPU_M, SCALE_PER_POD_MEM_MI,
-  SCALE_COVERAGE_MIN_FRACTION, SCALE_COVERAGE_ENFORCE (1 = fail when under-provisioned).
+Exit codes: 0 deployed and ready (or planned, with --dry-run); 1 an error or a refusal.
 
-  Capacity preflight (always on in live runs): refuses when a member lacks pod slots, or
-  when the new pods' CPU requests exceed the workers' free requests (allocatable minus
-  what running pods request); SCALE_CPU_PREFLIGHT_ENFORCE=0 turns the CPU refusal into a
-  warning (default 1; for clusters with a node autoscaler).
+See tests/controlplane/README.md.
 EOF
 }
 

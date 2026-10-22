@@ -86,29 +86,14 @@ not averaged: the report shows the worst bucket range a valid row hit (e.g. `500
 or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
 `worst_bucket` and `n_overflow` columns).
 
-The TSV preamble records `HARNESS_SHA` (`git describe --always --abbrev=7`, plus `-dirty` with
-uncommitted changes under `tests/`, `config/`, `charts/` or `terraform/`, tracked or untracked and
-not ignored; see the root README) and `ISTIO_VERSION` (what the members run, next to
-`ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`; see the root README); the report prints those. A
-TSV written before they were recorded reads `unknown (not recorded)`, and inputs that differ read
-`mixed:a,b` with a warning. Timestamps are UTC.
-
-It also records `KUBE_VERSIONS` and the platform record
-([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
-platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
-istiod's settings and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-`ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`,
-`ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env without `CLUSTER_ID`), read
-before the first churn event (a sweep reads it once for all its combos and hands it to them in
-`platform-record.txt` in the sweep dir, and reads it again after the last one: a value that changed
-in between is a problem of the sweep's outcome, which `004` prints, and a member it cannot read
-again a note there). An image carries the digest its pods run (`@unknown` when none has started:
-not read, never another build); `none` means no such pod. `004` prints them in every format (text,
-csv, md, charts; it has no json), per member as `<ctx>=mixed:a;b` with a warning in the report
-itself when the inputs differ (`KUBE_VERSIONS`: different Kubernetes versions) or a value could not
-be read in some of them. A file without them predates the record (the suite supported only
-OpenShift with OSSM then); its values read `unknown`. The sweep warns as it starts, and notes it in
-its outcome, when a member holds a tuning profile's objects.
+The TSV preamble records [what every result records](../../README.md#what-every-result-records),
+read before the first churn event (a sweep reads the platform record once for all its combos).
+`004` prints it in every format (text, csv, md, charts; it has no json), per member as
+`<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ (`KUBE_VERSIONS`:
+different Kubernetes versions) or a value could not be read in some of them. A TSV written before
+`HARNESS_SHA` or `ISTIO_VERSION` was recorded reads `unknown (not recorded)`, and one from before
+the platform record (the suite supported only OpenShift with OSSM then) reads `unknown` there.
+Timestamps are UTC.
 
 Every source or remote istiod status other than `0` also saves the restart evidence to
 `istiod-diag-<RUN_ID>/` next to the TSV, tag `iter<N>`, after the row is written; a failed
@@ -158,18 +143,12 @@ Charts need at least three contexts (two mesh sizes with a remote).
 A failed setup or probe becomes a placeholder row and the sweep moves on.
 
 Exit codes: `0` every cell (mesh size x intensity) ran; `1` the sweep stopped (a bad flag or
-precondition, such as another live run that holds the sweep dir, named with its PID in
-`.sweep.lock`, or an unexpected error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM,
-SIGHUP; `sweep-outcome.txt` says when and by which signal; the running step's process group gets
-SIGTERM, and SIGKILL `SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `4` it finished
-and wrote its reports, but some cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the
-Istio version, active revision or generation of the Istio CR or its active IstioRevision changed
-during the sweep (read again before the reports), or its harness (a file under
-`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read at its
-start and its end). The last line on stderr says how many, by reason. `sweep-outcome.txt` in the
-sweep dir keeps the outcome (`STATUS=running` until the sweep ends, then `finished`, `stopped` or
-`interrupted`), and every report repeats it. When a sweep did not finish and no sweep runs any more,
-run the sweep again into a new dir; the rows already in the dir cover only the cells it finished.
+precondition, or an unexpected error); `130`, `143` or `129` it was interrupted; `4` it finished
+and wrote its reports, but some cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it
+recorded a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
+`sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
+reason. When a sweep did not finish and no sweep runs any more, run the sweep again into a new dir;
+the rows already in the dir cover only the cells it finished.
 Rows a probe wrote with a non-OK status (`TIMEOUT_*`, `MISSING_VALUE`,
 ...) are measurements, not failed cells: the report counts them in `n_total`.
 

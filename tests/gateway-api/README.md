@@ -245,32 +245,22 @@ results will go, and:
      ran (the registry host and path are dropped; several are `+`-joined), and the operator build
      (`OSSM_OPERATOR`, shown as "Operator build": on OpenShift the OSSM CSV's version, such as
      `servicemeshoperator3:3.4.3`; on Kubernetes the Sail operator's image tag and the digest its
-     pod runs, such as `sail-operator:1.31.1@sha256:<digest>`, without a readiness state; read on
-     the platform the member serves, on `TEST_PLATFORM`'s only when the member could not be asked;
-     `absent` only when that read of the served platform's operator answers with none; `unknown`,
-     with a warning, when the read fails, or when the member could not be asked and the read where
-     `TEST_PLATFORM` looks found none); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`,
-     which can be an alias such as `v1.30-latest`); `ISTIO_VERSION`, what the members run (each
-     active IstioRevision's version, read as every suite reads it: one value, `mixed:<a>/<b>`, or
-     `unknown` for a member whose version cannot be read), with `ISTIO_VERSION_BY_CONTEXT`, each
-     member's active revision in `ISTIO_ACTIVE_REVISIONS`, the generations of its Istio CR and
-     active IstioRevision in `ISTIO_GENERATIONS` (`<ctx>=<cr>/<revision>`), and the
-     `config/versions.env` pin in `ISTIO_VERSION_PIN`. A member not ready (or whose istiod is
-     rolling out) is waited for once, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s, environment
-     only), and read again; this read-only check then warns about a version that is unknown, mixed
-     or not the pin, or a member still not ready, and never stops on it; and the tuning baseline;
-   - the platform record every suite writes (`tests/lib/platform.sh`): `PLATFORM`,
-     `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-     `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways'
-     `istio-proxy` build), `NODE_PROVIDER_BY_CONTEXT` (the nodes' providerID scheme: `kind`,
-     `aws`, ...) and `ISTIOD_ENV_BY_CONTEXT` (a digest of istiod's discovery container env
-     without `CLUSTER_ID`: its settings). An image carries the digest its pods run (`@unknown`
-     when none has started: not read, never another build); `none` means no such pod.
-     `PLATFORM_BY_CONTEXT` is what each member serves (`security.openshift.io/v1` on
-     OpenShift), asked of the member whatever `TEST_PLATFORM` says (`unknown` when it cannot be
-     asked). `TEST_PLATFORM` (`config/options.env`, default `auto`) picks the hub's platform for its
-     Argo CD namespace: `auto` asks the hub, `kubernetes` or `openshift` is taken as given (a member
-     that serves the other platform gets a warning), and any other value stops the run;
+     pod runs, such as `sail-operator:1.31.1@sha256:<digest>`; read on the platform the member
+     serves, on `TEST_PLATFORM`'s only when the member could not be asked; `absent` only when that
+     read of the served platform's operator answers with none; `unknown`, with a warning, when the
+     read fails, or when the member could not be asked and the read where `TEST_PLATFORM` looks
+     found none); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`, which can be an alias
+     such as `v1.30-latest`); the Istio version keys every suite records (`ISTIO_VERSION`, what the
+     members run, and the keys beside it: [what every result
+     records](../../README.md#what-every-result-records)), read and waited for once as every suite
+     does ([the Istio version check](../../README.md#the-istio-version-check)), except that this
+     read-only check only warns about a version that is unknown, mixed or not the pin, or a member
+     still not ready, and never stops on it; and the tuning baseline;
+   - the [platform record](../../README.md#the-platform-record) every suite writes: `PLATFORM`,
+     `TEST_PLATFORM` and the per-member `*_BY_CONTEXT` keys. `TEST_PLATFORM` (`config/options.env`,
+     default `auto`) also picks the hub's platform for its Argo CD namespace: `auto` asks the hub,
+     `kubernetes` or `openshift` is taken as given (a member that serves the other platform gets a
+     warning), and any other value stops the run;
    - the ingress replica count (`INGRESS_REPLICAS`) and the istiod and ingress pods' start times
      and restart counts (for `ISTIOD_RESTARTED` / `INGRESS_RESTARTED`, below);
    - the echo Deployments (Ready and sidecar-injected on the workload member, absent elsewhere),
@@ -456,9 +446,7 @@ verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`
 `OSSM_OPERATOR` changed format after the 2026-10-14 runs: it was `<version>/<phase>`, several
 `|`-joined; it is now `servicemeshoperator3:<version>` on OpenShift or
 `sail-operator:<tag>@<digest>` on Kubernetes, several `+`-joined. To compare with a 2026-10-14
-TSV, compare its version with the part after `servicemeshoperator3:`. Some later TSVs end each
-value in a readiness state (`/Available`, `/Unavailable`, a CSV phase), which is not part of the
-build: compare the part before the last `/`.
+TSV, compare its version with the part after `servicemeshoperator3:`.
 
 TSV (`GWAPI_SCHEMA=5`; 21 tab-separated columns), one row per member × scenario: `run_id
 ingress_ctx role scenario kind host route backend expected_status observed_status expected_code

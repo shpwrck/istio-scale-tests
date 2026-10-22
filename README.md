@@ -158,25 +158,11 @@ placeholder for the member that runs the workload).
 
 Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
 `SETUP_CONTEXTS`), never the hub, each member once: a list that names one twice, or a
-`--remote-contexts` that names the source, stops before any cluster call. Each suite writes
-TSV data plus a markdown summary under its `results/` directory; a sweep writes its TSVs and
-reports into its own `results/sweep-<RUN_ID>/`. A sweep whose setup or probe failed for some
-cells still writes its report, then ends with `N of M cells failed` (by reason) and exit code
-4, as it does when the mesh changed under it (the Istio version or active revision changed
-during the sweep, or the generation of a member's Istio CR or active IstioRevision went up: an
-edit with the same version, an OSSM operator upgrade, a TLS profile change) and when its harness
-changed under it (below). `sweep-outcome.txt` in the sweep
-dir keeps the outcome. While a sweep runs, its dir holds a lock (`.sweep.lock`, its PID):
-another run into that dir is refused while that PID runs, and the lock of a run that died is
-taken over. Each suite README lists its exit codes. Every script has `--help`, and scripts that
-change a cluster also accept `--dry-run`.
-
-Every result records the harness that wrote it as `HARNESS_SHA`: `git describe`, plus `-dirty`
-when git lists a changed tracked file, or an untracked file it does not ignore, under `tests/`,
-`config/`, `charts/` or `terraform/` (a run config in `tests/<suite>/configs/` counts unless it is
-named `*.local.env`; a run's own results do not count). A sweep reads it at its start and again at
-its end: a different value is a problem in its outcome (exit 4). A report of inputs with different
-values reads `mixed:<a>,<b>` and warns.
+`--remote-contexts` that names the source, stops before any cluster call. Each suite writes TSV data
+plus a markdown summary under its `results/` directory; a sweep writes its TSVs and reports into its
+own `results/sweep-<RUN_ID>/`. Every script has `--help` (each flag with its default, the keys it
+reads, its exit codes), and scripts that change a cluster also accept `--dry-run`. The defaults live
+in `config/options.env` (a comment on each key), the image and Istio pins in `config/versions.env`.
 
 | Suite | Measures | Start with |
 | --- | --- | --- |
@@ -192,87 +178,77 @@ values reads `mixed:<a>,<b>` and warns.
 tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-sizes 1,2 --iterations 5 --dry-run
 ```
 
-Settings and image pins live in `config/versions.env` and `config/options.env`. The deployed Istio
-version is `istioVersion` in `charts/spoke-ossm/values.yaml`; keep `ISTIO_VERSION` equal to it.
-Before its first change, every suite reads the version each member runs: the IstioRevision its
-`istios.sailoperator.io default` CR names as active (`.status.activeRevisionName`), and that
-revision's `.spec.version`, which must be an exact version (an alias such as `v1.30-latest` is
-not). A member is ready when its CR is Healthy and reconciled, at most one revision is in use and
-its istiod Deployment is rolled out; members that are not get one `kubectl wait` for their CR's
-Ready condition (up to `ISTIO_VERSION_READY_WAIT_SEC`, 60 s) and one more read. With
-`ISTIO_VERSION_CHECK=fail` (the default) a version that cannot be read, members on different
-versions, a version other than the pin, or a member still not ready stop every suite but
-gateway-api (a read-only check that only warns) before it changes anything;
-`ISTIO_VERSION_CHECK=warn` goes on, records what the mesh runs (`mixed:<a>/<b>` or `unknown`) and
-adds a note to the sweep's outcome. The suite records the result as `ISTIO_VERSION`, next to the
-pin (`ISTIO_VERSION_PIN`), `ISTIO_VERSION_SOURCE` (`live`; `pin` in a `--dry-run`, which reads
-nothing), `ISTIO_VERSION_BY_CONTEXT`, each member's active revision in `ISTIO_ACTIVE_REVISIONS`
-and its Istio CR and IstioRevision generations in `ISTIO_GENERATIONS` (`<ctx>=<cr>/<revision>`;
-`unchecked` in a `--dry-run`, and in a report `unknown` for a TSV written before the key existed).
-A sweep reads every member again at its end: another version or active revision, or a generation
-that moved (an edit of the Istio CR, or Sail rendering it again), is a problem (exit 4); a member
-not ready or not read at the end is a note. A read that fails prints kubectl's error on the
-console only, never into a record or a report. From its start a sweep's `sweep-outcome.txt` says
-`STATUS=running`; at its end, before its reports, the sweep writes its outcome there
-(`STATUS=finished`, or `stopped` with its reason), and every report of that dir repeats it (json
-`sweep_outcomes`). One interrupted (Ctrl-C, SIGTERM, or SIGHUP when its terminal closes) records
-`STATUS=interrupted` with the signal and its time (exit 130, 143 or 129); one that stops on an error
-(a check it makes, or an unexpected abort whose `FATAL:` line names the script, line and command)
-records `STATUS=stopped` with its reason (exit 1); only one killed outright (SIGKILL, out of memory,
-a lost host) keeps `STATUS=running`, and its reports say it has not finished. On a signal the sweep
-sends SIGTERM to the running step's process group (the step and every process it started), SIGKILL
-to what still runs `SWEEP_STOP_GRACE_SEC` (30) seconds later, and only then releases its lock. A
-results dir without `sweep-outcome.txt` is from a sweep that stopped before its start (nothing ran)
-or from an older harness.
-`ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC` and `SWEEP_STOP_GRACE_SEC` are set in the
-environment, never in a `--config` file.
+### What every result records
 
-Every TSV, run summary and report also records what each member ran on: Kubernetes or OpenShift,
-the mesh operator build, the istiod and proxy images, istiod's env and the nodes' provider
-([tests/lib/platform.sh](tests/lib/platform.sh)). `TEST_PLATFORM` (`auto`, the default, asks each
-member; `kubernetes` or `openshift` is used as given) picks each suite chart's OpenShift overlay;
-the record still asks each member what it serves, outside every measurement window, and warns when
-that differs from the override. A report warns when its inputs differ on any of these, so compare
-results within one platform and mesh build. On kind every node reports the whole host, so the
-controlplane report flags its capacity figures and its SLA verdict leaves the node figures out
-(`CAUTION`); so does a member whose node provider could not be read. k3d (`k3s://`) and minikube
-clusters that share one host are not detected: their node figures are the host's too, so read them
-the same way. The cross-cluster path on kind runs through cloud-provider-kind's userspace Envoy on
-the shared host, so the dataplane and churn-dataplane reports flag their remote latency.
+Every TSV preamble has these keys, and each suite's report repeats them, merged over its inputs
+(tuning 004 compares them pass by pass):
 
-| Record key | Values |
-| --- | --- |
-| `PLATFORM` | `kubernetes` or `openshift` over the members; `mixed` when they run both, else `unknown` when any member is |
-| `TEST_PLATFORM` | The override as set: `auto`, `kubernetes` or `openshift` |
-| `PLATFORM_BY_CONTEXT` | What each member serves, asked even with an override |
-| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>@<digest>` (Kubernetes: the digest its pods run; `@unknown` as below) or `servicemeshoperator3:<version>` (OpenShift: its CSV). `absent`: the member answered and runs none where the charts install it. Older TSVs end in a readiness state (`/Available`, a CSV phase), so a report that pools them with newer ones warns that the key differs |
-| `ISTIOD_IMAGE_BY_CONTEXT` | The istiod pods' `discovery` image and the digest that ran; `<image>@unknown`: none of them has started (below); `none`: no istiod pod on that member |
-| `PROXY_IMAGE_BY_CONTEXT` | The `istio-proxy` image of the ingress and east-west gateway pods; `@unknown` and `none` as for istiod. The test pods' sidecars get the injector's current build (normally istiod's), which can be newer than a gateway not restarted since an upgrade |
-| `ISTIOD_ENV_BY_CONTEXT` | A 12-hex digest of istiod's `discovery` container env (each `name=value`, or `name=` and its `valueFrom`, sorted) without `CLUSTER_ID`, the one variable that differs by member. It changes when a tuning profile's `spec.values.pilot.env` or a hand edit changes istiod's settings (tuning 004 shows it per pass in its `istiod env` row: a profile changes it on purpose). `none` and `unknown` as for the images |
-| `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...); `none`: nodes without one; `no-nodes`: no nodes listed; `unrecognized`: a providerID without `<scheme>://`. Nodes without one beside a provider's (`aws+none`: a control-plane node, a virtual node) compare as that provider's |
+| Key | What it means | Where it comes from |
+| --- | --- | --- |
+| `HARNESS_SHA` | The harness that wrote the result: `git describe --always --abbrev=7`, plus `-dirty` when git lists a changed tracked file, or an untracked file it does not ignore, under `tests/`, `config/`, `charts/` or `terraform/` (a run's own results never count; `tests/<suite>/configs/*.local.env` is ignored) | `harness_sha`, [tests/lib/common.sh](tests/lib/common.sh) |
+| `RUN_CONFIG`, `RUN_CONFIG_SHA256` | The `--config` file (its path from the repo root, or only its name outside the repo) and its SHA-256; `none` without one | `config_preamble_lines`, [tests/lib/config.sh](tests/lib/config.sh) |
+| `ISTIO_VERSION`, `ISTIO_VERSION_PIN`, `ISTIO_VERSION_SOURCE` | The version the members run ([below](#the-istio-version-check)), the pin (`ISTIO_VERSION` in `config/versions.env`), and `live`, or `pin` in a `--dry-run`, which reads nothing | `istio_version_kv`, [tests/lib/preamble.sh](tests/lib/preamble.sh) |
+| `ISTIO_VERSION_BY_CONTEXT`, `ISTIO_ACTIVE_REVISIONS`, `ISTIO_GENERATIONS` | Per member: its version, its active IstioRevision, and its Istio CR and IstioRevision generations (`<ctx>=<cr>/<revision>`); `unchecked` when not read live | `istio_version_kv` |
+| `KUBE_VERSIONS` | Each member's Kubernetes server version (`unreachable` when it did not answer) | `probe_kube_versions`, `tests/lib/preamble.sh` |
+| `TUNING_BASELINE`, `SIDECAR_EGRESS_HOSTS` | The baseline's tuning levers on the source member (`sidecar`, `discoverySelectors`, `telemetryFiltering`, `accessLogFiltering`, each `on` or `off`) and the root Sidecar's egress hosts (`none` without one); gateway-api records them per member (`TUNING_BASELINE[<ctx>]`) | `tuning_baseline_state`, `tests/lib/preamble.sh` |
+| `PLATFORM`, `TEST_PLATFORM`, `PLATFORM_BY_CONTEXT` | `kubernetes` or `openshift` over the members (`mixed` when they run both); the override as set (`auto`, `kubernetes` or `openshift`); what each member serves, asked even with an override | `platform_preamble_lines`, [tests/lib/platform.sh](tests/lib/platform.sh) |
+| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>@<digest>` (the digest its pods run) or, on OpenShift, `servicemeshoperator3:<version>` (its CSV); `absent` when the member runs none | `platform_preamble_lines` |
+| `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` | The image and digest that istiod's `discovery` container, and the ingress and east-west gateways' `istio-proxy`, ran; `none` without such a pod. The test pods' sidecars get the injector's build, which can be newer than a gateway not restarted since an upgrade | `platform_preamble_lines` |
+| `ISTIOD_ENV_BY_CONTEXT` | A 12-hex digest of istiod's `discovery` env without `CLUSTER_ID`, the one variable that differs by member: a tuning profile's `spec.values.pilot.env` or a hand edit changes it | `platform_preamble_lines` |
+| `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...; nodes without one beside a provider's count as that provider's); `none`: no node has one; `no-nodes`; `unrecognized`: not `<scheme>://` | `platform_preamble_lines` |
 
-In every key `unknown` means not read (a failed read, with a warning; a `--dry-run`; a file from
-before the record), never none, and several values on one member are `+`-joined. An image whose
-pods have not started (Pending, still pulling, evicted; an operator scaled to 0) is not another
-build: the record takes the pods that report a digest, and when none does it records the spec image
-as `<name>:<tag>@unknown` (its pinned digest when the spec image has one), which every comparison
-takes as not read, never as a different build. A report whose inputs disagree for a member shows
-`mixed:<a>;<b>` there and warns in its body, naming the members and their values; a value unknown
-in some inputs beside a read one is one more warning (`mixed:unknown,...` when only some inputs
-carry the key). A sweep reads the record once at its start and hands it to its steps in
-`platform-record.txt` in the sweep dir (a step reads only the members that file lacks), and reads
-it again after its last step: a value that changed is a problem of the sweep's outcome
-(`sweep-outcome.txt`, exit 4, printed by every report of the sweep) naming the key, the member and
-both values, since the sweep's rows are then not all from one build; a member it cannot read again
-is a note there. A tuning profile's objects (labelled `istio-scale-tests/tuning-profile`) and its
-marker ConfigMap `istio-system/tuning-profile-<profile>` are not in the record: tuning 001 and 003
-refuse to start while a member holds any (run `tests/tuning/005-cleanup.sh`), and the other sweeps
-warn as they start and note it in their outcome, since a profile changes what they measure (profile
-04's root DestinationRule changes every proxy's clusters). A record read is bounded by
-`PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many nodes), and
-`PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile objects and the
-Kubernetes and Istio versions (20; lower it when the machine running the suite runs short of memory
-or processes on a large mesh).
+`unknown` means not read (a failed read, which warns; a file from before the key), never none or
+off; an image whose pods have not started (Pending, an operator scaled to 0) reads
+`<image>@unknown`, not read either; several values on one member are `+`-joined (a rollout). Where a
+report's inputs disagree, a key reads `mixed:<a>,<b>` (per member `<ctx>=mixed:<a>;<b>`;
+`mixed:unknown,...` when only some inputs carry it), with a warning in the report's body.
+
+### How a sweep ends
+
+From its start a sweep's `sweep-outcome.txt` says `STATUS=running`, and its dir holds a lock
+(`.sweep.lock`, its PID) that refuses another run into that dir while that PID runs (a dead run's
+lock is taken over). At its end, before its reports, it records `STATUS=finished` and exits `0`, or
+`4` when some cells failed (`N of M cells failed`, by reason) or it recorded a problem (the Istio
+version, revision or generations, a member's platform record or `HARNESS_SHA` changed during the
+sweep; each suite README lists its own). One that stops exits `1` (a bad flag or precondition, a
+failed check, an error), or `3` when dataplane's or churn-dataplane's `--on-unreachable fail`
+stopped it, and once started records `STATUS=stopped` with its reason; a stop wins over `4`. On
+Ctrl-C, SIGTERM or SIGHUP it sends SIGTERM to the running step's process group (the step and every
+process it started), SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` (30) seconds later, records
+`STATUS=interrupted` with the signal and exits 128+n (130, 143, 129). One that ends early prints its
+dir and the suite's cleanup command; only one killed outright (SIGKILL, out of memory, a lost host)
+keeps `STATUS=running`. Every report of the dir repeats the outcome.
+
+### The Istio version check
+
+Before its first change, every suite reads the version each member runs: the exact `.spec.version`
+of the IstioRevision its `istios.sailoperator.io default` CR names as active. A member is ready when
+its CR is Healthy and reconciled, one revision is in use and istiod is rolled out; members that are
+not get one wait for their CR's Ready condition (up to `ISTIO_VERSION_READY_WAIT_SEC`, 60 s) and one
+more read. With `ISTIO_VERSION_CHECK=fail` (the default) a version not read, members on different
+versions, a version other than the pin `ISTIO_VERSION` (keep it equal to `istioVersion` in
+`charts/spoke-ossm/values.yaml`) or a member still not ready stops the suite before it changes
+anything; `warn` goes on, records what the mesh runs and notes it in the outcome; gateway-api,
+read-only, only warns. A sweep reads every member again at its end: another version or active
+revision, or generations that moved (an edit of the Istio CR, or Sail rendering it again), is a
+problem; a member not ready or not read then, a note.
+
+### The platform record
+
+The platform keys are read outside every measurement window, each read bounded by
+`PLATFORM_READ_TIMEOUT` (20s; raise it for members with many nodes), `PLATFORM_READ_PARALLEL` (20;
+lower it on a runner short of memory) members at a time, as are the Kubernetes and Istio version
+reads. A sweep reads them once, hands them to its steps in `platform-record.txt` and reads them
+again after its last step: a value that changed is a problem. `TEST_PLATFORM` picks each suite
+chart's OpenShift overlay (`auto` asks each member); the record asks each member anyway, and warns
+when one differs. Compare results within one platform and mesh build: a report warns when its inputs
+differ. On kind every node reports the whole host, so the controlplane report flags its capacity
+figures and its SLA verdict leaves the node figures out (`CAUTION`), as for a member whose node
+provider was not read; k3d (`k3s://`) and minikube clusters that share one host are not detected, so
+read their node figures the same way. On kind the cross-cluster path runs through
+cloud-provider-kind's userspace Envoy on the shared host, so the dataplane and churn-dataplane
+reports flag their remote latency. A member that holds a tuning profile's objects makes tuning 001
+and 003 refuse to start and the other sweeps warn (`tests/tuning/005-cleanup.sh` removes them).
 
 ### Run config (`--config FILE`)
 

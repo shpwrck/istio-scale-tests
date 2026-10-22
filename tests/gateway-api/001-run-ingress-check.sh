@@ -115,7 +115,7 @@ GWAPI_SCHEMA=5
 SCENARIO_SET=v3
 SCENARIO_SET_ANNOTATION=mesh-verify-gwapi/scenario-set
 
-# Predicted outcomes (tests/gateway-api/README.md, "Predictions"), one row per scenario:
+# Predicted outcomes, one row per scenario (the README's "Scenarios and predictions"):
 #   id|kind|host|route|backend kind|backend Service|backend namespace|status via W|status via O|
 #   HTTP via W|HTTP via O|endpoints via W|endpoints via O|confidence|why
 # W = the workload member, O = every other member; "via X" = on X / through X's ingress. Backend
@@ -153,38 +153,27 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --contexts CSV --workload-context CTX [options]
 
-Gateway API multicluster ingress check (read-only). Answers: does an HTTPRoute need its backend
-Service in every member, or does a request entering any member's ingress reach the workload? And
-does the ingress member need the backend's namespace?
-Deploy the check first (charts/mesh-verify-gateway-api-appset.yaml; tests/gateway-api/README.md).
+Gateway API multicluster ingress check (read-only): does a request entering any member's
+ingress reach the workload, and does the ingress member need the backend's Service and
+namespace? Deploy the check first (charts/mesh-verify-gateway-api-appset.yaml).
 
-  --config FILE           Run config of KEY=value lines (SETUP_CONTEXTS and the GWAPI_* keys of
-                          config/options.env; tests/gateway-api/README.md, "Run config").
+  --config FILE           Run config of KEY=value lines (SETUP_CONTEXTS and the GWAPI_* keys).
                           Precedence: flag > --config > environment > default.
   --contexts CSV          Mesh members, never the hub; at least two (default: \$SETUP_CONTEXTS).
-  --workload-context CTX  The member that runs the echo workload, i.e. whose Argo CD cluster
-                          name (on OpenShift: ACM ManagedCluster) is the chart's
-                          workloadCluster; one of --contexts (default: \$GWAPI_WORKLOAD_CONTEXT).
-  --hub-context CTX       Hub context: also read the Argo CD health of the per-member
-                          Applications (best effort). Not one of --contexts.
-                          (default: \$GWAPI_HUB_CONTEXT; empty = skip)
-  --ingress CTX=ADDR      Ingress address of a member (host or IP, optional :PORT) when its
-                          LoadBalancer status cannot be read. Repeatable, or CSV.
-                          (default: \$GWAPI_INGRESS)
+  --workload-context CTX  The member that runs the echo workload (the chart's workloadCluster);
+                          one of --contexts (default: \$GWAPI_WORKLOAD_CONTEXT).
+  --hub-context CTX       Hub context: also read the per-member Applications' Argo CD health
+                          (best effort); not one of --contexts (default: \$GWAPI_HUB_CONTEXT;
+                          empty = skip).
+  --ingress CTX=ADDR      A member's ingress address (host or IP, optional :PORT) when its
+                          LoadBalancer status cannot be read; repeatable, or CSV
+                          (default: \$GWAPI_INGRESS).
   --requests N            Requests per member ingress x scenario host
                           (default: \$GWAPI_REQUESTS, ${REQUESTS}).
   --timeout SEC           curl --max-time per request (default: \$GWAPI_TIMEOUT_SEC, ${TIMEOUT_SEC}).
-                          A cell with a timed-out request gets one more request with
-                          GWAPI_DETAIL_TIMEOUT_SEC (${GWAPI_DETAIL_TIMEOUT_SEC}): Envoy answers a dead
-                          east-west hop only after 3 x 10 s connect timeouts (1 try + Istio's
-                          default 2 retries).
-  --wait-timeout SEC      Bound on the wait for the Gateway's Programmed condition, the echo
-                          Deployments and istio's status on every route, and then on the
-                          data-plane gate: S1 and S3 answering 200 through every ingress
-                          GWAPI_GATE_PASSES (${GWAPI_GATE_PASSES}) times in a row (default:
-                          \$GWAPI_WAIT_TIMEOUT_SEC, ${WAIT_TIMEOUT_SEC}; 0 = read once). Rows still
-                          without status say STATUS_TIMEOUT; a member whose gate never passed
-                          says DATAPLANE_NOT_READY.
+  --wait-timeout SEC      Bound on the waits for the Gateway, the echo Deployments, the routes'
+                          status and the data-plane gate (default: \$GWAPI_WAIT_TIMEOUT_SEC,
+                          ${WAIT_TIMEOUT_SEC}; 0 = read once).
   --results-dir DIR       Results base dir; the run writes DIR/run-<RUN_ID>/. A relative DIR
                           starts at the current directory (default: \$GWAPI_RESULTS_DIR,
                           ${GWAPI_RESULTS_DIR}).
@@ -193,37 +182,24 @@ Deploy the check first (charts/mesh-verify-gateway-api-appset.yaml; tests/gatewa
   --dry-run               Validate the arguments and print the plan; no cluster is contacted.
   -h, --help              Show this help.
 
-Environment:
-  SETUP_CONTEXTS (--contexts), GWAPI_WORKLOAD_CONTEXT (--workload-context), GWAPI_HUB_CONTEXT
-  (--hub-context), GWAPI_INGRESS (--ingress), GWAPI_REQUESTS (--requests), GWAPI_TIMEOUT_SEC
-  (--timeout), GWAPI_WAIT_TIMEOUT_SEC (--wait-timeout), GWAPI_RESULTS_DIR (--results-dir; a
-  relative value starts at the repo root), GWAPI_SKIP_PROXY_CONFIG (--skip-proxy-config).
-  No flag: GWAPI_GATE_PASSES (rounds in a row the data-plane gate needs, ${GWAPI_GATE_PASSES}),
-  GWAPI_SETTLE_SEC (pause after the gate, ${GWAPI_SETTLE_SEC} s), GWAPI_REPROBE_DELAY_SEC (pause
-  after the traffic before the cells that did not answer are re-probed, ${REPROBE_DELAY} s),
-  GWAPI_DETAIL_TIMEOUT_SEC, GWAPI_KUBECTL_TIMEOUT_SEC (kubectl --request-timeout,
-  ${GWAPI_KUBECTL_TIMEOUT_SEC} s), GWAPI_ISTIOCTL_TIMEOUT_SEC (limit of the one istioctl dump per
-  ingress, and of its parse, ${GWAPI_ISTIOCTL_TIMEOUT_SEC} s), GWAPI_NAMESPACE (${NS}),
-  GWAPI_REMOTE_NAMESPACE (${NS_REMOTE}),
-  GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}),
-  GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE:-empty}; empty: the namespace of the hub's
-  platform, openshift-gitops on OpenShift, else argocd), GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}).
-  TEST_PLATFORM (${TEST_PLATFORM:-auto}): the hub's platform, for its Argo CD namespace (auto asks
-  the hub; kubernetes or openshift is taken as given). The platform record asks each member what
-  it serves either way, and warns when that is not TEST_PLATFORM.
-  Environment only: ISTIO_VERSION_READY_WAIT_SEC (${ISTIO_VERSION_READY_WAIT_SEC} s), how long
-  the Istio version read waits once for members not ready. This read-only check warns about
-  a version that is unknown, mixed or not the pin, or a member not ready, and never stops on it.
-  PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the
-  platform record's reads (config/options.env).
+Environment (config/options.env describes each): SETUP_CONTEXTS and each flag's GWAPI_* key
+(GWAPI_RESULTS_DIR: a relative value starts at the repo root). Without a flag:
+GWAPI_GATE_PASSES (${GWAPI_GATE_PASSES}), GWAPI_SETTLE_SEC (${GWAPI_SETTLE_SEC}), GWAPI_REPROBE_DELAY_SEC (${REPROBE_DELAY}),
+GWAPI_DETAIL_TIMEOUT_SEC (${GWAPI_DETAIL_TIMEOUT_SEC}), GWAPI_KUBECTL_TIMEOUT_SEC (${GWAPI_KUBECTL_TIMEOUT_SEC}), GWAPI_ISTIOCTL_TIMEOUT_SEC (${GWAPI_ISTIOCTL_TIMEOUT_SEC}),
+GWAPI_NAMESPACE (${NS}), GWAPI_REMOTE_NAMESPACE (${NS_REMOTE}),
+GWAPI_SHARED_NAMESPACE (${NS_SHARED}), GWAPI_GATEWAY (${GW_NAME}),
+GWAPI_ARGOCD_NAMESPACE (${GWAPI_ARGOCD_NAMESPACE:-empty}; when empty, the hub's platform's),
+GWAPI_ARGOCD_APPSET (${GWAPI_ARGOCD_APPSET}), TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}),
+PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}). Environment only: ISTIO_VERSION_READY_WAIT_SEC (${ISTIO_VERSION_READY_WAIT_SEC}); here
+the Istio version check only warns.
 
-Writes run-<RUN_ID>/gateway-api-<RUN_ID>.tsv (one row per member x scenario: expected vs
-observed status, HTTP codes, body and endpoints, verdict MATCH/DEVIATION/UNKNOWN),
-summary-<RUN_ID>.md (the answers first), argocd-<RUN_ID>.tsv with --hub-context, and
-run-config-<RUN_ID>.env with --config.
+Writes run-<RUN_ID>/: gateway-api-<RUN_ID>.tsv, summary-<RUN_ID>.md, argocd-<RUN_ID>.tsv
+(--hub-context) and run-config-<RUN_ID>.env (--config).
 
-Exit status: 0 whenever the report is written, whatever the answers; 1 on an argument error, a
+Exit status: 0 whenever the report is written, whatever the answers; 1 an argument error, a
 member that answers no preflight read, or a check that is not deployed (nothing is written).
+
+See tests/gateway-api/README.md.
 EOF
 }
 

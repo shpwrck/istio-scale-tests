@@ -35,20 +35,25 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/churn-dataplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
+Scales the test Deployments to 0, deletes their pods with a short grace period, then
+deletes the '$NS' namespace on every context.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
   --contexts CSV     Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --wait-deletion    Block until the namespace is fully removed on every context.
   --timeout SEC      Maximum seconds to wait for deletion (default: $TIMEOUT_SEC).
-  --grace-period SEC Pod-delete grace period for the pre-delete fast-drain of
-                     sidecar-injected workloads (default: $FAST_DRAIN_GRACE_SEC).
+  --grace-period SEC Grace period of the pod deletes before the namespace delete
+                     (default: $FAST_DRAIN_GRACE_SEC).
   --dry-run          Show what would be deleted; do not touch clusters.
   -h, --help         Show this help.
 
-Environment:
-  SETUP_CONTEXTS, COEXEC_TEST_NAMESPACE, COEXEC_NS_DELETE_TIMEOUT_SEC,
-  COEXEC_CLEANUP_GRACE_SEC (pre-delete pod fast-drain grace period; default 5).
+Environment (config/options.env describes each): SETUP_CONTEXTS, COEXEC_TEST_NAMESPACE,
+COEXEC_NS_DELETE_TIMEOUT_SEC, COEXEC_CLEANUP_GRACE_SEC.
+
+Exit codes: 0 cleaned up (or printed); 1 an error, a timeout or an unreachable context.
+
+See tests/churn-dataplane/README.md.
 EOF
 }
 

@@ -49,22 +49,19 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/churn-dataplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
-  --results-dir DIR  Directory searched recursively for churn-dataplane-*.tsv
-                     (default: ${COEXEC_RESULTS_DIR}); a sweep-*/ dir from 004
-                     is one run.
-  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
-                     with different run ids). Without it the report stops, lists the
-                     runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values,
-                     and repeats the sweep-outcome.txt of each pooled sweep.
-  --format FMT       Output format: text | csv | json | md (or markdown) | charts
-                     (default: text).
+Reports every churn-dataplane-*.tsv under the results dir: Δp99 and the istiod deltas per
+mesh size and churn rate over the valid baseline/churn pairs (status OK), the "Remote
+coverage" section, istiod restart diagnostics, what the inputs record and each sweep dir's
+outcome.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
+  --results-dir DIR  Results directory, read recursively; a sweep-*/ dir is one run
+                     (default: ${COEXEC_RESULTS_DIR}).
+  --allow-multi-run  Pool several runs (default: a dir with more than one stops the report).
+  --format FMT       text, csv, json, md (or markdown) or charts (default: text).
   --fail-on-unreachable
-                     After the output, exit 3 when a remote's reach coverage is not
-                     REACHABLE (stderr names the rule and the remotes).
+                     After the output, exit 3 when a remote is not REACHABLE in every check.
   --dry-run          List the TSV files that would be read, then exit.
   -h, --help         Show this help.
 
@@ -72,44 +69,13 @@ Example (one sweep, as 004 runs it; from the repo root):
   tests/churn-dataplane/$(basename "$0") \\
     --results-dir ${COEXEC_RESULTS_DIR}/sweep-<RUN_ID> --format md
 
-Every format has a "Remote coverage" section from the reach-*.tsv files next to the
-TSVs: per mesh size and source, how many remotes passed every reach check
-(REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN per remote). Without reach
-files (the check was off, or the TSV predates it) it says "no reachability data"; with
-reach files that check the source itself only (a mesh of one), "no remote to check".
-Rows with any status but OK are left out of valid_runs, ERROR_RATE_HIGH (HTTP 200
-share below MIN_PCT_200) and REMOTE_UNREACHABLE (sweep stopped by the gate) included.
-Each average counts only the valid pairs with a number in that column (N/A when none).
-churn_convergence_p99 is the worst bucket a valid run hit (labels in ms, no unit
-suffix), or "overflow (N runs)"; csv and json split it into
-churn_convergence_p99_worst and churn_convergence_overflow_runs. json numbers are
-numbers and N/A is null.
+Environment (config/options.env describes it): COEXEC_RESULTS_DIR (relative to the repo
+root).
 
-HARNESS_SHA (every format): the harness that measured the rows (git describe, -dirty
-with local changes), from the TSV preambles: mixed:<a>,<b> when they differ, with a
-WARNING (json data_warnings).
-md and charts start with a YAML frontmatter of the metadata keys, lowercase as in
-the json metadata (run_id, harness_sha, run_config, ...).
+Exit codes: 0 the report was written (or the files listed); 1 an error;
+3 --fail-on-unreachable and the rule fired.
 
-text, md and json also carry an "istiod restart diagnostics" section: every
-istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
-changed, the cause, the evidence folder relative to the results dir) and a tally by
-cause; restarted_untimed rows (may predate the window) are counted apart (json key
-istiod_diag).
-
-Each dir that holds input TSVs and a sweep-outcome.txt (004 writes it: STATUS=running
-at its start, its outcome at its end) gets that record repeated in every format (json
-sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something
-to say): a sweep that has not finished (it died, or still runs), was interrupted or
-stopped early, its failed cells by reason, its problems (the Istio version, the active
-revision or the generation of the Istio CR or its active IstioRevision changed under
-the sweep, or the harness changed) and notes (an Istio version check that warned at
-its start, a member not ready or not confirmed at its end).
-
-Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when the rule fired.
-
-Environment:
-  COEXEC_RESULTS_DIR  --results-dir default (relative to the repo root).
+See tests/churn-dataplane/README.md.
 EOF
 }
 

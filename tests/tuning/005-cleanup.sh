@@ -44,43 +44,32 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-Revert active profiles, restore each member's Istio CR from the profile markers still
-on it, delete leftover profile resources and resume Argo CD. The markers are on the
-members, so their restore needs no results; an Argo CD pause is recorded only in the
-results of the run that made it (--results-dir), or found on the hub (--gitops-context).
+Reverts active profiles, restores each member's Istio CR from the profile markers still on
+it, deletes leftover profile resources and resumes Argo CD. The markers are on the members;
+an Argo CD pause is recorded only in its run's results (--results-dir).
 
 Options:
   --contexts CSV     Mesh member contexts for the marker restore and the resource sweep
-                     (default: \$SETUP_CONTEXTS). Reverts use the contexts recorded when
-                     each profile was applied.
+                     (default: \$SETUP_CONTEXTS); reverts use each profile's recorded ones.
   --results-dir DIR  Where to look for revert state and Argo CD pause records
                      (default: tests/tuning/results; use the sweep's --output-dir).
   --gitops-context CTX
-                     Hub context running Argo CD (default: \$TUNING_GITOPS_CONTEXT): after
-                     the recorded pauses, remove the deny window a pause adds there even
-                     when no record names it (006-gitops-pause.sh --clear). Without it, the
-                     hub is checked only for the pauses recorded under --results-dir (a
-                     warning when markers were restored but none is recorded there).
+                     Hub context running Argo CD (default: \$TUNING_GITOPS_CONTEXT): also
+                     removes a pause no record names (006-gitops-pause.sh --clear).
   --rollout-timeout N
                      Seconds to wait for the operator and istiod rollout after a restore
                      from a marker (default: ${ROLLOUT_TIMEOUT}, from \$TUNING_ROLLOUT_TIMEOUT).
   --dry-run          Show what would be done; do not touch clusters.
   -h, --help         Show this help.
 
-Environment:
-  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_ROLLOUT_TIMEOUT.
-  006-gitops-pause.sh, which resumes Argo CD, takes a recorded pause's context and namespace
-  from its record; with --gitops-context its --clear reads TUNING_GITOPS_NAMESPACE (the Argo CD
-  namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
-  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET}).
-  TEST_PLATFORM (config/options.env; auto, kubernetes or openshift; now ${TEST_PLATFORM:-auto}):
-  with TUNING_GITOPS_NAMESPACE empty, kubernetes or openshift is taken as the hub's platform
-  instead of asking it.
+Environment (config/options.env describes each): SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT,
+TUNING_ROLLOUT_TIMEOUT, TUNING_GITOPS_NAMESPACE, TUNING_GITOPS_APPSET (${TUNING_GITOPS_APPSET}),
+TEST_PLATFORM (${TEST_PLATFORM:-auto}). Requires python3 (the standard library only).
 
-Exit status: 0 nothing left behind of what it checked (its last line says what it did not
-check: without --gitops-context, a pause that no record under --results-dir names), 1 something
-could not be undone (see the output; a marker whose restore failed stays on its member, so the
-next tuning run refuses to start). Requires python3 (the standard library only).
+Exit codes: 0 nothing left behind of what it checked (its last line says what it did not
+check); 1 something could not be undone (see the output).
+
+See tests/tuning/README.md, "After a killed run".
 EOF
 }
 

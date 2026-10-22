@@ -71,53 +71,36 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE            Run config of KEY=value lines (config/options.env keys; see
-                           tests/churn/README.md, "Run config").
+Scales the churn targets on the source context up and back down, --iterations times, and
+times how long the source and each remote take to see the new pods (churn-<RUN_ID>.tsv;
+columns in tests/churn/README.md). Remotes stay at their base replicas.
+
+  --config FILE            Run config of KEY=value lines (config/options.env keys).
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the source cluster (required).
   --remote-contexts CSV    Remote cluster contexts (comma-separated).
   --mesh-size N            Metadata tag (default: 1 + remotes).
   --deployment-count N     Churn target deployments (default: $DEPLOYMENT_COUNT).
-  --scale-to N             Scale targets to N replicas (default: $SCALE_TO).
+  --scale-to N             Scale targets to N replicas, above the base (default: $SCALE_TO).
   --iterations N           Number of churn iterations (default: $ITERATIONS).
   --timeout SEC            Timeout per iteration (default: $TIMEOUT_SEC).
   --settle SEC             Settle time after scale-down convergence (default: $SETTLE_SEC).
   --output-dir DIR         Results directory (default: ${CHURN_RESULTS_DIR}).
-  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
-  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
+  --tuning-baseline STR    Tuning levers for the preamble (default: unknown; a sweep sets it).
+  --sidecar-egress-hosts STR  Root Sidecar egress hosts for the preamble (default: unknown;
+                           a sweep sets it).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
-Only the source context is scaled; remotes stay at base replicas, so the remote
-columns measure cross-cluster propagation. Per iteration:
-  convergence_local_ms          the source watcher sees at least one new Ready pod
-                                per deployment and the source istiod reports every
-                                proxy SYNCED (includes pod scheduling and sidecar start).
-  remote_endpoint_reachable_ms  every churn target on the remote watcher has more
-                                healthy endpoint weight than before t0 (at least one
-                                new Ready source pod per deployment; includes pod
-                                scheduling and sidecar start).
-  convergence_remote_eds_ms     first remote EDS push after t0 (control plane only).
+Environment (config/options.env describes each): CHURN_TEST_NAMESPACE, the flags' CHURN_*
+keys, CHURN_BASE_REPLICAS ($BASE_REPLICAS), CHURN_POLL_INTERVAL_MS, CHURN_RESULTS_DIR (relative
+to the repo root), FANOUT_*, METRICS_SCRAPE_TIMEOUT, ISTIOD_DIAG_*, TEST_PLATFORM,
+PLATFORM_READ_TIMEOUT, PLATFORM_READ_PARALLEL. Environment only: ISTIO_VERSION_CHECK,
+ISTIO_VERSION_READY_WAIT_SEC.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
-  CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
-  CHURN_BASE_REPLICAS          Replicas before scale-up and after scale-down (must be < --scale-to).
-  CHURN_SCALE_TO_REPLICAS      Default --scale-to.
-  CHURN_ITERATIONS             Default --iterations.
-  CHURN_TIMEOUT_SEC            Default --timeout.
-  CHURN_SETTLE_SEC             Default --settle.
-  CHURN_POLL_INTERVAL_MS       syncz / endpoint poll interval in ms.
-  CHURN_RESULTS_DIR            Default --output-dir (relative to the repo root).
-  FANOUT_PF_BASE               Per-pod istiod port-forward block base (default 21014).
-  FANOUT_CTX_STRIDE            Per-context port stride (default 20).
+Exit codes: 0 the rows were written (or the plan shown); 1 an error.
+
+See tests/churn/README.md.
 EOF
 }
 

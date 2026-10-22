@@ -134,7 +134,7 @@ which wins over the upstream docs there when they disagree.
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
 | `tests/<suite>/` | Numbered scripts + `chart/` (its `values-openshift.yaml` is added on OpenShift members by `tests/lib/platform.sh`; gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
-| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `lint-bats-negation.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.2 or 5.3 host); bats tests in `test/` |
+| `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.2 or 5.3 host); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
 | `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments; `kind-lab/` builds a hub and two members on one machine |
@@ -142,11 +142,11 @@ which wins over the upstream docs there when they disagree.
 ## Testing and verification
 
 - `git submodule update --init`, then `tests/lib/verify.sh`: syntax, shellcheck, inline-copy
-  audit, bats, the bare-scrape, keyed-array and bats-negation lints (a `! cmd` that is not a bats
-  test's last command never fails it: write `! cmd || false` or `run ! cmd`), and every
-  `# ci-dry-run:` script against an empty kubeconfig (no cluster needed). Required before merging
-  changes to `tests/lib/`. The bats that parse the reports' YAML frontmatter need `python3` +
-  PyYAML and skip without it (CI installs it), so a run without PyYAML proves less than it reports.
+  audit, bats, the bare-scrape and keyed-array lints, and every `# ci-dry-run:` script against an
+  empty kubeconfig (no cluster needed). Required before merging changes to `tests/lib/`. In a bats
+  test, a `! cmd` that is not its last command never fails it: write `! cmd || false` or
+  `run ! cmd`. The bats that parse the reports' YAML frontmatter need `python3` + PyYAML and skip
+  without it (CI installs it), so a run without PyYAML proves less than it reports.
 - Charts: `helm lint` / `helm template` each touched chart with its presets
   (`charts/gitops-hub-apps` needs `--set repo.url=<url>`), with and without its
   `values-openshift.yaml`; each ApplicationSet preset with both platform overlays

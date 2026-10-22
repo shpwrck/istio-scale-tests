@@ -52,77 +52,31 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/dataplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
-  --results-dir DIR  Results directory (default: ${DATAPLANE_RESULTS_DIR}). Every
-                     latency-*.tsv under it is read; a sweep-*/ dir from 003 is one run.
-  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
-                     with different run ids). Without it the report stops, lists the
-                     runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values,
-                     and repeats the sweep-outcome.txt of each pooled sweep.
-  --format FMT       Output format: text, csv, markdown (or md), json, charts
-                     (default: text).
+Reports every latency-*.tsv under the results dir: latency and QPS per cell, the "Remote
+coverage" and "Local baseline" sections, placeholder rows, istiod restart diagnostics,
+what the inputs record and each sweep dir's outcome.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
+  --results-dir DIR  Results directory, read recursively; a sweep-*/ dir is one run
+                     (default: ${DATAPLANE_RESULTS_DIR}).
+  --allow-multi-run  Pool several runs (default: a dir with more than one stops the report).
+  --format FMT       text, csv, markdown (or md), json or charts (default: text).
   --fail-on-unreachable
-                     After the output, exit 3 when a remote's reach coverage is not
-                     REACHABLE (rule=reach_coverage) or a remote has no valid latency
-                     row (rule=no_valid_rows); stderr names the rule and the remotes.
+                     After the output, exit 3 when a remote is not REACHABLE in every
+                     check (rule=reach_coverage) or has no valid row (rule=no_valid_rows).
   -h, --help         Show this help.
 
 Example (one sweep, as 003 runs it; from the repo root):
   tests/dataplane/$(basename "$0") \\
     --results-dir ${DATAPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
-Every format includes a "Remote coverage" section before the results table: per
-mesh size and source, how many remotes passed every reach check (reach-*.tsv from
-002, statuses REACHABLE, FLAPPING, DEGRADED, UNREACHABLE, UNKNOWN), and the remotes
-with no or only some valid latency rows (n_valid/n_total with their statuses). A
-TSV recorded before the reach check has no reach file: "no reachability data". Reach
-files from meshes of one member only check the source itself: "no remote to check".
+Environment (config/options.env describes each): DATAPLANE_RESULTS_DIR (relative to the
+repo root), DATAPLANE_MIN_QPS_RATIO (for a TSV whose preamble has no MIN_QPS_RATIO).
 
-Every format includes a "Local baseline" verdict: OK when every local cell has all
-rows valid and none below the QPS ratio, else one line per
-dropped/degraded/unchecked/missing cell with the reason (saturated_unflagged,
-saturated, errors, percentile_missing, failed, istiod_restarted,
-istiod_restart_unknown, or for a mesh size without local rows the lower-cased
-placeholder status, e.g. setup_failed). UNCHECKED: every row is status=OK but some
-delivered less than the ratio x target; only TSVs without MIN_QPS_RATIO in the
-preamble (recorded before the QPS_SHORTFALL check) can produce it.
+Exit codes: 0 the report was written; 1 an error; 3 --fail-on-unreachable and a rule fired.
 
-Sweep placeholder rows (target_class na: SETUP_FAILED, PROBE_FAILED,
-STOPPED_UNREACHABLE) form no table cell; every format names them per mesh size
-("Placeholder rows", csv "# PLACEHOLDER=<mesh>:<STATUS>:<n>", json
-summary.placeholders), also when that mesh size has measured rows.
-
-text, markdown and json also carry an "istiod restart diagnostics" section: every
-istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
-changed, the cause, the evidence folder relative to the results dir) and a tally by
-cause; restarted_untimed rows (may predate the window) are counted apart (json key
-istiod_diag).
-
-The HTTP 200 share prints as a percentage in text and markdown (100.00%); csv and
-json keep it a 0-1 ratio, avg_http_200_ratio (avg_pct_200: same value, old name).
-A FAILED or UNREACHABLE row measured nothing: its QPS and latencies are N/A.
-
-Each dir that holds input TSVs and a sweep-outcome.txt (003 writes it: STATUS=running
-at its start, its outcome at its end) gets that record repeated in every format (json
-sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something
-to say): a sweep that has not finished (it died, or still runs), was interrupted or
-stopped early, its failed cells by reason, its problems (the Istio version, the active
-revision or the generation of the Istio CR or its active IstioRevision changed under
-the sweep, or the harness changed) and notes (an Istio version check that warned at
-its start, a member not ready or not confirmed at its end).
-
-HARNESS_SHA (in the preamble list): the harness that measured the rows (git describe,
--dirty with local changes); mixed:<a>,<b> with a warning when the inputs ran on more
-than one.
-
-Environment:
-  DATAPLANE_MIN_QPS_RATIO  shortfall ratio for TSVs whose preamble has no MIN_QPS_RATIO.
-  DATAPLANE_RESULTS_DIR    --results-dir default (relative to the repo root).
-
-Exit status: 0, 1 on an error, 3 with --fail-on-unreachable when a rule fired.
+See tests/dataplane/README.md.
 EOF
 }
 

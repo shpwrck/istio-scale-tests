@@ -95,90 +95,55 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE        Run config of KEY=value lines (config/options.env keys; see
-                       tests/controlplane/README.md, "Run config").
+Scrapes istiod on every context over one window and appends a row per istiod pod to
+controlplane-<RUN_ID>.tsv. The workload flags only tag the rows: they must match what 001
+deployed.
+
+  --config FILE        Run config of KEY=value lines (config/options.env keys).
                        Precedence: flag > --config > environment > default.
   --contexts CSV       Kube contexts to scrape (default: \$SETUP_CONTEXTS).
-  --mesh-size N        Metadata tag for TSV output (default: the number of contexts;
-                       at most that, as the reports expect a row per member).
-  --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
-  --replicas N         Metadata tag for TSV output (default: $REPLICAS).
-  --namespace-count N  Metadata tag for TSV output (default: $NAMESPACE_COUNT).
-  --sidecar-scoping M  Metadata tag: none|namespace|wide|explicit (default: $SIDECAR_SCOPING).
-  --traffic-config M   Metadata tag: none|vsdr (default: $TRAFFIC_CONFIG). Must match
-                       what 001 deployed.
-  --vsdr-every N       Metadata tag: 001's --vsdr-every (default: $VSDR_EVERY). With
-                       --service-count it sets the vsdr_services column.
-  --vsdr-subsets N     Metadata tag: 001's --vsdr-subsets (default: $VSDR_SUBSETS).
+  --mesh-size N        Tag, at most the number of contexts (default: that number).
+  --service-count N    Tag (default: $SERVICE_COUNT).
+  --replicas N         Tag (default: $REPLICAS).
+  --namespace-count N  Tag (default: $NAMESPACE_COUNT).
+  --sidecar-scoping M  Tag: none, namespace, wide or explicit (default: $SIDECAR_SCOPING).
+  --traffic-config M   Tag: none or vsdr (default: $TRAFFIC_CONFIG).
+  --vsdr-every N       Tag: 001's --vsdr-every (default: $VSDR_EVERY).
+  --vsdr-subsets N     Tag: 001's --vsdr-subsets (default: $VSDR_SUBSETS).
 
-  Namespace scaling (growth mode; metadata tags, they must match what 001 deployed):
-  --services-per-namespace K  Services per namespace (default: $SERVICES_PER_NAMESPACE; 0 =
-                       legacy layout). K > 0 also reads the gateway and root-cert columns
-                       and the sampled sidecars' Envoy memory.
-  --workload-mode M    pods|config-only (default: $WORKLOAD_MODE).
-  --measurement-pods M config-only measurement pods (default: $MEASUREMENT_PODS).
-  --outside-namespaces X  Namespaces outside the mesh present in the window (default:
-                       $OUTSIDE_NAMESPACES).
-  --outside-mode M     none|unlabeled|labeled (default: $OUTSIDE_MODE).
-  --window-kind K      deploy|grow|probe|outside|traffic: what the window measured
-                       (default: $WINDOW_KIND). deploy = a full deploy (the legacy sweep
-                       and --growth fresh); grow = namespaces added to a series; probe = one
-                       probe namespace onboarded; outside = outside namespaces applied;
-                       traffic = only the VirtualServices/DestinationRules, applied after
-                       the workloads were Ready (003 --vsdr-apply split; none cells: an
-                       idle window over the same workloads).
-  --series ID          Growth series id: the config-dump sampler draws only from its
-                       pods.
+  Namespace scaling (growth mode):
+  --services-per-namespace K  Tag; K > 0 also reads the growth-only columns (default: $SERVICES_PER_NAMESPACE).
+  --workload-mode M    Tag: pods or config-only (default: $WORKLOAD_MODE).
+  --measurement-pods M Tag: config-only measurement pods (default: $MEASUREMENT_PODS).
+  --outside-namespaces X  Tag: namespaces outside the mesh (default: $OUTSIDE_NAMESPACES).
+  --outside-mode M     Tag: none, unlabeled or labeled (default: $OUTSIDE_MODE).
+  --window-kind K      Tag: deploy, grow, probe, outside or traffic (default: $WINDOW_KIND).
+  --series ID          Growth series: /config_dump samples only its pods (default: none).
 
   --config-dump-samples N  Random pods per cluster to exec /config_dump on
                        (default: $CONFIG_DUMP_SAMPLES; 0 disables).
-  --settle SEC         Delta-window length (seconds) between baseline and
-                       final scrape (default: $SETTLE_SEC). Must match the
-                       settle time used by the calling orchestrator.
+  --settle SEC         Window length; with --phase final, the one recorded (default: $SETTLE_SEC).
   --output-dir DIR     Results directory (default: ${CONTROLPLANE_RESULTS_DIR}).
-  --run-id ID          Reuse an existing sweep RUN_ID (writes into sweep-<ID>/). The
-                       report keys a growth series by RUN_ID, mesh size, K and workload,
-                       so give a second series of the same mesh size and K its own ID.
-  --watch              Loop continuously (delta window = --interval).
-  --interval SEC       Seconds between scrapes in watch mode (default: 15).
-  --phase PHASE        Orchestration phase, one of:
-                         combined  baseline + settle + final + emit (default,
-                                   for standalone use)
-                         baseline  scrape baseline metrics only, write to
-                                   --state-dir, exit without emitting a row.
-                                   No settle; caller (003) should invoke 001
-                                   AFTER this so the deploy storm lands inside
-                                   the scrape window.
-                         final     scrape final metrics, read baseline from
-                                   --state-dir, compute deltas, emit one row.
-  --state-dir DIR      Required for --phase baseline (must be empty/writable)
-                       and --phase final (must contain a prior baseline's
-                       output). Used to ferry baseline metrics across the
-                       deploy step in split-phase mode. Ignored for combined.
-  --dry-run            Show what would be scraped without connecting.
+  --run-id ID          Use this RUN_ID (a sweep passes its own; default: a new one).
+  --watch              Loop: one row per --interval window until stopped.
+  --interval SEC       Window length in watch mode (default: 15).
+  --phase PHASE        combined (default; baseline, settle, final), baseline (scrape to
+                       --state-dir, no row) or final (read the baseline, write the rows).
+  --state-dir DIR      Required with --phase baseline (an empty dir) and final (its baseline).
+  --dry-run            Show what would be scraped; contact no cluster.
   -h, --help           Show this help.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
-  CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
-  CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
-  CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_SETTLE_SEC (--settle),
-  CONTROLPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
-  CONTROLPLANE_SERVICES_PER_NAMESPACE, CONTROLPLANE_WORKLOAD_MODE,
-  CONTROLPLANE_MEASUREMENT_PODS, CONTROLPLANE_OUTSIDE_NAMESPACES, CONTROLPLANE_OUTSIDE_MODE.
-  CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
-  (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
-  over its istiod pods) and its Running sidecar pods differ by more than
-  max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
+Environment (config/options.env describes each): SETUP_CONTEXTS, the flags' CONTROLPLANE_*
+keys, CONTROLPLANE_SETTLE_SEC, CONTROLPLANE_RESULTS_DIR (relative to the repo root),
+CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S, CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT,
+CONTROLPLANE_PROXY_CHECK_MIN_DIFF, CONTROLPLANE_LEFTOVER_NS_WARN, SCALE_SIZING_MODE and
+SCALE_TARGET_FRACTION (recorded), METRICS_SCRAPE_TIMEOUT, FANOUT_*, CAP_*, ISTIOD_DIAG_*,
+TEST_PLATFORM, PLATFORM_READ_TIMEOUT, PLATFORM_READ_PARALLEL. Environment only:
+ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC. A live run needs GNU timeout (gtimeout).
 
-Requires GNU timeout for a live run (it bounds each config-dump and Envoy-stats exec;
-on macOS: brew install coreutils, which installs gtimeout). Without it a live run
-stops at startup; --dry-run does not need it.
+Exit codes: 0 the rows were written (or the plan shown); 1 an error.
+
+See tests/controlplane/README.md.
 EOF
 }
 

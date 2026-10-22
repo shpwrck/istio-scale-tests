@@ -21,7 +21,7 @@ provisioning, import, networking or credential work.
    whose log stops growing.
    - **Crash:** launch so the exit is observed — a harness-tracked background task, or poll `kill -0 "$PID"`.
    - **Stall:** flag a sweep whose log has not grown for **≥1200s**. Legitimate quiet stretches
-     add up: namespace cleanup up to the suite's `*_NS_DELETE_TIMEOUT_SEC` (240–300s by default),
+     add up: namespace cleanup up to the suite's `*_NS_DELETE_TIMEOUT_SEC` (180–300s by default),
      the same again while setup waits out a Terminating namespace, then deploy waits.
    - Do **not** detect liveness with `pgrep -f '<pattern>'` when the pattern is in the monitor's
      own command line; it matches itself. Track the PID.

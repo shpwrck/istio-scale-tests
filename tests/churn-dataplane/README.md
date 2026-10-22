@@ -112,26 +112,21 @@ what it would do without changing the clusters.
 
 For each mesh size (default `1..N`; the first context is the source) the sweep deploys
 once, then for each rate and repetition resets the churn targets to base (after the
-first), runs the baseline and churn windows, and finally cleans up. It writes one TSV,
-`sweep-summary-<run-id>.md` and `sweep-charts-<run-id>.md` to
+first) and settles `--inter-combo-settle` (15 s, also the gap between mesh sizes), runs the
+baseline and churn windows, and finally cleans up. A rate is whole scale operations per second;
+`0` runs the churn window on a steady mesh, a check that it reports what the baseline does. It
+writes one TSV, `sweep-summary-<run-id>.md` and `sweep-charts-<run-id>.md` to
 `tests/churn-dataplane/results/sweep-<run-id>/`. More than 64 combinations needs
 `--force-large-matrix`.
 
-Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition, such as
-another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
-error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
-when and by which signal; the running step's process group gets SIGTERM, and SIGKILL
-`SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `3` the reachability gate stopped it
-(`--on-unreachable fail`, below; the reports are written); `4` it finished and wrote its reports,
-but some combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the Istio
-version, active revision or generation of the Istio CR or its active IstioRevision changed during
-the sweep (read again before the reports), or its harness (a file under
-`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read at its
-start and its end). The last line on stderr says how many, by reason; `3` wins over `4`.
-`sweep-outcome.txt` in the sweep dir keeps the outcome (`STATUS=running` until the sweep ends, then
-`finished`, `stopped` or `interrupted`), and every report repeats it. When a sweep did not finish
-and no sweep runs any more, run the sweep again into a new dir; the rows already in the dir cover
-only the cells it finished.
+Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition, or an
+unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`, below; the reports
+are written); `4` it finished and wrote its reports, but some combinations failed (`SETUP_FAILED`,
+`RESET_FAILED` or `PROBE_FAILED` rows), or it recorded a problem; `130`, `143` or `129` it was
+interrupted. `3` wins over `4`. What each records in `sweep-outcome.txt`, and the problems every
+sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not finish and
+no sweep runs any more, run the sweep again into a new dir; the rows already in the dir cover only
+the cells it finished.
 
 ## Remote reachability
 
@@ -222,27 +217,17 @@ validity stricter. To compare against those sweeps without the stricter rule, se
 `COEXEC_MIN_PCT_200=0`. Their TSVs have no `MIN_PCT_200` line and no reach file, so the
 report shows `unknown` and "no reachability data".
 
-Every TSV preamble also carries the platform record
-([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
-platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
-istiod's settings and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-`ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`,
-`ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env without `CLUSTER_ID`), read
-before the baseline window (a sweep reads it once for all its combos and hands it to them in
-`platform-record.txt` in the sweep dir, and reads it again after the last one: a value that changed
-in between is a problem of the sweep's outcome, which `005` prints, and a member it cannot read
-again a note there; the sweep also warns as it starts, and notes it, when a member holds a tuning
-profile's objects). An image carries the digest its pods run (`@unknown` when none has started: not
-read, never another build); `none` means no such pod. The sweep's reach file records every member
-the sweep covers. `005` prints the record in every format, with a warning in the report itself (the
-top-level `warnings` array in json, empty without one) when its inputs differ or a value could not
-be read in some of them. On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node
-provider could not be read, every format also warns that the cross-cluster path runs (or may run)
-through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer) on the host the
-kind clusters share, so at mesh sizes above 1 latency under churn is not a cloud load balancer's;
-k3d (`k3s://`) and minikube clusters that share one host are not detected. Sweeps recorded before
-the record have none of these lines (the suite supported only OpenShift with OSSM then), and the
-report reads their values as `unknown`.
+Every TSV preamble also carries the [platform record](../../README.md#the-platform-record),
+read before the baseline window (a sweep reads it once for all its combos, and again after the last
+one). `005` prints it in every format, with a warning in the report itself (the top-level `warnings`
+array in json, empty without one) when its inputs differ or a value could not be read in some of
+them. On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be
+read, every format also warns that the cross-cluster path runs (or may run) through
+cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer) on the host the kind
+clusters share, so at mesh sizes above 1 latency under churn is not a cloud load balancer's; k3d
+(`k3s://`) and minikube clusters that share one host are not detected. Sweeps recorded before the
+record have none of these lines (the suite supported only OpenShift with OSSM then), and the report
+reads their values as `unknown`.
 
 ## Run config (`--config FILE`)
 

@@ -60,45 +60,30 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/controlplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
+Deletes the test pods, then '$NS' and every namespace labelled
+${BASE_SELECTOR}, and waits for them to go.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
   --contexts CSV     Kube contexts to clean up (default: \$SETUP_CONTEXTS).
-  --grace-period SEC Grace period for deleting the workload pods before the
-                     namespace delete (default: $FAST_DRAIN_GRACE_SEC).
-  --timeout SEC      How long to wait for the namespaces to disappear (default:
-                     CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, $TERMINATION_TIMEOUT). At scale
-                     allow about 1 s per namespace (OpenShift deletes namespaces at
-                     roughly 0.3-1 per second); the deletion rate is printed.
-  --series ID        Only the objects of growth series ID (label
-                     controlplane-test.series=ID); the plain namespace is left alone.
-  --undiscover       Before any delete, take the selected namespaces out of istiod's
-                     view: delete their measurement Deployments and pods and their
-                     test Sidecars, then remove the istio-discovery and istio.io/rev
-                     labels. Needs discoverySelectors on the mesh (warns when the
-                     live mesh has them off).
-  --no-delete        With --undiscover: stop there and keep the namespaces (no
-                     namespace delete is queued; delete them later, outside any
-                     measurement window).
-  --no-wait          Queue the namespace deletes without waiting for them.
-  --probe NAME       Retire one probe namespace: delete its Services and Sidecar (and
-                     wait for that), remove its discovery labels, then delete the
-                     namespace without waiting. Not with --series/--undiscover.
+  --grace-period SEC Grace period of the pod deletes (default: $FAST_DRAIN_GRACE_SEC).
+  --timeout SEC      Wait for the namespaces to go; about 1 s each at scale (default: $TERMINATION_TIMEOUT).
+  --series ID        Only growth series ID (label controlplane-test.series=ID).
+  --undiscover       First take the namespaces out of istiod's view (discoverySelectors).
+  --no-delete        With --undiscover: keep the namespaces.
+  --no-wait          Queue the namespace deletes without waiting.
+  --probe NAME       Retire one probe namespace (not with --series or --undiscover).
   --lifecycle-file FILE
-                     Append the delete timings and rates to this namespace-lifecycle
-                     TSV (003 passes it).
-  --dry-run          Print the delete commands without contacting any cluster.
+                     Append the delete timings to this lifecycle TSV (003 passes it).
+  --dry-run          Print the delete commands; contact no cluster.
   -h, --help         Show this help.
 
-Behavior:
-  Default: deletes the workload pods with a short grace period, then every namespace
-  labelled '${BASE_SELECTOR}'
-  plus '\$CONTROLPLANE_TEST_NAMESPACE' (default 'controlplane-test'), and waits up to the
-  timeout for them to disappear. A context that times out or cannot be reached fails.
+Environment (config/options.env describes each): SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE,
+CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, CONTROLPLANE_CLEANUP_GRACE_SEC.
 
-Environment:
-  SETUP_CONTEXTS, CONTROLPLANE_TEST_NAMESPACE, CONTROLPLANE_NS_DELETE_TIMEOUT_SEC
-  (default 300), CONTROLPLANE_CLEANUP_GRACE_SEC (default 5).
+Exit codes: 0 cleaned up (or printed); 1 an error, a timeout or an unreachable context.
+
+See tests/controlplane/README.md.
 EOF
 }
 

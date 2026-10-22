@@ -34,15 +34,19 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE    Run config of KEY=value lines (config/options.env keys; see
-                   tests/propagation/README.md, "Run config"). Precedence: flag >
-                   --config > environment > default.
+Deletes the '${PROPAGATION_TEST_NAMESPACE}' namespace on every context.
+
+  --config FILE    Run config of KEY=value lines (config/options.env keys).
+                   Precedence: flag > --config > environment > default.
   --contexts CSV   Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --dry-run        Print the delete commands without contacting any cluster.
   -h, --help       Show this help.
 
-Environment:
-  SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE.
+Environment (config/options.env describes each): SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE.
+
+Exit codes: 0 cleaned up (or printed); 1 an error or an unreachable context.
+
+See tests/propagation/README.md.
 EOF
 }
 

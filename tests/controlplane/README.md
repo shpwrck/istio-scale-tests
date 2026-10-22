@@ -127,7 +127,12 @@ More than `CONTROLPLANE_MAX_MATRIX` (64) combinations needs `--force-large-matri
 `--settle` (default 60 s) applies after the deploy and again after each cleanup.
 `SCALE_SIZING_MODE=auto` stops the sweep before any change (also under `--dry-run`): `001`
 would deploy a capacity-derived service count while every row records `--service-counts`.
-Keep it `fixed` and pick `--service-counts`; auto is for a standalone `001`.
+Keep it `fixed` and pick `--service-counts`; auto is for a standalone `001` in the legacy
+layout. The plan warns when the largest cell does not fit a member's free CPU requests (with the
+sidecar CPU request of the live Istio CR, or `SCALE_PER_POD_CPU_M`;
+[Capacity planning](../../docs/scale-test-campaign/README.md#capacity-planning)), and `001`
+refuses a step that lacks pod slots or free CPU (`SCALE_CPU_PREFLIGHT_ENFORCE=0` only warns, for
+a node autoscaler).
 A sweep that dies, is interrupted or stops partway is not continued: run `005-cleanup.sh
 --contexts <the sweep's>`, then the sweep again with the mesh sizes it did not finish. Every run
 writes a new `sweep-<RUN_ID>` dir, so the rows in the first one cover only the cells it finished.
@@ -167,18 +172,11 @@ stops or is interrupted inside a cell appends an `INTERRUPTED` status row for it
 every member's rows of the cell were already written (the sweep ended in its diagnostics or
 cleanup): that cell is done.
 
-From its start (after its preflights, before the first cell), every run's `sweep-outcome.txt` says
-`STATUS=running`; at its end, before its reports, the run writes its outcome there
-(`STATUS=finished`, `stopped` with its reason, or `interrupted` with the signal and when), and every
-report of the dir repeats it. A record that still says `running` is from a sweep that died (or
-still runs): clean up and run it again, as above.
-
-The TSV preamble keeps the run's `HARNESS_SHA`: `git describe
---always --abbrev=7`, plus `-dirty` when a file under `tests/`, `config/`, `charts/` or
-`terraform/` has an uncommitted change (tracked, or untracked and not ignored; the sweep's own
-output dir never counts). The sweep reads it at its start and at its end: a different value is a
-`PROBLEM` in the outcome (exit 4). Before its first cell a
-run in legacy mode counts the `controlplane-test` namespaces on the
+The sweep keeps its outcome in `sweep-outcome.txt` from its start (after its preflights, before
+the first cell), as every sweep does ([How a sweep ends](../../README.md#how-a-sweep-ends)), and
+its TSVs record what [every result records](../../README.md#what-every-result-records). A record
+that still says `running` is from a sweep that died (or still runs): clean up and run it again, as
+above. Before its first cell a run in legacy mode counts the `controlplane-test` namespaces on the
 members and on the other mesh members their Istio remote secrets name (those with a kube context of
 that name; it warns about the rest), all at once. It deletes any an earlier run left on the
 `--contexts` members (`005-cleanup.sh`, its `--timeout` sized about 1 s per namespace), waits
@@ -193,24 +191,20 @@ preamble records the counts (`LEFTOVER_TEST_NAMESPACES`) and the outcome says so
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, such as test
 namespaces left on a mesh member that `--contexts` does not name; an unexpected error; or
 `RETIRE_FAILED`, after its reports); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM,
-SIGHUP; `sweep-outcome.txt` says when and by which signal; the sweep first stops the running
-step's process group, the step and every process it started: SIGTERM, then SIGKILL to what still
-runs `SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `4` it finished and
+SIGHUP; [How a sweep ends](../../README.md#how-a-sweep-ends)); `4` it finished and
 wrote its reports, but some cells failed (a status row instead of a measurement: `SETUP_FAILED`,
 `PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`, `INTERRUPTED`; `INCOMPLETE`: rows for fewer members
 than the mesh size, or a member with fewer rows than its window wrote; or `NOT_RUN`: planned, but no
-row), or the Istio version, active revision or the generation of the Istio CR or its active
-IstioRevision changed during the sweep (read again before the reports), or its harness (a file
-under `tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep
-(read at its start and its end), or the cells could not be counted (`TOTAL=unknown`; the rows are
-intact: `004` counts them from the sweep dir). An
+row), or it recorded a problem (those of [every sweep](../../README.md#how-a-sweep-ends), or the
+cells could not be counted: `TOTAL=unknown`; the rows are intact, and `004` counts them from the
+sweep dir). An
 `INCOMPLETE` cell, and a sweep outcome that is not `finished`, names a failed cell (`NOT_RUN`
 among them) or records a `PROBLEM` (the record of each sweep dir the report's inputs come from,
 pooled or not; the verdict names each), also turns the report's SLA verdict from `PASS` to
 `CAUTION` (the sweep covers only part of its plan, or its figures may not measure what they seem
 to); so do inputs measured on more than one Istio version, and a cell that ran on fewer istiod
-pods than its Deployment wanted (above). Inputs from more than one harness print a warning. A
-report repeats the `sweep-outcome.txt` of each sweep dir its inputs come from. The last line on
+pods than its Deployment wanted (above). Inputs from more than one harness print a warning. The
+last line on
 stderr says how many, by reason, out of every cell of the TSV and of this run's matrix (the
 outcome names up to five `NOT_RUN` cells, to run again into a new dir), and how many of them
 failed partway. A cell counts once, by its last row: a status row fails it, with that reason (also
@@ -219,7 +213,8 @@ Cells the memory guard skipped (`SKIPPED_MEM_GUARD`, and `SKIPPED_SERIES_STOPPED
 counted apart, as skipped on purpose, and do not make it `4`. `sweep-outcome.txt` in the
 sweep dir keeps the outcome; the reports and the scale envelope repeat it.
 
-**More than one namespace:** namespaces are named `controlplane-test-0..N-1`. With
+**More than one namespace:** one namespace is `controlplane-test`; more are named
+`controlplane-test-0..N-1`. With
 scoping `none`, the root `Sidecar` egress hosts must list each one (they match namespaces
 exactly), so `001` stops unless they are in `charts/spoke-ossm/values.yaml`
 `tuningBaseline.sidecar.egressHosts` (or egress is `*/*`). `namespace` and `explicit`
@@ -270,46 +265,27 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 - **No key (flags only):** `--dry-run`, `--force-large-matrix`, `--format`,
   `--allow-multi-run` (`004`), `--phase`, `--state-dir`, `--run-id`, `--watch`, `--interval`
   and `--mesh-size`.
-- **Provenance:** the TSV preamble records `RUN_CONFIG` (the file's path from the repo root,
-  or only its name outside the repo; `none` without `--config`) and `RUN_CONFIG_SHA256`, and
-  every report format repeats them. A sweep also copies the file to
-  `sweep-<RUN_ID>/run-config-<RUN_ID>.env`. The report prints `unknown` for files
-  written before these keys existed, and `mixed:<a>,<b>` with a warning when the inputs
-  disagree. A results dir with more than one run (each `sweep-*` directory is one; outside
-  one, each `RUN_ID`) stops `004`, which lists the runs and the `--results-dir` that reports
-  each alone; `--allow-multi-run` pools them on purpose (the calibration below), and every
-  format then says it pools N runs. Every report also lists the distinct `RUN_ID`,
-  `ISTIO_VERSION` and `HARNESS_SHA` of all its input files (`run_ids`, `istio_versions`,
-  `harness_shas` in all four formats); with more than one run `run_id` reads `multiple`. Inputs
-  from different Istio versions or harnesses print a `WARNING` (every format, and stderr for the
-  formats other than text) and read `mixed:<a>,<b>`; different Istio versions also turn a `PASS`
-  verdict into `CAUTION`.
-- **Platform record:** the preamble also carries `PLATFORM`, `TEST_PLATFORM` and, per member, the
-  platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
-  istiod's settings and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
-  `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`,
-  `NODE_PROVIDER_BY_CONTEXT`; [`tests/lib/platform.sh`](../lib/platform.sh)), read before the first
-  window (a sweep reads it once and hands it to its combos in `platform-record.txt` in the sweep
-  dir, and reads it again after its last combo: a value that changed in between is a problem of the
-  sweep's outcome, which `004` prints, and a member it cannot read again a note there; a standalone
-  `002` reads it in each phase). An image carries the digest its pods run; `@unknown` when none has
-  started (an operator scaled to 0, a Pending replica), which every comparison takes as not read,
-  never as another build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT` is a
-  12-hex digest of istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
-  `spec.values.pilot.env` or a hand edit changes it. The sweep warns as it starts, and notes it in
-  its outcome, when a member holds a tuning profile's objects (labelled
-  `istio-scale-tests/tuning-profile`) or marker ConfigMap. The growth mode's
-  `ns-lifecycle-<RUN_ID>.tsv` and `mem-guard-<RUN_ID>.tsv` carry the record too (a standalone `001`
-  or `005` reads it when it creates the lifecycle file). `004` prints it in every format, with a
-  warning in the report itself (members counted, not named; `metadata.data_warnings` in JSON) when
-  its inputs differ or a value could not be read in some of them. On kind nodes it also warns that
-  the capacity figures overstate the headroom, and the SLA verdict leaves the node figures out: it
-  is `CAUTION` with that reason even when istiod's figures pass. A member whose node provider was
-  not read does the same (`node provider not read on N member(s)`): it may be on kind. k3d
-  (`k3s://`) and minikube clusters that share one host are not detected, so their node figures are
-  the host's too. The scale envelope prints every data warning above its tables and a
-  `Platform / mesh build` row. A file without the record predates it (the suite supported only
-  OpenShift with OSSM then); its values read `unknown`.
+- **Provenance:** as in every suite ([Run config](../../README.md#run-config---config-file)): the
+  TSV preamble records `RUN_CONFIG` and `RUN_CONFIG_SHA256`, a sweep copies the file to
+  `sweep-<RUN_ID>/run-config-<RUN_ID>.env`, and a results dir with more than one run stops `004`
+  unless `--allow-multi-run` pools them on purpose (the calibration below; legacy cells pool
+  across runs, a growth series never does). Every report also
+  lists the distinct `RUN_ID`, `ISTIO_VERSION` and `HARNESS_SHA` of all its input files
+  (`run_ids`, `istio_versions`, `harness_shas` in every format); with more than one run
+  `run_id` reads `multiple`. Inputs from different Istio versions or harnesses print a `WARNING`
+  (every format, and stderr for the formats other than text) and read `mixed:<a>,<b>`; different
+  Istio versions also turn a `PASS` verdict into `CAUTION`.
+- **Platform record:** the [record](../../README.md#the-platform-record) is read before the first
+  window (a standalone `002` reads it in each phase); the growth mode's `ns-lifecycle-<RUN_ID>.tsv`
+  and `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates
+  the lifecycle file). `004` prints it in every format, with a warning in the report itself
+  (members counted, not named; `metadata.data_warnings` in JSON) when its inputs differ or a value
+  could not be read in some of them. On kind nodes it also warns that the capacity figures
+  overstate the headroom, and the SLA verdict leaves the node figures out: it is `CAUTION` with
+  that reason even when istiod's figures pass. A member whose node provider was not read does the
+  same (`node provider not read on N member(s)`): it may be on kind. The scale envelope prints
+  every data warning above its tables and a `Platform / mesh build` row. A file without the record
+  predates it (the suite supported only OpenShift with OSSM then); its values read `unknown`.
 - **Tuning levers:** `TUNING_BASELINE` reads the four levers live on the first member:
   `sidecar` (the root Sidecar `default` in `istio-system`), `discoverySelectors` (on the Istio CR
   `default`), `telemetryFiltering` and `accessLogFiltering` (the Telemetry resources
@@ -357,8 +333,12 @@ leaves the other mode's Deployments running.
 
 How does namespace count drive istiod and proxy cost in a mesh of thousands of namespaces
 with one or a few services each? `--services-per-namespaces K` (any K > 0) turns `003`
-into growth series and `--namespace-counts` into the ladder of N. Namespace n holds
-`dummy-svc-0..K-1` (the chart's block layout), so adding namespaces never moves a Service.
+into growth series and `--namespace-counts` into the ladder of N, which runs ascending without
+repeats (the sweep sorts it). Namespace n holds `dummy-svc-0..K-1` (the chart's block layout),
+so adding namespaces never moves a Service. A series has N x K Services, so growth refuses
+`--service-counts`, and takes one `--replica-counts` value. `001 --series ID` labels every
+object of the series `controlplane-test.series=<ID>` (without `--series` the namespaces are
+`controlplane-test-<n>`), and `002 --series ID` samples `/config_dump` only from its pods.
 
 ```bash
 ./tests/controlplane/003-run-sweep.sh --config tests/controlplane/configs/ns-scaling-lab.env --contexts <mesh-a-ctx> --dry-run
@@ -378,6 +358,11 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
     A probe window measures the cost of one more namespace at N, not a deploy storm
     (PL24).
   - after the last step come the outside phase and the M-sweep, then `--series-retire`.
+- **Parts.** Each step runs `001` with one `--parts`: `all` (namespaces N0..N-1 with their
+  Services, Sidecars and pods or measurement pods), `sidecars` (the scoping switch; `none`
+  deletes the series' Sidecars), `outside` (the outside namespaces), `probe` (`--probe NAME`: K
+  Services and the scoping's Sidecar, no pods) or `measurement` (the measurement Deployments, to
+  raise M in place). The legacy layout has `workloads` and `traffic` instead (below, VS/DR).
 - **Fresh** (`--growth fresh`). Every N x scoping cell is deployed and deleted like the
   legacy sweep (`window_kind=deploy`), each under its own series id. Use it at a small N
   to check that in-place growth matches a fresh deploy (report table "Fresh vs in-place",
@@ -402,18 +387,19 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
   Istio version or harness commit. Window deltas (`istiod_cpu_s`, `xds_pushes`, `pushes_per_proxy`) are compared
   only between cells of the same window kind; across kinds they read N/A and only the
   gauges compare.
-- **M-sweep.** `--measurement-pod-counts 4,16` re-probes every scoping at the largest N
-  with 16 measurement pods. Heap that grows with M is a cost per namespace with proxies,
-  which config-only undercounts. The report takes it from `heap_inuse` summed over a
-  cluster's istiod replicas (a namespace's SidecarScope lives on the replica its proxy
-  connects to, so a per-replica average would read the cost / replicas) and prints the
+- **M-sweep.** `--measurement-pod-counts 4,16` re-probes every scoping at the largest N with 16
+  measurement pods. The values rise strictly and the first is the series' M; an M-sweep needs
+  `--workload-mode config-only` and `--growth in-place`. Heap that grows with M is a cost per
+  namespace with proxies, which config-only undercounts. The report takes it from `heap_inuse`
+  summed over a cluster's istiod replicas (a namespace's SidecarScope lives on the replica its
+  proxy connects to, so a per-replica average would read the cost / replicas) and prints the
   istiod replica count next to the table.
-- **Outside the mesh** (`discoverySelectors`). `--outside-namespaces X --outside-modes
-  unlabeled,labeled` adds, at the largest N, X namespaces with K Services each and no
-  `istio.io/rev`: first without the `istio-discovery=enabled` label (istiod must not see
-  them), then labeled (istiod must gain X x K Services). Each phase has an `outside`
-  window and a probe per scoping, and the report checks the istiod Service count against
-  both expectations (PL31).
+- **Outside the mesh** (`discoverySelectors`). `--outside-namespaces X` with
+  `--outside-modes unlabeled,labeled` adds, at the largest N, X namespaces
+  (`controlplane-test-<series>-out-<i>`) with K Services each, no pods and no `istio.io/rev`:
+  first without the `istio-discovery=enabled` label (istiod must not see them), then labeled
+  (istiod must gain X x K Services). Each phase has an `outside` window and a probe per scoping,
+  and the report checks the istiod Service count against both expectations (PL31).
 - **Memory stop guard.** Before each step, scoping switch and outside phase, `003` samples
   every guard context: `--contexts` plus `SETUP_CONTEXTS` (or `CONTROLPLANE_MEM_GUARD_CONTEXTS`),
   since every member ingests the Services through remote discovery and gateways keep `*/*`
@@ -442,10 +428,10 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
     step with its non-heap memory added, need `--mem-stop-pct 80`). When a gateway's Envoy allocated memory at the series start is far above
     the model for the Services the mesh has (x1.5 + 100 Mi), a WARNING says to restart the
     gateways first.
-  - A cell projected above `CONTROLPLANE_MEM_STOP_PCT` (70 %) of a limit becomes a
-    `SKIPPED_MEM_GUARD` row, and a skipped grow ends the series. `mem-guard-<RUN_ID>.tsv`
-    (`GUARD_SCHEMA=2`) records every decision with both projections; prove the guard fires
-    with `--mem-stop-pct 5` (PL33).
+  - A cell projected above `CONTROLPLANE_MEM_STOP_PCT` (70 %; `--mem-stop-pct 0` turns the guard
+    off) of a limit becomes a `SKIPPED_MEM_GUARD` row, and a skipped grow ends the series.
+    `mem-guard-<RUN_ID>.tsv` (`GUARD_SCHEMA=2`) records every decision with both projections;
+    prove the guard fires with `--mem-stop-pct 5` (PL33).
 - **Leftover test namespaces.** A live growth sweep counts the `controlplane-test`
   namespaces on the measured contexts first: one that is still discovered stops it (its
   Services would be in every cell); undiscovered ones above `CONTROLPLANE_LEFTOVER_NS_WARN`
@@ -456,7 +442,9 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
   for absolute numbers.
 - **End of a series** (`--series-retire`). `undiscover` (default) deletes the measurement
   pods and the series' Sidecars and drops `istio-discovery` and `istio.io/rev`, keeping
-  the namespaces (`005 --series ID --undiscover --no-delete`); `delete` also queues the
+  the namespaces (`005 --series ID --undiscover --no-delete`: `--series` leaves the plain
+  `controlplane-test` namespace alone, and `--undiscover` needs `discoverySelectors` on the mesh,
+  warning when the live one has them off); `delete` also queues the
   namespace deletes without waiting (lab only); `keep` leaves the series discovered (one
   series per sweep only). `undiscover` and `delete` are retried
   (`CONTROLPLANE_RETIRE_ATTEMPTS`, 3) and verified: if a namespace of the series is still
@@ -479,7 +467,8 @@ into growth series and `--namespace-counts` into the ladder of N. Namespace n ho
   429s left after them, `client_throttle_waits` client-side rate-limiter waits. Readiness
   waits and 005's deletes record `N/A` (not measured).
 - **Report.** A series is one sweep's RUN_ID x mesh size x K x workload (003 refuses a
-  repeated mesh size or K). Its cells, grow ladder (N_prev) and fits never pool with another
+  repeated mesh size or K; a standalone `002 --run-id` gives a second series of the same mesh
+  size and K its own ID). Its cells, grow ladder (N_prev) and fits never pool with another
   run's, even at the same N, so a base-dir report over several sweeps (`--allow-multi-run`; a smoke run next to
   the main series) fits each series on its own and labels it `run=<RUN_ID>` (`run_id` in
   the JSON records, `series_run_id` per cell). Only the pods-vs-config-only and
@@ -555,10 +544,18 @@ did not measure is recorded as a status row whose `context` is the status: `SETU
 `SKIPPED_MEM_GUARD` or `SKIPPED_SERIES_STOPPED` (the growth memory guard skipped it),
 `GROW_FAILED`, `SWITCH_FAILED` or `RETIRE_FAILED` (growth steps); a context with no running
 istiod pod gets an all-`N/A` row with `istiod_restarted=unknown`. An `INCOMPLETE` cell gets a
-data warning that names it, in every format. The xDS pushes average reads the valid
+data warning that names it, in every format; a data warning names up to five cells, then `and N
+more` (with several input TSVs, each cell after its TSV's path). A histogram quantile in the +Inf
+bucket reads `overflow` (null in JSON), and a figure without a valid sample `N/A` (null), never 0.
+Memory is in Mi, config and push sizes in KiB or MiB (1024-based), latency in ms, istiod CPU in
+millicores. The xDS pushes average reads the valid
 rows with a push count: when a valid row has none, every format shows it as from `got/n_valid`
 rows (csv `pushes_n`, json `xds_pushes_n`), with a data warning, and the `conv_p99_ms` fit notes a
-push gate that read only those rows.
+push gate that read only those rows (json `namespace_scaling.fit_note`; `namespace_scaling` holds
+the fits). The "Achieved scale vs capacity" block compares the most pods scheduled with the pods
+allocatable: below `SCALE_COVERAGE_MIN_FRACTION` (0.25) a `SCALE_SIZING_MODE=auto` run (the
+preamble's mode) reads `UNDER`, a `fixed` run's fraction is informational, and with
+`SCALE_COVERAGE_ENFORCE=1` an `UNDER` makes the report exit 1 once it is written.
 
 Connected proxies appear twice. `connected_proxies per istiod replica (max)` is the busiest
 single replica, so with R replicas it is about 1/R of the cluster. R is read on every
@@ -600,7 +597,9 @@ Each row is a per-window delta over `--interval` seconds.
   report shows bucket ranges such as `100-500`.
 - Each sweep point is one window; rerun the sweep for more samples.
 - Services are spread evenly across namespaces; real meshes are skewed.
-- Utilization-% columns need the metrics API (`kubectl top`); without it they are `N/A`.
+- Utilization-% columns need the metrics API (`kubectl top`); without it they are `N/A`. A
+  sweep waits up to `METRICS_READY_TIMEOUT` (120 s) for `kubectl top nodes` before its first
+  cell, and goes on with a warning when it never answers.
   Node columns count worker nodes, including control-plane nodes that also carry the
   worker role (OpenShift single-node and compact clusters) or have no NoSchedule or
   NoExecute taint (single-node kind, kubeadm and k3s). On kind every node reports the

@@ -49,10 +49,9 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --suite SUITE --gitops-context CTX [options]
 
-For the baseline and each profile: apply, wait --settle seconds, run the suite's
-probe, revert. Writes sweep-comparison.md into the sweep directory. Refuses to start
-while a profile is left applied: its state under the results directory, or its objects
-or marker on a member (./tests/tuning/005-cleanup.sh undoes both).
+For the baseline and each profile: apply, wait --settle seconds, run the suite's probe,
+revert; then writes sweep-comparison.md (004). Refuses to start while a profile is left
+applied (./tests/tuning/005-cleanup.sh undoes it).
 
 Options:
   --suite SUITE          propagation | controlplane | dataplane | churn |
@@ -76,58 +75,17 @@ Options:
                          own --dry-run, and exit. Touches no cluster.
   -h, --help             Show this help.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT, TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE,
-  TUNING_ROLLOUT_TIMEOUT.
-  006-gitops-pause.sh, which pauses Argo CD, reads TUNING_GITOPS_NAMESPACE (the Argo CD
-  namespace; empty: from the hub's platform, openshift-gitops on OpenShift, else argocd) and
-  TUNING_GITOPS_APPSET (the ApplicationSet of the Istio CR Applications, ${TUNING_GITOPS_APPSET}).
-  TEST_PLATFORM (config/options.env; auto, kubernetes or openshift; now ${TEST_PLATFORM:-auto}):
-  kubernetes or openshift is taken as the platform instead of asking each cluster, for the probe
-  suite's chart overlay and, with TUNING_GITOPS_NAMESPACE empty, for the hub whose Argo CD
-  namespace 006 pauses in (TUNING_GITOPS_NAMESPACE overrides that). The platform record of each
-  pass still asks every member what it serves.
-  SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
-  before SIGKILL. Environment only (config/options.env).
-  PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the
-  platform record's reads (config/options.env).
+Environment (config/options.env describes each): SETUP_CONTEXTS, TUNING_GITOPS_CONTEXT,
+TUNING_SETTLE_SEC, TUNING_COEXEC_CHURN_RATE, TUNING_ROLLOUT_TIMEOUT, TUNING_GITOPS_NAMESPACE,
+TUNING_GITOPS_APPSET (${TUNING_GITOPS_APPSET}), the probe suite's keys, TEST_PLATFORM (${TEST_PLATFORM:-auto}),
+PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}), PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}), ISTIO_VERSION_CHECK,
+ISTIO_VERSION_READY_WAIT_SEC, SWEEP_STOP_GRACE_SEC. Requires python3 with PyYAML.
 
-Exit codes:
-  0  every pass (baseline and each profile) ran its probe
-  1  the sweep stopped: a bad flag or precondition (also another live run that holds
-     the sweep dir's .sweep.lock: nothing was changed), the suite setup failed, a
-     profile could not be reverted (REVERT_FAILED; later passes skipped), or an
-     unexpected error; after its start, sweep-outcome.txt records the stop and its
-     reason (STATUS=stopped, STOP_REASON) with the problems found until then, and the
-     active profile is reverted
-  4  the sweep finished, reverted every profile and wrote sweep-comparison.md, but N
-     passes failed (the profile did not apply, SETUP_FAILED, or a probe exited
-     non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason), or the
-     mesh changed under it (each an "error:" line on stderr):
-       - the Istio version or active revision changed during the sweep (read again at
-         its end; the generations only when no profile was applied, since a profile's
-         apply and revert raise them);
-       - the Istio CR changed during a pass, after its profile's apply settled and not
-         by that profile (002-revert-profile.sh compares the generations before its
-         revert), or during the baseline pass (its generations read before its first
-         probe and after its last);
-       - a member's platform record (a build, istiod's env) changed during a pass (read
-         again after its probes);
-       - the harness (a file under tests/, config/, charts/ or terraform/) changed
-         during the sweep (HARNESS_SHA read at its start and its end);
-       - a member's Istio CR spec after the last revert differs from the sweep's start
-         (an incomplete revert, or an edit by something else that no revert undid: they
-         restore only the profiles' keys; the paths that differ are named).
-     The outcome is also in sweep-outcome.txt and sweep-comparison.md.
-  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): the running step's process group
-     gets SIGTERM, and SIGKILL SWEEP_STOP_GRACE_SEC later; sweep-outcome.txt records
-     STATUS=interrupted with the signal, its time and the problems found until then;
-     then the active profile is reverted and Argo CD auto-sync resumed
+Exit codes: 0 every pass ran its probe; 1 stopped (a bad flag or precondition, a failed setup,
+REVERT_FAILED, an error); 4 failed passes or a problem (sweep-outcome.txt); 129, 130, 143 a
+signal (the active profile is reverted and Argo CD resumed first).
+
+See tests/tuning/README.md.
 EOF
 }
 

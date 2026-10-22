@@ -81,18 +81,20 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE             Run config of KEY=value lines (config/options.env keys; see
-                            tests/churn-dataplane/README.md, "Run config"). The steps the
-                            sweep runs inherit it. Precedence: flag > --config >
-                            environment > default.
+For each mesh size: 001 deploys; for each churn rate and repetition, the churn targets are
+reset to base, 002 runs the baseline window and 003 the churn window; 006 cleans up. Then
+the reports, in sweep-<RUN_ID>/ under the output dir.
+
+  --config FILE             Run config of KEY=value lines (config/options.env keys); the
+                            steps inherit it. Precedence: flag > --config > environment >
+                            default.
   --contexts CSV            All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV          Mesh-size dimension (default: ${mesh_sizes_default}).
-  --churn-rates CSV         Churn rate dimension, "deployment scale ops/s" (default: $CHURN_RATES_CSV).
+  --churn-rates CSV         Churn rates, scale ops/s; 0 = a steady mesh (default: $CHURN_RATES_CSV).
   --baseline-duration SEC   Baseline-phase fortio duration (default: $BASELINE_DURATION).
   --churn-duration SEC      Churn-phase fortio + churn duration (default: $CHURN_DURATION).
   --settle-sec N            Pre-window settle delay (default: $SETTLE_SEC).
-  --inter-combo-settle N    Settle gap in seconds (default: $INTER_COMBO_SETTLE_SEC), used between
-                            mesh-sizes and after each reset-to-base between churn rates.
+  --inter-combo-settle N    Settle between mesh sizes and after each reset (default: $INTER_COMBO_SETTLE_SEC).
   --qps N                   Target QPS for both phases (default: $QPS).
   --connections N           Concurrent fortio connections (default: $CONNECTIONS).
   --deployment-count N      Churn-target Deployments per cluster (default: $CHURN_DEPLOYMENT_COUNT_OPT).
@@ -100,65 +102,28 @@ Usage: $(basename "$0") [options]
   --scale-to N              Scale-up replica count, above --base-replicas (default: $CHURN_SCALE_TO_OPT).
   --seed N                  Seed for the deterministic churn order (default: $CHURN_SEED).
   --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
-  --output-dir DIR          Top-level results directory (default: ${COEXEC_RESULTS_DIR}).
-  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC). Also sets
-                            001's wait for the previous mesh-size's namespace to go away,
-                            which is otherwise COEXEC_SETUP_NS_WAIT_SEC (default: $SETUP_NS_WAIT_SEC).
-  --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
-                            fail, a remote that is UNREACHABLE or UNKNOWN before a baseline
-                            records REMOTE_UNREACHABLE rows for that combo and stops the
-                            sweep after the mesh size's cleanup (exit 3).
-  --reach-requests N        Reach-check requests per target, passed to 002; 0 turns the
-                            check off (default: $REACH_REQUESTS).
+  --output-dir DIR          Results base directory (default: ${COEXEC_RESULTS_DIR}).
+  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC); also
+                            001's wait for the previous one (else COEXEC_SETUP_NS_WAIT_SEC).
+  --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE).
+  --reach-requests N        Reach-check requests per target (002); 0 = off (default: $REACH_REQUESTS).
   --force-large-matrix      Allow more than $MATRIX_CAP combinations.
   --dry-run                 Print plan only; do not touch clusters.
   -h, --help                Show this help.
 
-Note: \`--churn-rates 0\` (or a CSV element with value 0) is accepted and runs
-the churn phase against a steady mesh — useful as a sanity check that the
-churn phase reports the same numbers as the baseline phase. Rates < 0 are
-rejected.
+Environment (config/options.env describes each): SETUP_CONTEXTS, COEXEC_MESH_SIZES,
+COEXEC_CHURN_RATES and the other COEXEC_* keys the steps read, CHURN_DEPLOYMENT_COUNT,
+CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS, REACH_* (read by 002), FANOUT_*,
+METRICS_SCRAPE_TIMEOUT, ISTIOD_DIAG_*, TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}),
+PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}).
+Environment only: COEXEC_TEST_NAMESPACE, ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC,
+SWEEP_STOP_GRACE_SEC.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
-  COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
-  COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
-  COEXEC_NS_DELETE_TIMEOUT_SEC, COEXEC_SETUP_NS_WAIT_SEC, CHURN_DEPLOYMENT_COUNT,
-  CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003),
-  REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002).
-  COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir; relative to the
-  repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
-  001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
-  them, and the flags that set them, before the first setup, --dry-run included.
-  TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and
-  PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the platform record's reads (config/options.env).
-  SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
-  before SIGKILL. Environment only (config/options.env).
+Exit codes: 0 every combination ran; 1 stopped (a bad flag or precondition, an error);
+3 --on-unreachable fail stopped it; 4 failed cells or a problem (sweep-outcome.txt);
+129, 130, 143 a signal.
 
-Exit codes:
-  0  every cell (mesh size x churn rate x repetition) ran; rows with a non-OK status
-     are measurement outcomes, counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition (or another live run holds the
-     sweep dir: .sweep.lock names its PID), or an unexpected error; after its start,
-     sweep-outcome.txt records the stop and its reason (STATUS=stopped, STOP_REASON)
-  3  --on-unreachable fail stopped the sweep (the reports are written)
-  4  the sweep finished and wrote its reports, but N cells failed (setup, churn-target
-     reset or a probe exited non-zero; stderr ends with "N of M cells failed" by
-     reason), or the Istio version, the active revision or the generation of the Istio
-     CR or its active IstioRevision changed during the sweep (read again at its end),
-     or a member's platform record (a build, istiod's env: read again at its end), or
-     the harness (a file under tests/, config/, charts/ or terraform/) changed
-     during the sweep (HARNESS_SHA read at its start and its end); the outcome is also
-     in sweep-outcome.txt and every report
-  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): the running step's process group
-     gets SIGTERM, and SIGKILL SWEEP_STOP_GRACE_SEC later; sweep-outcome.txt records
-     STATUS=interrupted with the signal and its time
+See tests/churn-dataplane/README.md.
 EOF
 }
 

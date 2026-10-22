@@ -84,107 +84,30 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/propagation/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
-  --results-dir DIR  Results directory (default: ${PROPAGATION_RESULTS_DIR}). Every
-                     endpoint-*.tsv under it is read; a sweep-*/ dir from 006 is one run.
-  --allow-multi-run  Pool more than one run (several sweep-* dirs, or standalone probes
-                     with different run ids). Without it the report stops, lists the
-                     runs and how to report each alone; with it every format says it
-                     pools N runs and lists their HARNESS_SHA and ISTIO_VERSION values,
-                     and repeats the sweep-outcome.txt of each pooled sweep.
-  --format FMT       Output format: text, csv, json, markdown, charts (default: text).
+Reports every endpoint-*.tsv under the results dir: per mesh size, the phases P1_local_wall,
+P1_conv_p50, P1_conv_p99, P2_discovery and P3_dataplane (n_total, n_valid, n_attempted;
+which rows count is in tests/propagation/README.md, "Outputs"), istiod restart
+diagnostics, what the inputs record and each sweep dir's outcome.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
+  --results-dir DIR  Results directory, read recursively; a sweep-*/ dir is one run
+                     (default: ${PROPAGATION_RESULTS_DIR}).
+  --allow-multi-run  Pool several runs (default: a dir with more than one stops the report).
+  --format FMT       text, csv, json, markdown (or md) or charts (default: text).
   -h, --help         Show this help.
 
 Example (one sweep, as 006 runs it; from the repo root):
   tests/propagation/$(basename "$0") \\
     --results-dir ${PROPAGATION_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
-TSV columns consumed (positions are stable; new columns appended):
-  1  run_id            2  mesh_size       3  iteration       4  source_ctx
-  5  remote_ctx        6  t0_epoch_ns     7  p1_ms           8  p2_ms
-  9  p3_ms            10  status         11  p1_conv_p50_ms 12  p1_conv_p99_ms
- 13  p1_sample_count  14  p1_proxy_count 15  p1_overflow    16  restarted
- 17  p2_dirty         18  window_ms      19  scrape_skew_ms 20  p1_status
- 21  p1_scrape_skew_ms                  22  remote_status  23  remote_scrape_skew_ms
-(older TSVs: 18, 19 or 21 columns; 006's SETUP_FAILED/PROBE_FAILED rows use all 23)
+Environment (config/options.env describes each): FANOUT_MAX_SKEW_MS (the skew ceiling),
+PROPAGATION_PERCENTILE_MIN_N (samples before p95/p99 show), PROPAGATION_RESULTS_DIR (relative
+to the repo root).
 
-Phases emitted in the report:
-  P1_local_wall  wall-clock ms (p1_ms) from the t0 active-label flip until the
-                 histogram delta _count reached proxy_count.
-  P1_conv_p50    p50 of delta-window pilot_proxy_convergence_time (ms).
-  P1_conv_p99    p99 of delta-window pilot_proxy_convergence_time (ms).
-                 Both are histogram bucket bounds: text and markdown show bucket
-                 ranges with no average (max is the worst bucket); csv and json
-                 keep the numbers and add worst_bucket.
-  P2_discovery   pilot_xds_pushes{type="eds"} counter-delta detection (ms).
-  P3_dataplane   watcher Envoy /clusters detection (ms).
+Exit codes: 0 the report was written; 1 an error.
 
-Filtering policy (rows excluded from numeric aggregation): P2 and P3 are measured
-on a remote, so a row's P2/P3 are left out only for that remote's side:
-  remote_status (field 22) != OK   (its istiod RESTART or RESTART_UNKNOWN, a P2 or
-                                    P3 timeout, its sidecar's NOT_DRAINED,
-                                    SCRAPE_INCOMPLETE of its scrape)
-  remote_scrape_skew_ms (field 23) > FANOUT_MAX_SKEW_MS
-never for the source's restart, P1 timeout or p1_overflow. A row with no remote
-(remote_status N/A) measures P1 only. A TSV without field 22 (21 or fewer
-columns) cannot split a row by side: status != OK, restarted == 1 or unknown,
-or scrape_skew_ms (field 19) > FANOUT_MAX_SKEW_MS drops it; p1_overflow does not.
-P2 values are additionally suppressed when p2_dirty == 1.
-P1 phases (one sample per iteration, measured on the source) use the source side
-only: an iteration's P1 is left out when p1_status (field 20) is not OK
-(TIMEOUT_P1, RESTART, RESTART_UNKNOWN, NOT_DRAINED of the source sidecar,
-SCRAPE_INCOMPLETE of a source scrape), p1_overflow == 1, or p1_scrape_skew_ms
-(field 21) > FANOUT_MAX_SKEW_MS; a remote that timed out or restarted keeps it. A
-TSV without field 20 (written before it) takes P1 from the iteration's first row
-with status OK, restarted 0, p1_overflow 0 and scrape_skew_ms within the ceiling.
-DRAIN_TIMEOUT (in any of these status fields: the drain after the iteration timed
-out) counts as OK, since the values were measured before that drain; every format
-warns with the number of such iterations per mesh size.
-
-n_total / n_valid: rows considered vs rows used after the above filtering; for
-the P1 phases, iterations (P1 is one sample per iteration, as 002's summary counts it).
-n_attempted (after n_valid in text and markdown, the last csv column; json
-n_attempted): what the probes were configured to run, from each TSV's ITERATIONS and
-REMOTES: iterations for the P1 phases, ITERATIONS
-x remotes rows (one per iteration with no remote) for P2/P3; a SETUP_FAILED or
-PROBE_FAILED placeholder counts its ITERATIONS x (mesh size - 1) unless a probe TSV of
-its sweep has its mesh size. "-" (csv empty, json null) when a TSV does not record it.
-When fewer iterations or rows were measured than attempted, every format warns (text
-WARNING, csv # WARNING, markdown > Warning, json data_warnings) and stderr says so.
-TSV_COLUMNS (csv # TSV_COLUMNS=, markdown tsv_columns, json tsv_columns) lists the
-column counts of the input rows; more than one also warns: the row rules above differ
-by width, so pooled figures mix rules.
-Averages are rounded to the nearest ms; json mesh_size is a number. n_valid is 0
-(never "-") in every format when no row of a phase counts.
-
-HARNESS_SHA (every format): the harness that measured the rows (git describe, -dirty
-with local changes); mixed:<a>,<b> with a warning (as above) when the inputs ran on
-more than one.
-
-text, markdown and json also carry an "istiod restart diagnostics" section: every
-istiod-diag-*/index.tsv under the results dir, one line per restart (run_id, what
-changed, the cause, the evidence folder relative to the results dir) and a tally by
-cause; restarted_untimed rows (may predate the window) are counted apart (json key
-istiod_diag).
-
-Each dir that holds input TSVs and a sweep-outcome.txt (006 writes it: STATUS=running
-at its start, its outcome at its end) gets that record repeated in every format (json
-sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something
-to say): a sweep that has not finished (it died, or still runs), was interrupted or
-stopped early, its failed cells by reason, its problems (the Istio version, the active
-revision or the generation of the Istio CR or its active IstioRevision changed under
-the sweep, or the harness changed) and notes (an Istio version check that warned at
-its start, a member not ready or not confirmed at its end).
-
-Environment:
-  FANOUT_MAX_SKEW_MS  Scrape-skew ceiling (ms) for the skew filters above: fields 21 and
-                      23, or 19 in an older TSV (default 1000).
-  PROPAGATION_PERCENTILE_MIN_N  Minimum sample count before p95/p99 are reported
-                      (default 20; 0 disables). Below it p95/p99 are N/A
-                      (null in JSON). p50 is always reported.
-  PROPAGATION_RESULTS_DIR  --results-dir default (relative to the repo root).
+See tests/propagation/README.md.
 EOF
 }
 

@@ -98,25 +98,18 @@ and `002` (with `--tsv`), and settles. It always writes the TSVs, then `sweep-su
 and `sweep-charts.md` from `005` (`--tsv` is still accepted and does nothing).
 `--collect-metrics` also saves a `004` snapshot per mesh size.
 
-Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, such as
-another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
-error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
-when and by which signal; the running step's process group gets SIGTERM, and SIGKILL
-`SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `4` it finished and wrote its
-reports, but some mesh sizes failed (setup or probe exited non-zero, a `SETUP_FAILED` /
-`PROBE_FAILED` placeholder row), or the Istio version, active revision or generation of the Istio
-CR or its active IstioRevision changed during the sweep (read again before the reports), or its
-harness (a file under `tests/`, `config/`, `charts/` or `terraform/`,
-`HARNESS_SHA`) changed during the sweep (read at its start and its end). The last line on stderr
-says how many, by reason. `sweep-outcome.txt` keeps the outcome (`STATUS=running` until the sweep
-ends, then `finished`, `stopped` or `interrupted`), and every report repeats it. When a sweep did
-not finish and no sweep runs any more, run `007-cleanup.sh` on its contexts, then the sweep again
-into a new dir.
+Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, or an
+unexpected error); `4` it finished and wrote its reports, but some mesh sizes failed (setup or probe
+exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder row), or it recorded a problem;
+`130`, `143` or `129` it was interrupted. What each records in `sweep-outcome.txt`, and the problems
+every sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not
+finish and no sweep runs any more, run `007-cleanup.sh` on its contexts, then the sweep again into
+a new dir.
 Rows a probe wrote with a non-OK status are measurements, not failures: the report counts them in
 `n_total`. Its `n_attempted` column is what the probes were configured to run (each TSV's
 `ITERATIONS`: iterations for P1, times its remotes for P2 and P3, and what a failed mesh size's
-placeholder would have run); a mesh size that measured fewer iterations or rows than that warns in
-every format and on stderr.
+placeholder would have run; `-`, csv empty, json `null`, when a TSV does not record it); a mesh
+size that measured fewer iterations or rows than that warns in every format and on stderr.
 
 ## Run config (`--config FILE`)
 
@@ -168,28 +161,29 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
 `--output-dir`):
 
 - `endpoint-<RUN_ID>.tsv` (with `--tsv`): preamble of `# KEY=value` provenance lines, then
-  one row per iteration and remote. Columns are listed in `005-report-results.sh --help`.
-- The preamble's platform record ([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`,
-  `TEST_PLATFORM` and, per member, the platform it serves, the mesh operator, istiod and gateway
-  proxy (ingress and east-west) builds, istiod's settings and the nodes' provider
-  (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
-  `PROXY_IMAGE_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`: a digest of
-  istiod's discovery container env without `CLUSTER_ID`), read before the first iteration (a sweep
-  reads it once for all its steps and hands it to them in `platform-record.txt` in the sweep dir,
-  and reads it again after the last one: a value that changed in between is a problem of the
-  sweep's outcome, which `005` prints, and a member it cannot read again a note there; the sweep
-  also warns as it starts, and notes it, when a member holds a tuning profile's objects). An image
-  carries the digest its pods run (`@unknown` when none has started: not read, never another
-  build); `none` means no such pod. `005` prints it in every format, as `mixed` with a warning in
-  the report itself (the top-level `warnings` array in json, empty without one) when its inputs
-  differ or a value could not be read in some of them. A file without it predates the record (the
-  suite supported only OpenShift with OSSM then); its values read `unknown`.
+  one row per iteration and remote, in 23 columns (new ones are appended, so positions stay):
+  `run_id mesh_size iteration source_ctx remote_ctx t0_epoch_ns p1_ms p2_ms p3_ms status
+  p1_conv_p50_ms p1_conv_p99_ms p1_sample_count p1_proxy_count p1_overflow restarted p2_dirty
+  window_ms scrape_skew_ms p1_status p1_scrape_skew_ms remote_status remote_scrape_skew_ms`.
+  Older TSVs have 18, 19 or 21; `006`'s `SETUP_FAILED` / `PROBE_FAILED` rows use all 23.
+- The preamble's [platform record](../../README.md#the-platform-record), read before the first
+  iteration (a sweep reads it once for all its steps, and again after the last one). `005` prints
+  it in every format, as `mixed` with a warning in the report itself (the top-level `warnings`
+  array in json, empty without one) when its inputs differ or a value could not be read in some
+  of them. A file without it predates the record (the suite supported only OpenShift with OSSM
+  then); its values read `unknown`.
 - `endpoint-<RUN_ID>.md`: per-run summary. Its averages count the same rows as `005`
   (one definition, `tests/lib/propagation.sh`), as `n_valid/n_total`, and it lists the
   rows left out by reason (a `remote_status`, a high remote skew), and the iterations whose
   P1 is left out (a `p1_status`, `p1_overflow`, a high source skew).
-- `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. The markdown ends with a
-  glossary of every column. `charts` needs two or more mesh sizes of at least 2 clusters.
+- `005` formats: `text`, `csv`, `json`, `markdown` (or `md`), `charts`. Every format but
+  `charts` gives, per mesh size, `P1_local_wall` (`p1_ms`: from the t0 label flip until the
+  convergence histogram's delta `_count` reached the proxy count), `P1_conv_p50` and
+  `P1_conv_p99` (bucket bounds, below), `P2_discovery` (the remote's EDS push counter) and
+  `P3_dataplane` (the watcher's `/clusters`), with min, max, average and p50, p95 and p99 over the
+  valid samples; p95 and p99 read `N/A` (json `null`) below `PROPAGATION_PERCENTILE_MIN_N` (20)
+  samples, p50 always shows. The markdown ends with a glossary of every column. `charts` needs
+  two or more mesh sizes of at least 2 clusters.
   `HARNESS_SHA` comes from the TSV preambles (the harness that measured the rows): `mixed:<a>,<b>`,
   with a warning, when the inputs ran on more than one. In text and markdown `n_attempted`
 follows `n_total` and `n_valid` (csv keeps it last), and a phase with no valid sample reads

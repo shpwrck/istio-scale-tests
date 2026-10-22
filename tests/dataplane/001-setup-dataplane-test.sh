@@ -45,26 +45,25 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE            Run config of KEY=value lines (config/options.env keys; see
-                           tests/dataplane/README.md, "Run config").
+Deploys the fortio client on the source context and the fortio servers on every context,
+and waits for them. Context names must be lowercase DNS labels of at most 46 characters.
+
+  --config FILE            Run config of KEY=value lines (config/options.env keys).
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the client (required).
   --remote-contexts CSV    Remote cluster contexts for servers (comma-separated).
   --dry-run                Pass --dry-run=client to kubectl apply.
   --wait-timeout N         Seconds to wait for pods (default: $WAIT_TIMEOUT).
-  --server-replicas N      fortio server pods per cluster, local and remote alike
-                           (default: $SERVER_REPLICAS).
+  --server-replicas N      fortio server pods per cluster (default: $SERVER_REPLICAS).
   -h, --help               Show this help.
 
-Context names are used in Service names (dataplane-server-<ctx>), so each must
-be a lowercase DNS label of at most 46 characters; rename others with
-'kubectl config rename-context'.
+Environment (config/options.env describes each): DATAPLANE_TEST_NAMESPACE,
+DATAPLANE_SERVER_REPLICAS, DATAPLANE_WAIT_TIMEOUT_SEC, TEST_PLATFORM (${TEST_PLATFORM:-auto});
+FORTIO_VERSION (config/versions.env).
 
-Environment:
-  DATAPLANE_TEST_NAMESPACE, DATAPLANE_SERVER_REPLICAS, FORTIO_VERSION,
-  DATAPLANE_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
-  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
+Exit codes: 0 deployed and ready (or the --dry-run apply passed); 1 an error or a timeout.
+
+See tests/dataplane/README.md.
 EOF
 }
 

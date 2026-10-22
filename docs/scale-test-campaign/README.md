@@ -32,18 +32,19 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs. A member that is not
    ready (its Istio CR not Healthy or not reconciled, a revision migration, an istiod rollout) is
    waited for once, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s), and stops the run too when it is
-   still not ready. A sweep reads it again at the end and exits 4 when the version or the
-   active revision changed during the sweep, or when the generation of a member's Istio CR or
-   active IstioRevision moved with the same version (an edit of the Istio CR, or Sail rendering it
-   again; a tuning sweep compares the version and revision only, and 002 checks each pass), and
-   when its harness (`HARNESS_SHA`: a file under `tests/`, `config/`, `charts/` or `terraform/`)
-   changed during it. Every sweep ends by writing `sweep-outcome.txt` to its results dir (exit
-   code, failed cells, the version recheck), and its reports repeat those errors and warnings.
-   Until then the file says `STATUS=running`; a sweep that stops on an error records
-   `STATUS=stopped` with its reason, one interrupted `STATUS=interrupted` with the signal, and
-   one killed outright leaves `STATUS=running`. A sweep dir without that file is from a sweep that
-   stopped before its start (nothing ran) or from an older harness. Do not edit, check out or
-   pull the checkout a sweep runs from until it ends.
+   still not ready. A sweep reads it again at the end and exits 4 when the version or the active
+   revision changed during the sweep, or when the generation of a member's Istio CR or active
+   IstioRevision moved with the same version (an edit of the Istio CR, or Sail rendering it again;
+   a tuning sweep, whose profiles move them on purpose, checks them around each pass and at its
+   end only when no profile was applied), when a member's platform record changed, and when its
+   harness (`HARNESS_SHA`: a file under `tests/`, `config/`, `charts/` or `terraform/`) changed
+   during it ([How a sweep ends](../../README.md#how-a-sweep-ends)). Every sweep ends by writing
+   `sweep-outcome.txt` to its results dir (exit code, failed cells, the version recheck), and its
+   reports repeat those errors and warnings. Until then the file says `STATUS=running`; a sweep
+   that stops on an error records `STATUS=stopped` with its reason, one interrupted
+   `STATUS=interrupted` with the signal, and one killed outright leaves `STATUS=running`. A sweep
+   dir without that file is from a sweep that stopped before its start (nothing ran) or from an
+   older harness. Do not edit, check out or pull the checkout a sweep runs from until it ends.
 
 ## Capacity planning
 
@@ -154,8 +155,8 @@ tests/churn-dataplane/004-run-sweep.sh --contexts "$CONTEXTS" --mesh-sizes "$MES
 Between suites, confirm the previous suite's `*-test` namespaces are gone and repeat Stage 0.
 Check each sweep's exit code: `4` means it finished and wrote its reports but some cells
 failed (the last stderr line says how many, by reason; their placeholder rows are in the
-report), or the mesh changed under it (the Istio version, the active revision, or the
-generation of an Istio CR or active IstioRevision), or its
+report), or the mesh changed under it (the Istio version, the active revision, the
+generation of an Istio CR or active IstioRevision, or a member's platform record), or its
 harness did (`HARNESS_SHA`); `3` a reachability stop; `1` it stopped; `130`, `143` or `129` it
 was interrupted (Ctrl-C, SIGTERM, a closed terminal). `sweep-outcome.txt` in each sweep dir
 keeps the outcome. Each suite README lists its codes.

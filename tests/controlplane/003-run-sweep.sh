@@ -122,191 +122,68 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-Run config:
-  --config FILE               Run config of KEY=value lines (config/options.env keys; see
-                              tests/controlplane/README.md, "Run config"). The steps the
-                              sweep runs inherit it. Precedence: flag > --config >
-                              environment > default.
+Runs every cell of the axes' cross-product: 002 --phase baseline, 001 deploys, 002 --phase
+final, 005 cleans up; then the reports. A --services-per-namespaces value above 0 runs
+growth series instead.
 
-Sweep dimensions (cross-product):
-  --contexts CSV              All available cluster contexts (default: \$SETUP_CONTEXTS).
-  --mesh-sizes CSV            Cluster counts (default: ${mesh_sizes_default}).
+Run config:
+  --config FILE               KEY=value lines (config/options.env keys); the steps inherit
+                              it. Precedence: flag > --config > environment > default.
+
+Sweep axes (CSV, cross-product):
+  --contexts CSV              Mesh members (default: \$SETUP_CONTEXTS).
+  --mesh-sizes CSV            First N contexts (default: ${mesh_sizes_default}).
   --service-counts CSV        Dummy services per cluster (default: $SERVICE_COUNTS_CSV).
   --replica-counts CSV        Replicas per service (default: $REPLICA_COUNTS_CSV).
-  --namespace-counts CSV      Namespaces to spread services across (default: $NAMESPACE_COUNTS_CSV).
-  --sidecar-scopings CSV      Sidecar CR scoping modes: none,namespace,wide,explicit
-                              (default: $SIDECAR_SCOPINGS_CSV). wide = a per-namespace
-                              Sidecar with egress */* (unscoped).
-  --traffic-configs CSV       Traffic management per service: none,vsdr
-                              (default: $TRAFFIC_CONFIGS_CSV).
-                              vsdr adds a VirtualService + DestinationRule per
-                              configured service; innermost axis, so each none/vsdr
-                              pair runs back to back. --traffic-config is an alias.
+  --namespace-counts CSV      Namespaces the services spread over (default: $NAMESPACE_COUNTS_CSV).
+  --sidecar-scopings CSV      none, namespace, wide or explicit (default: $SIDECAR_SCOPINGS_CSV).
+  --traffic-configs CSV       none or vsdr, the innermost axis (default: $TRAFFIC_CONFIGS_CSV).
+                              --traffic-config is an alias.
 
-Traffic management (scalars, recorded in the TSV preamble):
-  --vsdr-every N              Configure service i when i mod N == 0 (default: $VSDR_EVERY).
-  --vsdr-subsets N            DestinationRule subsets; the service's replicas are split
-                              over this many Deployments, so it must be <= every
-                              --replica-counts value (default: $VSDR_SUBSETS).
-  --vsdr-apply MODE           together: one apply inside the window (the pods start while
-                              the VS/DR already exist); split: apply the workloads (and
-                              wait for Ready) before the baseline, then only the VS/DR
-                              inside the window (rows window_kind traffic; a none cell's
-                              window is then idle). split separates the VS/DR push cost
-                              from pod startup (BACKLOG 9.11). Default: $VSDR_APPLY.
+Traffic management:
+  --vsdr-every N              VS/DR for service i when i mod N == 0 (default: $VSDR_EVERY).
+  --vsdr-subsets N            DestinationRule subsets, <= every replica count (default: $VSDR_SUBSETS).
+  --vsdr-apply MODE           together, or split: only the VS/DR apply in the window
+                              (default: $VSDR_APPLY).
 
-Namespace scaling (growth mode; README "Namespace scaling"). Any K > 0 switches the
-sweep to growth series: --namespace-counts is the ladder of N (ascending), services
-are N x K (so --service-counts is refused), one replica count, traffic none, no
-explicit scoping.
+Namespace scaling (growth mode):
   --services-per-namespaces CSV
-                              K values, one growth series each (default: $SPN_CSV;
-                              0 = the legacy sweep). --services-per-namespace is an alias.
-  --growth MODE               in-place: grow one set of namespaces step by step and
-                              measure a grow window plus one probe window per scoping
-                              at each N; fresh: deploy and clean up every N x scoping
-                              cell (the PL34 fidelity check). Default: $GROWTH_MODE.
-  --workload-mode MODE        pods|config-only (default: $WORKLOAD_MODE). config-only:
-                              Services without pods plus M measurement pods.
+                              K, one series each; 0 = the sweep above (default: $SPN_CSV).
+                              --services-per-namespace is an alias.
+  --growth MODE               in-place or fresh (default: $GROWTH_MODE).
+  --workload-mode MODE        pods or config-only (default: $WORKLOAD_MODE).
   --measurement-pod-counts CSV
-                              config-only: measurement pods M, ascending (default:
-                              $MEASUREMENT_POD_COUNTS_CSV). The first is the base; each further
-                              value re-probes every scoping at the largest N (the
-                              M-sweep: does istiod heap grow with M?). --measurement-pods
-                              is an alias.
-  --outside-namespaces X      Namespaces outside the mesh added at the largest N
-                              (default: $OUTSIDE_NAMESPACES).
-  --outside-modes CSV         unlabeled,labeled: the outside phases, in order (default:
-                              $OUTSIDE_MODES_CSV; none = no phase). --outside-mode is an alias.
-  --probe-settle SEC          Probe window: settle after a probe namespace is applied,
-                              and again after its teardown (default: $PROBE_SETTLE_SEC).
-  --mem-stop-pct PCT          Memory stop guard: skip a cell (SKIPPED_MEM_GUARD row) when
-                              projected istiod heap or gateway Envoy memory exceeds PCT %
-                              of its limit (default: $MEM_STOP_PCT; 0 disables).
-  --mem-guard-contexts CSV    Contexts the guard samples (default: --contexts plus
-                              \$SETUP_CONTEXTS: every member ingests the Services). A
-                              live run adds the members the measured contexts' remote
-                              secrets name, and warns about one without a kube context.
-  --series-retire MODE        End of a series: undiscover (drop discovery labels, keep
-                              the namespaces; 005 --undiscover --no-delete), delete (also
-                              queue the namespace deletes, no wait) or keep (default:
-                              $SERIES_RETIRE). undiscover and delete are retried
-                              (CONTROLPLANE_RETIRE_ATTEMPTS) and verified: when a namespace
-                              of the series is still discovered afterwards, the sweep
-                              records RETIRE_FAILED, runs no further series and exits 1.
-
-  The memory guard projects each component two ways and stops on either: relative
-  (base + (current - base) x ratio^power, from the series start) and, for gateways,
-  absolute ((CONTROLPLANE_GW_MI_INTERCEPT + Mi per 1000 Services x Services after the
-  step / 1000) x burst factor; CONTROLPLANE_{EWGW,INGW}_MI_PER_1000_SVC and
-  _BURST_FACTOR). It compares the container working set (kubectl top; else Envoy
-  server.memory_physical_size, else server.memory_allocated) and istiod RSS with the
-  limit. A live sweep also adds every mesh member its remote secrets name to the
-  guard set (and stops when one has no kube context of its name; with
-  --mem-guard-contexts it warns), and refuses to start
-  while a controlplane-test namespace of an earlier run is still discovered.
+                              config-only measurement pods, ascending (default: $MEASUREMENT_POD_COUNTS_CSV).
+                              --measurement-pods is an alias.
+  --outside-namespaces X      Namespaces outside the mesh at the largest N (default: $OUTSIDE_NAMESPACES).
+  --outside-modes CSV         unlabeled, labeled or none (default: $OUTSIDE_MODES_CSV).
+                              --outside-mode is an alias.
+  --probe-settle SEC          Settle after a probe's apply and its teardown (default: $PROBE_SETTLE_SEC).
+  --mem-stop-pct PCT          Skip a cell over PCT % of a memory limit (default: $MEM_STOP_PCT; 0 = off).
+  --mem-guard-contexts CSV    Contexts the memory guard samples (default: --contexts plus
+                              \$SETUP_CONTEXTS).
+  --series-retire MODE        undiscover, delete or keep (default: $SERIES_RETIRE).
 
 Other:
-  --config-dump-samples N     Random pods per cluster to exec /config_dump on
-                              (default: $CONFIG_DUMP_SAMPLES; 0 disables).
-  --settle SEC                Seconds for the delta-window between baseline
-                              and final scrape (default: $SETTLE_SEC).
-  --output-dir DIR            Results base directory; each sweep gets a
-                              sweep-<RUN_ID>/ subdir under it
+  --config-dump-samples N     Sidecars per cluster for /config_dump (default: $CONFIG_DUMP_SAMPLES; 0 = none).
+  --settle SEC                Settle after each deploy and each cleanup (default: $SETTLE_SEC).
+  --output-dir DIR            Results base; each run writes sweep-<RUN_ID>/ under it
                               (default: ${CONTROLPLANE_RESULTS_DIR}).
-  --force-large-matrix        Allow matrix > $MAX_MATRIX combinations (default: refuse).
-  --dry-run                   Print plan and matrix, then exit (no cluster is read: it
-                              says what a live run's leftover check would do).
+  --force-large-matrix        Allow more than $MAX_MATRIX cells (default: refuse).
+  --dry-run                   Print the plan and the matrix; change nothing.
   -h, --help                  Show this help.
 
-Exit codes:
-  0  every cell ran; rows with istiod_restarted 1/unknown are measurement outcomes,
-     counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition, an unexpected error, or a series that
-     could not be retired (RETIRE_FAILED; the reports are written)
-  4  the sweep finished and wrote its reports, but N cells failed (a status row
-     instead of a measurement: SETUP_FAILED, PROBE_FAILED, GROW_FAILED, SWITCH_FAILED,
-     or INTERRUPTED, the cell a run that stopped or was interrupted was in, unless every
-     member's rows were written; or a legacy cell whose rows cover fewer members than
-     its mesh size, or a member with fewer rows than its window's WINDOW_ROWS line names
-     (in rows an older harness wrote one by one: than its istiod replicas), INCOMPLETE:
-     cut short while its rows were written; stderr ends with "N of M cells failed" by
-     reason), or the Istio version or active revision changed during the sweep (read
-     again at its end), or the generation of a member's Istio CR or active
-     IstioRevision moved at the same version (an edit of the Istio CR, or Sail rendering
-     it again), or a member's platform record (a build, istiod's env: read again at
-     its end), or the harness (a file under tests/, config/, charts/ or terraform/)
-     changed during the sweep (HARNESS_SHA read at its start and its end), or the cells
-     could not be counted (TOTAL=unknown). A cell counts once, by its last row: a
-     status row fails it, with that reason; a measurement does not. M covers every cell of
-     the matrix; one without a row fails as NOT_RUN. Cells the memory guard skipped
-     (SKIPPED_MEM_GUARD, SKIPPED_SERIES_STOPPED) are counted apart, on stdout, and do
-     not make it 4. The outcome is also in sweep-outcome.txt, the markdown report and
-     the scale envelope.
-     From its start until then, sweep-outcome.txt says STATUS=running: a sweep killed
-     outright keeps it, and its reports say so; one interrupted (SIGHUP, Ctrl-C,
-     SIGTERM: exit 129, 130, 143) records STATUS=interrupted with the signal and its
-     time; one that stops on an error after its start (exit 1) STATUS=stopped with its
-     reason. After any of them, run 005-cleanup.sh, then the sweep again into a new dir
-     with the mesh sizes it did not finish.
-     On a signal, the running step's process group gets SIGTERM, and SIGKILL
-     SWEEP_STOP_GRACE_SEC later. While a run goes on, the sweep dir holds its lock
-     (.sweep.lock, its PID).
+Environment (config/options.env describes each): SETUP_CONTEXTS; the CONTROLPLANE_*,
+SCALE_*, METRICS_*, CAP_*, FANOUT_* and ISTIOD_DIAG_* keys (CONTROLPLANE_RETIRE_ATTEMPTS:
+tries per series retire); TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}),
+PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}). Environment only: CONTROLPLANE_MAX_MATRIX,
+CONTROLPLANE_TEST_NAMESPACE, ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC,
+SWEEP_STOP_GRACE_SEC. A live run needs GNU timeout (gtimeout on macOS).
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
-  CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
-  CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
-  CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_MAX_MATRIX.
-  Axis CSVs: CONTROLPLANE_MESH_SIZES, CONTROLPLANE_SERVICE_COUNTS,
-  CONTROLPLANE_REPLICA_COUNTS, CONTROLPLANE_NAMESPACE_COUNTS,
-  CONTROLPLANE_SIDECAR_SCOPINGS, CONTROLPLANE_TRAFFIC_CONFIGS (each, when empty, falls
-  back to the singular key above). CONTROLPLANE_SETTLE_SEC (--settle),
-  CONTROLPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
-  CONTROLPLANE_WAIT_TIMEOUT_SEC (001's pod readiness wait). The sweep checks the knobs
-  only its steps read (CONTROLPLANE_WAIT_TIMEOUT_SEC, CONTROLPLANE_SETUP_NS_WAIT_SEC,
-  CONTROLPLANE_APPLY_*, CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S,
-  CONTROLPLANE_NS_DELETE_TIMEOUT_SEC, CONTROLPLANE_CLEANUP_GRACE_SEC) before the first
-  setup, --dry-run included.
-  SCALE_SIZING_MODE (must be fixed: the sweep refuses auto, which only standalone 001
-  supports), SCALE_TARGET_FRACTION (recorded in the TSV preamble).
-  Growth mode: CONTROLPLANE_SERVICES_PER_NAMESPACES (else ..._SERVICES_PER_NAMESPACE),
-  CONTROLPLANE_GROWTH_MODE, CONTROLPLANE_WORKLOAD_MODE,
-  CONTROLPLANE_MEASUREMENT_POD_COUNTS (else ..._MEASUREMENT_PODS),
-  CONTROLPLANE_MEASUREMENT_PROXY_MEM_LIMIT, CONTROLPLANE_OUTSIDE_NAMESPACES,
-  CONTROLPLANE_OUTSIDE_MODES (else ..._OUTSIDE_MODE), CONTROLPLANE_PROBE_SETTLE_SEC,
-  CONTROLPLANE_MEM_STOP_PCT, CONTROLPLANE_MEM_GUARD_CONTEXTS, CONTROLPLANE_SERIES_RETIRE,
-  CONTROLPLANE_NS_DELETE_SEC_PER_NS (the plan's namespace-deletion estimate),
-  CONTROLPLANE_RETIRE_ATTEMPTS, CONTROLPLANE_RETIRE_BACKOFF_S, CONTROLPLANE_GW_MI_INTERCEPT,
-  CONTROLPLANE_EWGW_MI_PER_1000_SVC, CONTROLPLANE_EWGW_BURST_FACTOR,
-  CONTROLPLANE_INGW_MI_PER_1000_SVC, CONTROLPLANE_INGW_BURST_FACTOR,
-  CONTROLPLANE_LEFTOVER_NS_WARN.
-  SCALE_PER_POD_CPU_M: per-pod CPU of the capacity plan; empty (default) = the live
-  Istio CR's sidecar CPU request on the first context (Istio's 100m when the CR sets
-  none); a value wins over the live reading. The plan compares the largest combo with
-  each member's free CPU (allocatable minus what other pods request); 001 refuses a step
-  that does not fit unless SCALE_CPU_PREFLIGHT_ENFORCE=0 (warn only, for a node autoscaler).
-  METRICS_READY_TIMEOUT (default 120; 0 disables), METRICS_READY_INTERVAL (10):
-  pre-sweep wait for 'kubectl top nodes'; warns (never aborts) if unavailable.
-  CAP_TOP_TIMEOUT (default 15), CAP_TOP_ATTEMPTS (2), CAP_TOP_BACKOFF_S (2):
-  timeout and retry for the kubectl top reads.
-  METRICS_SCRAPE_TIMEOUT (default 30): curl --max-time for istiod /metrics.
-  CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
-  (default 2): warn when a cluster's connected proxies and its Running sidecar pods
-  differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
-  TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and
-  PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the platform record's reads (config/options.env).
-  SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
-  before SIGKILL. Environment only (config/options.env).
+Exit codes: 0 every cell ran; 1 stopped (a bad flag or precondition, an error, RETIRE_FAILED);
+4 failed cells or a problem (sweep-outcome.txt); 129, 130, 143 a signal.
 
-Requires GNU timeout for a live run (002's config-dump samples, the memory guard's
-Envoy-stats reads; on macOS: brew install coreutils, which installs gtimeout). Without
-it a live sweep stops before any cluster change; --dry-run does not need it.
+See tests/controlplane/README.md.
 EOF
 }
 

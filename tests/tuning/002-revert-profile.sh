@@ -39,9 +39,10 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --state-dir DIR [options]
 
-Undo a profile applied by 001-apply-profile.sh and check the result. Only when the
-check passes does it delete the profile's marker ConfigMap on each member, so a failed
-revert stays visible to every platform record and blocks the next tuning run.
+Undo a profile applied by 001-apply-profile.sh and check the result; only when the check
+passes does it delete the profile's markers. First it compares the members' Istio CR and
+IstioRevision generations with the ones 001 recorded: one that moved warns and writes
+istio-edited-during-pass in the state dir (003 then fails the sweep), and the revert runs.
 
 Options:
   --state-dir DIR        State directory written by 001-apply-profile.sh (required).
@@ -52,22 +53,13 @@ Options:
                          clusters.
   -h, --help             Show this help.
 
-Environment:
-  TUNING_REVERT_HEALTHCHECK_NS_PROBE=1  Also create a probe namespace and wait up to
-                                        TUNING_REVERT_HEALTHCHECK_TIMEOUT seconds for
-                                        istio-ca-root-cert to appear in it.
+Environment (config/options.env describes each): TUNING_ROLLOUT_TIMEOUT,
+TUNING_REVERT_HEALTHCHECK_NS_PROBE (1: also check that istio-ca-root-cert reaches a new
+namespace), TUNING_REVERT_HEALTHCHECK_TIMEOUT. Requires python3 with PyYAML.
 
-Before the revert it compares the members' Istio CR and IstioRevision generations with
-the ones 001 recorded once its apply settled (istio-generations-applied in the state dir).
-A generation that moved means something else edited the Istio CR during the pass (Argo
-CD not paused, another operator, an OSSM operator upgrade): it warns and writes
-istio-edited-during-pass in the state dir (003-run-tuning-sweep.sh then fails the sweep,
-exit 4), and the revert still runs; its exit status does not change. A member read as
-unknown, then or now, is not compared. A re-run after a revert that stopped partway
-(revert-started in the state dir: it may have patched the Istio CR already) skips this
-comparison, with a note, and keeps what the first run found.
+Exit codes: 0 reverted and checked; 1 an error; 3 the post-revert check failed.
 
-Exit status: 0 reverted and checked, 1 error, 3 the post-revert check failed.
+See tests/tuning/README.md.
 EOF
 }
 

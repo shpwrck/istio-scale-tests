@@ -39,11 +39,10 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --results-dir DIR [options]
 
-Compare the passes of a tuning sweep: the baseline and one directory per profile. Each
+Compares the passes of a tuning sweep, the baseline and one directory per profile. Each
 metric is a mean over the pass's valid rows (status OK, no istiod restart; a propagation
-pass counts what its 005 report counts: P1 once per iteration, left out only for a
-source-side reason, P2 and P3 only for the remote's side, a DRAIN_TIMEOUT side counted
-and a NOT_DRAINED one left out). Each profile shows its change against the baseline.
+pass counts what its 005 report counts), and each profile shows its change against the
+baseline.
 
 Options:
   --results-dir DIR  Sweep directory (tests/tuning/results/sweep-<RUN_ID>) (required).
@@ -75,22 +74,18 @@ Histogram p99 rows show the worst bucket a valid row hit, or "overflow (N rows)"
 says "(N overflowed)" for the iterations its mean leaves out
 ("- (N overflowed)" when every one did). Memory is in Mi, CPU in millicores (the
 controlplane's are window peaks), config sizes in KiB.
-The header gives the sweep's Istio version, HARNESS_SHA, SETTLE_SEC and CHURN_RATE as
-003 recorded them and the reference pass's platform record, then the sweep's outcome
-(sweep-outcome.txt): a sweep that has not finished, was interrupted or stopped early,
-its failed passes, its problems (the Istio version or the active revision changed under
-the sweep, the Istio CR or a build changed during a pass, a revert left the spec
-changed, the harness changed) and notes (an Istio version check that warned at its
-start, a member not ready or not read again at its end). The markdown starts with a
-YAML frontmatter of the same keys.
+The header gives the sweep's Istio version, HARNESS_SHA, SETTLE_SEC, CHURN_RATE and the
+reference pass's platform record, then the sweep's outcome (sweep-outcome.txt). The
+markdown starts with a YAML frontmatter: suite, run_id, contexts, passes, the istio_*
+keys, harness_sha, and settle_sec and churn_rate when the sweep recorded them.
 
-Environment:
-  FANOUT_MAX_SKEW_MS  propagation: the scrape-skew ceiling (ms) a row must be within to
-                      count, as in 005 (default 1000, config/options.env).
-  TEST_PLATFORM, PLATFORM_READ_TIMEOUT and PLATFORM_READ_PARALLEL: checked only
-                      (config/options.env); the comparison reads no cluster.
+Environment (config/options.env describes each): FANOUT_MAX_SKEW_MS (propagation: the
+scrape-skew ceiling a row must be within to count, as in 005). TEST_PLATFORM,
+PLATFORM_READ_TIMEOUT and PLATFORM_READ_PARALLEL are only checked: it reads no cluster.
 
 Exit codes: 0 written; 1 bad arguments, or DIR is not a tuning sweep.
+
+See tests/tuning/README.md.
 EOF
 }
 

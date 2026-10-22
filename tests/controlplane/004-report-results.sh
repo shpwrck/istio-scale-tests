@@ -66,129 +66,32 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE      Run config of KEY=value lines (config/options.env keys; see
-                     tests/controlplane/README.md, "Run config"). Precedence: flag >
-                     --config > environment > default.
-  --results-dir DIR  Results directory (default: ${CONTROLPLANE_RESULTS_DIR}). Every
-                     controlplane-*.tsv under it is read; a sweep-*/ dir from 003 is
-                     one run. The report lists each distinct RUN_ID, ISTIO_VERSION and
-                     HARNESS_SHA (run_ids, istio_versions, harness_shas); when Istio
-                     versions or harnesses differ it prints a WARNING, and a mix of
-                     Istio versions turns a PASS verdict into CAUTION (see Provenance
-                     below).
-  --allow-multi-run  Pool more than one run, as the pods-vs-config-only calibration does
-                     (a base dir with a pods sweep and a config-only sweep). Without it
-                     a dir with several runs stops the report, which lists them and how
-                     to report each alone. With it every format says it pools N runs
-                     and lists their HARNESS_SHA and ISTIO_VERSION values, and repeats
-                     the sweep-outcome.txt of each pooled sweep. Legacy cells pool across
-                     runs, while each growth series (RUN_ID x mesh size x K x workload)
-                     keeps its own cells and fits, labelled run=<RUN_ID>.
-  --format FMT       Output format: text, csv, json, markdown (or md), charts (default: text).
+Reports every controlplane-*.tsv under the results dir: statistics per cell (the six sweep
+axes, plus the growth keys), the VS/DR and namespace-scaling sections, what the inputs
+record (run config, harness, Istio version, platform), each sweep dir's outcome, the data
+warnings and the SLA verdict.
+
+  --config FILE      Run config of KEY=value lines (config/options.env keys).
+                     Precedence: flag > --config > environment > default.
+  --results-dir DIR  Results directory, read recursively; a sweep-*/ dir is one run
+                     (default: ${CONTROLPLANE_RESULTS_DIR}).
+  --allow-multi-run  Pool several runs (default: a dir with more than one stops the report).
+  --format FMT       text, csv, json, markdown (or md) or charts (default: text).
   -h, --help         Show this help.
 
 Example (one sweep, as 003 runs it; from the repo root):
   tests/controlplane/$(basename "$0") \\
     --results-dir ${CONTROLPLANE_RESULTS_DIR}/sweep-<RUN_ID> --format markdown
 
-Output groups by (mesh_size, service_count, replicas, namespace_count,
-sidecar_scoping, traffic_config) — every unique sweep point gets its own row of
-CPU/memory/convergence/queue/config-dump stats. When a cell was swept with both
-traffic configs (none and vsdr), the markdown adds a "Traffic management (VS/DR)
-effect" section that pairs them.
+Environment (config/options.env describes each): CONTROLPLANE_RESULTS_DIR (relative to
+the repo root), CONTROLPLANE_LEFTOVER_NS_WARN, SCALE_COVERAGE_MIN_FRACTION,
+SCALE_COVERAGE_ENFORCE, SCALE_SIZING_MODE (the preamble's value wins), SCALE_SLA_CAUTION_PCT,
+SCALE_SLA_FAIL_PCT.
 
-Histogram cells whose target quantile falls in the +Inf overflow bucket are
-emitted as the string "overflow" in text/csv/markdown and as null in JSON.
-A cell with no valid sample is N/A (null in JSON), never 0.
+Exit codes: 0 the report was written; 1 an error, several runs without --allow-multi-run, or
+SCALE_COVERAGE_ENFORCE=1 with the achieved scale under the floor (after the report).
 
-Connected proxies are shown per istiod replica (each pod row) and per cluster
-(summed over a cluster's istiod pods at one scrape). The proxy check compares
-the per-cluster count with the cluster's Running sidecar pods; LOW/HIGH prints
-a WARNING line but never changes the exit code. Reads 40-, 51-, 63- and 66-column TSVs;
-40-column files add nothing to the per-cluster or traffic-management figures and
-their rows count as traffic_config none; 40- and 51-column rows count as the legacy
-layout (services_per_namespace 0, workload pods, window deploy); rows before 66
-columns have no gateway working set or leftover-namespace count (N/A).
-
-Units: memory in Mi (MiB); config and push sizes in KiB / MiB (1024-based); latency
-in ms; istiod CPU in millicores: cpu_peak = the larger of the window average and the
-busiest 5 s poll, cpu_avg = CPU-seconds over the window / the window. A failed series
-retire (RETIRE_FAILED) and leftover test namespaces above LEFTOVER_NS_WARN print a
-WARNING in every format.
-
-Namespace scaling (growth cells, services_per_namespace > 0): the grouping key also
-holds services_per_namespace, workload_mode, measurement_pods, outside_namespaces,
-outside_discovery, window_kind and the series run (the file's RUN_ID: a series is one
-RUN_ID x mesh size x K x workload, so two sweeps in one base dir are never pooled or
-fitted together; only the pods-vs-config-only and fresh-vs-in-place pairings compare
-runs, naming each side's run), and every format adds a "Namespace scaling"
-section: linear fits against namespace count (slope per 100 namespaces, intercept,
-R², n, log-log exponent) with the raw points, the pods-vs-config-only comparison
-(always shown; it says so when a side is missing), the measurement-pod sweep, the
-discovery pairing (outside namespaces none/unlabeled/labeled) and fresh-vs-in-place
-fidelity. Fits use cells with n_valid > 0 only; the first grow window (from 0
-namespaces, it also boots the measurement pods) stays out of the grow fits of window
-measurements, and convergence p99 needs ${CONV_FIT_MIN_PUSHES} xDS pushes per replica counted
-across xDS types (about 30 full pushes).
-
-Each dir that holds input TSVs and a sweep-outcome.txt (003 writes it: STATUS=running at
-its start, its outcome at its end) gets that record repeated in every format (json
-sweep_outcomes, csv "# SWEEP_OUTCOME_<KEY>=" lines; charts only when it has something to
-say): a sweep that has not finished (it died, or still runs), was interrupted or stopped
-early, its failed cells by reason (INCOMPLETE: a cell cut short while its member rows
-were written; INTERRUPTED: the sweep ended inside the cell), its problems (the Istio
-version, active revision or the generation of the Istio CR or its active IstioRevision
-changed under the sweep, or the harness changed) and its
-notes. Any of these but a note turns a PASS verdict into CAUTION ("the sweep outcome is
-not clean").
-
-A cell cut short while its member rows were written (INCOMPLETE: rows of fewer members
-than its mesh size, or a member with fewer rows than its window wrote: its
-"# WINDOW_ROWS=" line, or in a TSV without one its istiod replicas; and no status row; a
-sweep's TSV only, PHASE=sweep) prints a data warning (json data_warnings) in every
-format. So does a window that ran on fewer istiod pods than its member's istiod
-Deployment wants (a "# WINDOW_ROWS=" entry <member>=<n>/<spec>, <n> below <spec>: a
-replica evicted or Pending): its rows are valid, but their per-replica figures are not
-comparable with the other cells. An entry without /<spec> (an older harness, or 002
-could not read the Deployment) is compared with the member's ISTIOD_REPLICAS_BY_CONTEXT,
-read at the sweep's start (an HPA may have changed it since): a data warning only. So is
-an istiod pod that was Running but not Ready at a window's baseline (the
-"# ISTIOD_NOT_READY=<member>=<pod>,..." line right before its WINDOW_ROWS line), and one
-not Ready at the window's end (the "# ISTIOD_NOT_READY_AT_END=" line there): a pod that
-is not Ready takes no new proxy connection, and one shutting down also drops its own as
-it exits (their reconnects to the other replicas add to the cell's push, convergence and
-CPU figures), so the per-replica figures may include a replica that carried fewer
-proxies than the others, or none (its row's connected_proxies shows what it held at the
-window's end; a restarted replica's row is left out). Each warning names up to five
-cells (then "and N more"); in a report of several TSVs it names each cell after its
-TSV's path (relative to the results dir). An INCOMPLETE cell, or one that ran on fewer
-istiod pods than wanted, also turns a PASS verdict into CAUTION ("N cell(s) are
-INCOMPLETE", "N cell(s) ran on fewer istiod pods than their member's istiod Deployment
-wants"), and adds itself to a CAUTION or FAIL headline. pushes_avg comes from the valid
-rows with a push count: fewer than n_valid shows as got/n_valid (csv pushes_n, json
-xds_pushes_n), with a data warning.
-
-Provenance: HARNESS_SHA (the harness that wrote the rows: git describe, -dirty with
-local changes) and KUBE_VERSIONS come from each TSV preamble; harness_shas lists the
-harnesses, and HARNESS_SHA reads mixed:<list> when there are several. A mix of harnesses
-or of Istio versions prints a provenance warning; a mix of Istio versions also turns a
-PASS verdict into CAUTION. The json namespace_scaling object holds the fits;
-namespace_scaling.fit_note (null when none) says when the conv_p99_ms push gate read
-pushes_avg from only some valid rows of a fitted point (the others had no push count),
-as the other formats' fit NOTE line does.
-
-Environment:
-  CONTROLPLANE_RESULTS_DIR      --results-dir default (relative to the repo root).
-
-Environment (scale-coverage floor; off by default):
-  SCALE_COVERAGE_MIN_FRACTION  Min achieved pods/allocatable fraction for the
-                               "Achieved scale" block (default: 0.25).
-  SCALE_COVERAGE_ENFORCE        When 1, exit non-zero if achieved scale is under
-                               the floor (default: 0 — informational only).
-  SCALE_SIZING_MODE             Read from the TSV preamble (env fallback: fixed).
-                               The coverage floor only fires (UNDER / enforced
-                               failure) when =auto; in fixed mode coverage is
-                               reported as informational (no UNDER, no hard-fail).
+See tests/controlplane/README.md.
 EOF
 }
 
@@ -345,8 +248,8 @@ fi
 # Reproducibility tags (PL2/PL19/PL26) from EVERY consumed TSV, so committed campaign
 # artifacts are attributable to the runs that produced them. A base-dir report (the
 # pods-vs-config-only calibration) pools several sweeps, so each tag also has a list of
-# its distinct values in file order (run_ids, istio_versions, harness_shas in all four
-# formats). RUN_ID legitimately differs between pooled sweeps: the scalar reads
+# its distinct values in file order (run_ids, istio_versions, harness_shas in every
+# format). RUN_ID legitimately differs between pooled sweeps: the scalar reads
 # `multiple`. ISTIO_VERSION and HARNESS_SHA must not: the scalar reads mixed:<a>,<b> and
 # stderr gets a WARNING. One file's own mixed ISTIO_VERSION (members that ran different
 # versions) is joined with /, so it stays one list item and one tag.

@@ -118,21 +118,14 @@ and writes everything to `tests/dataplane/results/sweep-<RUN_ID>/`, including
 `sweep-<RUN_ID>.md` and `sweep-charts-<RUN_ID>.md`. The p50-vs-QPS chart needs one mesh
 size with a remote cluster; the p50-vs-mesh-size chart needs two.
 
-Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, such as
-another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
-error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
-when and by which signal; the running step's process group gets SIGTERM, and SIGKILL
-`SWEEP_STOP_GRACE_SEC` (30 s) later; see the top-level README); `3` the reachability gate stopped it
+Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precondition, or an
+unexpected error); `130`, `143` or `129` it was interrupted; `3` the reachability gate stopped it
 (`--on-unreachable fail`, see below; the reports are written); `4` it finished and wrote its
-reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder), or the Istio
-version, active revision or generation of the Istio CR or its active IstioRevision changed during
-the sweep (read again before the reports), or its harness (a file under
-`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read at its
-start and its end). The last line on stderr says how many, by reason; `3` wins over `4`.
-`sweep-outcome.txt` in the sweep dir keeps the outcome (`STATUS=running` until the sweep ends, then
-`finished`, `stopped` or `interrupted`), and every report repeats it. When a sweep did not finish
-and no sweep runs any more, run the sweep again into a new dir; the rows already in the dir cover
-only the mesh sizes it finished.
+reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it recorded
+a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
+`sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
+reason; `3` wins over `4`. When a sweep did not finish and no sweep runs any more, run the sweep
+again into a new dir; the rows already in the dir cover only the mesh sizes it finished.
 
 ## Run config (`--config FILE`)
 
@@ -370,28 +363,17 @@ the row with a folder; the other rows count as repeats. json has the section as
 
 ## Outputs
 
-`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble (`HARNESS_SHA`,
-`ISTIO_VERSION` with `ISTIO_VERSION_PIN` and `ISTIO_VERSION_SOURCE`, `KUBE_VERSIONS`,
-`FORTIO_IMAGE`, ...) and these columns. The preamble's platform record
-([`tests/lib/platform.sh`](../lib/platform.sh): `PLATFORM`, `TEST_PLATFORM`, and per member
-`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
-`PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways' build; the test pods' sidecars get
-the injector's, normally istiod's release), `NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`
-(a digest of istiod's discovery container env without `CLUSTER_ID`: its settings)) names the
-platform and the mesh builds the run measured, read before the first window (a sweep reads it
-once and hands it to its combos in `platform-record.txt` in the sweep dir, and reads it again
-after its last combo: a value that changed in between is a problem of the sweep's outcome, which
-`004` prints, and a member it cannot read again a note there; the sweep also warns as it starts,
-and notes it, when a member holds a tuning profile's objects). An image carries the digest its pods
-run (`@unknown` when none has started: not read, never another build); `none` means no such pod.
-`004` prints it in every format, with a warning in the report itself (the top-level `warnings` array
-in json, empty without one) when its inputs differ or a value could not be read in some of them. On
-kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be read, every
-format also warns that the cross-cluster path runs (or may run) through cloud-provider-kind's
-userspace Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so
-remote latency and the remote-minus-local delta are not a cloud load balancer's; k3d (`k3s://`) and
-minikube clusters that share one host are not detected. A file without the record predates it (the
-suite supported only OpenShift with OSSM then); its values read `unknown`. `SERVER_REPLICAS` records
+`latency-<RUN_ID>.tsv` has a `# KEY=value` preamble
+([what every result records](../../README.md#what-every-result-records), `FORTIO_IMAGE`, ...),
+read before the first window, and these columns. `004` prints the preamble in every format, with a
+warning in the report itself (the top-level `warnings` array in json, empty without one) when its
+inputs differ or a value could not be read in some of them. On kind nodes
+(`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be read, every format also
+warns that the cross-cluster path runs (or may run) through cloud-provider-kind's userspace Envoy
+(the east-west gateway's LoadBalancer) on the host the kind clusters share, so remote latency and
+the remote-minus-local delta are not a cloud load balancer's; k3d (`k3s://`) and minikube clusters
+that share one host are not detected. A file without the record predates it (the suite supported
+only OpenShift with OSSM then); its values read `unknown`. `SERVER_REPLICAS` records
 the fortio server pods as `<ctx>=<ready>/<spec>` per context, read live before the load
 (`<ctx>=unknown` when the read fails); `MIN_QPS_RATIO` and `MIN_PCT_200` record the thresholds
 behind `status`, and `REACH_REQUESTS`, `REACH_QPS`, `REACH_HTTP_TIMEOUT_SEC`,

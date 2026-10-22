@@ -60,62 +60,36 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE          Run config of KEY=value lines (config/options.env keys; see
-                         tests/propagation/README.md, "Run config"). The steps the
-                         sweep runs inherit it. Precedence: flag > --config >
-                         environment > default.
+For each mesh size: 007 cleans the unused contexts, 001 deploys, 002 probes (with --tsv);
+at the end 007 cleans every member (also when the sweep stops early), and 005 writes the
+reports, in sweep-<RUN_ID>/ under the output dir.
+
+  --config FILE          Run config of KEY=value lines (config/options.env keys); the
+                         steps inherit it. Precedence: flag > --config > environment >
+                         default.
   --contexts CSV         All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV       Cluster counts to test (default: ${mesh_sizes_default}).
-  --watcher-replicas N   Watcher pod replicas per cluster
-                         (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
+  --watcher-replicas N   Watcher pods per cluster (default: \$PROPAGATION_WATCHER_REPLICAS=$WATCHER_REPLICAS).
   --iterations N         Iterations per mesh size (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC          Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
-  --settle-sec SEC       Settle gap between iterations and between mesh-size steps (default: $SETTLE_SEC).
-  --output-dir DIR       Results root (default: ${PROPAGATION_RESULTS_DIR}). A new
-                         per-sweep subdir 'sweep-\${RUN_ID}/' is created underneath.
-  --tsv                  Accepted for old command lines; does nothing. The sweep always
-                         writes per-iteration TSVs and the 005 reports (sweep-summary.md,
-                         sweep-charts.md).
+  --settle-sec SEC       Settle between iterations and between mesh sizes (default: $SETTLE_SEC).
+  --output-dir DIR       Results root (default: ${PROPAGATION_RESULTS_DIR}).
+  --tsv                  Accepted for old command lines; does nothing.
   --collect-metrics      Also run 004-collect-pilot-metrics.sh at each mesh size.
   --force-large-matrix   Bypass matrix safety cap (default: $MAX_MATRIX iterations).
   --dry-run              Print planned matrix to stderr; exit without touching clusters.
   -h, --help             Show this help.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  SETUP_CONTEXTS, PROPAGATION_ITERATIONS, PROPAGATION_TIMEOUT_SEC, PROPAGATION_SETTLE_SEC,
-  PROPAGATION_WATCHER_REPLICAS, PROPAGATION_MAX_MATRIX. PROPAGATION_MESH_SIZES
-  (--mesh-sizes), PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root),
-  PROPAGATION_WAIT_TIMEOUT_SEC (read by 001), PROPAGATION_POLL_INTERVAL_MS and
-  PROPAGATION_DRAIN_TIMEOUT_SEC (read by 002); the sweep checks these before the first
-  setup, --dry-run included.
-  TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and
-  PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the platform record's reads (config/options.env).
-  SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
-  before SIGKILL. Environment only (config/options.env).
+Environment (config/options.env describes each): SETUP_CONTEXTS, PROPAGATION_MESH_SIZES and
+the other PROPAGATION_* keys the steps read, FANOUT_*, METRICS_SCRAPE_TIMEOUT, ISTIOD_DIAG_*,
+TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}), PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}).
+Environment only: PROPAGATION_MAX_MATRIX, PROPAGATION_TEST_NAMESPACE, ISTIO_VERSION_CHECK,
+ISTIO_VERSION_READY_WAIT_SEC, SWEEP_STOP_GRACE_SEC.
 
-Exit codes:
-  0  every cell (mesh size) ran; rows with a non-OK status are measurement outcomes,
-     counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition (or another live run holds the
-     sweep dir: .sweep.lock names its PID), or an unexpected error; after its start,
-     sweep-outcome.txt records the stop and its reason (STATUS=stopped, STOP_REASON)
-  4  the sweep finished and wrote its reports, but N cells failed (setup or probe
-     exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
-     version, the active revision or the generation of the Istio CR or its active
-     IstioRevision changed during the sweep (read again at its end), or a member's
-     platform record (a build, istiod's env: read again at its end), or the harness
-     (a file under tests/, config/, charts/ or terraform/) changed during the sweep
-     (HARNESS_SHA read at its start and its end); the outcome is also in
-     sweep-outcome.txt and every report
-  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): the running step's process group
-     gets SIGTERM, and SIGKILL SWEEP_STOP_GRACE_SEC later; sweep-outcome.txt records
-     STATUS=interrupted with the signal and its time, then the sweep's exit runs
-     007-cleanup.sh on every member
+Exit codes: 0 every mesh size ran; 1 stopped (a bad flag or precondition, an error); 4 failed
+cells or a problem (sweep-outcome.txt); 129, 130, 143 a signal.
+
+See tests/propagation/README.md.
 EOF
 }
 

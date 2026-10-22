@@ -43,14 +43,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --profile NAME|PATH [options]
 
-Apply a tuning profile: patch the Istio CR and apply the profile's resources. Saves what
-002-revert-profile.sh needs, and the members' Istio CR and IstioRevision generations once
-the apply settled (istio-generations-applied; a member it could not read is a warning).
-A new apply clears what an earlier apply and its revert left in the state dir
-(revert-started, istio-edited-during-pass, istio-generations-applied). First it puts a marker ConfigMap on each member that names the
-profile and holds the patch that restores that member's Istio CR (002-revert-profile.sh
-deletes it last). It refuses to start while a member holds a profile's objects or marker
-already: a profile left applied, which ./tests/tuning/005-cleanup.sh undoes.
+Apply a tuning profile: put its marker ConfigMap on each member, patch the Istio CR, apply
+the profile's resources, then check them. Saves in the state dir what 002-revert-profile.sh
+needs, with the members' Istio CR and IstioRevision generations once the apply settled.
+Refuses to start while a member holds a profile's objects or marker already (undo those
+with ./tests/tuning/005-cleanup.sh).
 
 Options:
   --profile NAME|PATH    Profile name (e.g. 01-push-throttling) or YAML path (required).
@@ -63,12 +60,13 @@ Options:
   --dry-run              Print the patch and resources; do not touch clusters.
   -h, --help             Show this help.
 
-Environment:
-  PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the
-  check for a profile's objects already on a member (config/options.env).
+Environment (config/options.env describes each): SETUP_CONTEXTS, TUNING_ROLLOUT_TIMEOUT,
+TEST_PLATFORM, PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}), PLATFORM_READ_PARALLEL
+(${PLATFORM_READ_PARALLEL}). Requires python3 with PyYAML.
 
-Exit status: 0 applied and verified, 1 error, 2 applied but verification failed.
-Requires python3 with PyYAML.
+Exit codes: 0 applied and verified; 1 an error; 2 applied, but the checks failed.
+
+See tests/tuning/README.md.
 EOF
 }
 

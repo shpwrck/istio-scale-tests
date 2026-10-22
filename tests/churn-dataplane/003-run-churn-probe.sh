@@ -76,8 +76,12 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE            Run config of KEY=value lines (config/options.env keys; see
-                           tests/churn-dataplane/README.md, "Run config").
+Runs one fortio load from the source's client pod while it issues --churn-rate x --duration
+scale operations on the churn targets of every context: the churn row of a combo (status OK,
+FAILED, PERCENTILE_MISSING, ERROR_RATE_HIGH, POISONED_RESTART, POISONED_SCRAPE or
+CHURN_RATE_NOT_MET).
+
+  --config FILE            Run config of KEY=value lines (config/options.env keys).
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Context where fortio-client runs (required).
   --remote-contexts CSV    Other contexts in the mesh (churn applies to ALL).
@@ -97,50 +101,22 @@ Usage: $(basename "$0") [options]
   --output-file FILE       TSV file to append to (must already have header).
   --output-dir DIR         Default results dir if --output-file not given.
   --baseline-file FILE     Optional baseline TSV used to compute Δp99 vs same combo_id.
-  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
-  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
+  --tuning-baseline STR    Tuning levers for the preamble (default: unknown; a sweep sets it).
+  --sidecar-egress-hosts STR  Root Sidecar egress hosts for the preamble (default: unknown;
+                           a sweep sets it).
   --dry-run                Print plan only.
   -h, --help               Show this help.
 
-Row status: FAILED, PERCENTILE_MISSING or ERROR_RATE_HIGH (HTTP 200 share below
-COEXEC_MIN_PCT_200, default $MIN_PCT_200; 0 turns the rule off), POISONED_RESTART,
-POISONED_SCRAPE, CHURN_RATE_NOT_MET, else OK. The marker comment records pct_200
-and top_code.
+Environment (config/options.env describes each): the flags' COEXEC_* and CHURN_* keys,
+COEXEC_MIN_PCT_200 (ERROR_RATE_HIGH below it; default $MIN_PCT_200, 0 = off),
+COEXEC_TEST_NAMESPACE, COEXEC_ISTIOD_REPLICAS, COEXEC_RESULTS_DIR (relative to the repo
+root), REACH_* (recorded in a TSV it starts), FANOUT_* (FANOUT_MAX_SKEW_MS: POISONED_SCRAPE
+above it), METRICS_SCRAPE_TIMEOUT, ISTIOD_DIAG_*, TEST_PLATFORM, PLATFORM_READ_TIMEOUT,
+PLATFORM_READ_PARALLEL. Environment only: ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC.
 
-The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
-whose exec failed (a FAILED row) may run on there, so the probe waits until its
---duration and 5 s more have passed before going on, unless the client pod is gone
-(deleted, or evicted and Failed: then no load runs). When the probe ends during a load
-(a stop, Ctrl-C), it deletes the client pod, so the load ends with it; the pod's
-Deployment starts a new one, which a sweep started right after waits for (its setup 001
-waits until the Deployments are Available). Run by hand, the probe loads only a Ready
-client pod that is not being deleted, and stops when there is none: run 001, or wait
-until the new pod is Ready.
+Exit codes: 0 the row was written (or the plan shown); 1 an error.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  COEXEC_MIN_PCT_200, COEXEC_CHURN_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
-  COEXEC_SETTLE_SEC, COEXEC_TEST_NAMESPACE, COEXEC_CHURN_SEED, COEXEC_ISTIOD_REPLICAS
-  (expected pin; warns on mismatch), COEXEC_RESULTS_DIR (--output-dir; relative to the
-  repo root),
-  CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS,
-  FANOUT_PF_BASE (per-pod istiod PF block base; default 21014),
-  FANOUT_MAX_SKEW_MS (per-window scrape_skew ceiling in ms; default 1000 — a row
-  whose pre/post fanout scrape skew exceeds this is tagged POISONED_SCRAPE because
-  the istiod-side deltas are computed across an incoherent snapshot).
-
-Churn-rate semantics:
-  "Deployment scale operations per second". At rate=N for D seconds, exactly N*D
-  scale operations are issued. Each operation alternates the replica count of the
-  chosen churn-target Deployment between --base-replicas and --scale-to. The
-  order of target indices is a deterministic seeded shuffle so two
-  identical configurations produce the same churn timeline.
+See tests/churn-dataplane/README.md.
 EOF
 }
 

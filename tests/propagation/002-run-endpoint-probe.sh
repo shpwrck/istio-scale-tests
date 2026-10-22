@@ -99,89 +99,40 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE             Run config of KEY=value lines (config/options.env keys; see
-                            tests/propagation/README.md, "Run config").
+Per iteration: checks that no canary endpoint is left, labels the source backer at t0 so the
+canary Service gains an endpoint, times P1 (source istiod pushed to every proxy), P2 (each
+remote istiod's first EDS push) and P3 (each remote watcher sees it healthy), then drains it.
+Row status: OK, TIMEOUT_P1/P2/P3/ALL, RESTART, DRAIN_TIMEOUT, NOT_DRAINED or SCRAPE_INCOMPLETE.
+
+  --config FILE             Run config of KEY=value lines (config/options.env keys).
                             Precedence: flag > --config > environment > default.
   --source-context CTX      Kube context for the source cluster (required).
-  --remote-contexts CSV     Remote cluster contexts (comma-separated). Omit for a
-                            single-cluster baseline.
+  --remote-contexts CSV     Remote cluster contexts (comma-separated); none: a one-cluster run.
   --mesh-size N             Metadata tag for TSV output (default: 1 + number of remotes).
-  --sweep-run-id ID         Outer sweep RUN_ID to record in TSV preamble (default: empty;
-                            set by 006-run-sweep.sh — omit when running probe standalone).
+  --sweep-run-id ID         The sweep's RUN_ID for the preamble (default: empty; 006 sets it).
   --iterations N            Number of probe iterations (default: \$PROPAGATION_ITERATIONS=$ITERATIONS).
   --timeout SEC             Timeout per iteration (default: \$PROPAGATION_TIMEOUT_SEC=$TIMEOUT_SEC).
   --poll-interval-ms MS     Poll interval in ms (default: \$PROPAGATION_POLL_INTERVAL_MS=$POLL_INTERVAL_MS).
-  --settle-sec SEC          Settle gap between iterations after drain, and after a drain
-                            the drain check waited for (default:
-                            \$PROPAGATION_SETTLE_SEC=$SETTLE_SEC).
+  --settle-sec SEC          Settle after each drain, and after a drain the check waited for
+                            (default: \$PROPAGATION_SETTLE_SEC=$SETTLE_SEC).
   --output-dir DIR          Results directory (default: ${PROPAGATION_RESULTS_DIR}).
-  --tuning-baseline STR     Live tuning-baseline levers for the TSV preamble
-                            (default: unknown; the sweep queries + threads this).
-  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
-                            (default: unknown; the sweep queries + threads this).
+  --tuning-baseline STR     Tuning levers for the preamble (default: unknown; a sweep sets it).
+  --sidecar-egress-hosts STR  Root Sidecar egress hosts for the preamble (default: unknown;
+                            a sweep sets it).
   --tsv                     Also write per-iteration rows to a TSV file.
-  --dry-run                 Print the t0 label flip + drain commands and render the
-                            backer Deployment / canary Service without touching a
-                            cluster.
+  --dry-run                 Print the t0 label flip and drain commands and render the
+                            backer Deployment and canary Service; touch no cluster.
   -h, --help                Show this help.
 
-Phases (all timed from the same t0 label flip):
-  P1  source istiod: convergence-histogram delta _count >= connected proxies.
-      p1_conv_p50/p99 need >= 10 / >= 30 samples, else N/A.
-  P2  remote istiod: first pilot_xds_pushes{type="eds"} increase. p2_dirty=1 when
-      EDS bumped but P3 did not succeed on that remote (bump not attributable).
-  P3  remote watcher Envoy /clusters shows the canary endpoint healthy (polled at
-      most once per second).
+Environment (config/options.env describes each): SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE,
+the flags' PROPAGATION_* keys, PROPAGATION_DRAIN_TIMEOUT_SEC, PROPAGATION_METRICS_TIMEOUT,
+PROPAGATION_RESULTS_DIR (relative to the repo root), FANOUT_PF_BASE, FANOUT_CTX_STRIDE,
+FANOUT_MAX_SKEW_MS, ISTIOD_DIAG_*, TEST_PLATFORM, PLATFORM_READ_TIMEOUT,
+PLATFORM_READ_PARALLEL. Environment only: ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC.
 
-Row status: OK, TIMEOUT_P1/P2/P3/ALL, RESTART (istiod restarted mid-iteration),
-DRAIN_TIMEOUT (endpoint did not drain within PROPAGATION_DRAIN_TIMEOUT_SEC after
-the iteration: a flag, not a drop, since the values were measured before that
-drain; the summary counts those iterations), NOT_DRAINED (before t0, a canary
-endpoint from an earlier iteration or run was still healthy on that side's watcher
-after a PROPAGATION_DRAIN_TIMEOUT_SEC wait, was healthy again at the t0 check, or
-its /clusters could not be read, which is not waited for: its timings are not this
-iteration's), or SCRAPE_INCOMPLETE (a pod's /metrics was unreachable, or baseline
-scrape skew exceeded FANOUT_MAX_SKEW_MS). status is the row's verdict over both
-sides; p1_status is the source side's alone and remote_status the remote's alone
-(N/A on a row with no remote), each also RESTART_UNKNOWN when that istiod's
-restart status could not be read. Before each iteration's baseline the probe
-checks every side's watcher: a canary endpoint still there is waited for, then
-SETTLE_SEC, so its removal push lands before the baseline; after an iteration
-whose drain timed out it settles SETTLE_SEC even when the check reads clean. Each
-NOT_DRAINED warning names the iteration and says whether the endpoint was still
-healthy or the watcher's /clusters could not be read. The backer resolve, its
-Ready wait and the t0 check (one /clusters read per side) run before the baseline
-scrape, so nothing the probe runs sits between that scrape and t0. A run that ends
-between t0 and its drain (an error, a kill, SIGTERM) removes the t0 label on exit,
-so the canary endpoint does not stay up for the next run.
+Exit codes: 0 the iterations ran (or the plan shown); 1 an error.
 
-Summary (stdout and endpoint-<RUN_ID>.md): averages over the rows 005 counts, as valid
-samples/rows, with the other rows tallied by reason. P2 and P3 are left out only for the
-remote's side: its remote_status column (RESTART or RESTART_UNKNOWN for its istiod, a P2
-or P3 timeout, NOT_DRAINED for its sidecar, SCRAPE_INCOMPLETE for its scrape) or its
-remote_scrape_skew_ms over FANOUT_MAX_SKEW_MS; the source's restart, P1 timeout or +Inf
-overflow never drops them. P1 is one sample per iteration (/iterations), left out only
-for a source-side reason: its p1_status column (TIMEOUT_P1, RESTART or RESTART_UNKNOWN
-for the source istiod, NOT_DRAINED for the source sidecar, SCRAPE_INCOMPLETE for a
-source scrape that failed or skewed past FANOUT_MAX_SKEW_MS), or a P1 +Inf overflow; a
-remote that timed out or restarted never drops it. A DRAIN_TIMEOUT side counts, and the
-summary says how many iterations drained late. One definition decides for both:
-tests/lib/propagation.sh.
-
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): before any change, every member's
-  Istio version (its active IstioRevision's) is read; one unknown, members that differ, a
-  version other than ISTIO_VERSION, or a member still not ready stops the run, or under
-  warn is warned about and recorded. ISTIO_VERSION_READY_WAIT_SEC (60): how long the one
-  wait for members not ready may take.
-  SETUP_CONTEXTS, PROPAGATION_TEST_NAMESPACE, PROPAGATION_POLL_INTERVAL_MS,
-  PROPAGATION_TIMEOUT_SEC, PROPAGATION_ITERATIONS, PROPAGATION_SETTLE_SEC,
-  PROPAGATION_DRAIN_TIMEOUT_SEC (drain wait per iteration, default 20s),
-  PROPAGATION_METRICS_TIMEOUT (curl --max-time for /metrics, default 30s),
-  FANOUT_PF_BASE (istiod port-forward block base, default 21014),
-  FANOUT_CTX_STRIDE (ports per context, default 20),
-  FANOUT_MAX_SKEW_MS (baseline scrape-skew ceiling, default 1000),
-  PROPAGATION_RESULTS_DIR (--output-dir; relative to the repo root).
+See tests/propagation/README.md.
 EOF
 }
 

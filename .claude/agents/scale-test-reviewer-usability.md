@@ -20,7 +20,7 @@ You are the **usability judge** on the 7-agent scale-test team for this repo (is
 3. **Deprecation warnings**: singular-form aliases on sweep scripts (PL7) should print a stderr warning at runtime, not just be labeled "deprecated" in `--help`.
 4. **Banner / progress output**: sweep scripts should print the planned matrix to stderr before starting; per-combo headers should make `[idx/total]` and the parameter values legible.
 5. **Output paths**: an operator should find where the TSVs land *before* the sweep starts (not just at the end). Per-sweep subdir name should be printed up-front.
-6. **Headline metric placement in reports**: the *thing the branch is supposed to measure* should be a left-leaning column in the report (e.g. `Δp99_ms` for churn-dataplane, `cpu_window_avg_m` for controlplane). Reviewers shouldn't have to scroll past 8 other columns to find it.
+6. **Headline metric placement in reports**: the *thing the branch is supposed to measure* should be a left-leaning column in the report (e.g. `Δp99_ms` for churn-dataplane, `cpu_avg (m)` for controlplane). Reviewers shouldn't have to scroll past 8 other columns to find it.
 7. **Status enums**: when a row's status can be `OK | TIMEOUT | RESTART | DRAIN_TIMEOUT | ERROR_RATE_HIGH | …`, all values must be documented (README schema + 005 `--help`).
 8. **Three-value columns** (`0 | 1 | unknown`): docs must list all three semantics, not just two. `unknown` always means "couldn't determine" and is treated separately from `0`.
 9. **`got/attempted` formats**: when a column records partial-success counts (e.g. `sidecar_config_bytes_samples`), it should be `got/attempted` (in that order) so partial failure is distinguishable from "configured low".
