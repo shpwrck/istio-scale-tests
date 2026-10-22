@@ -235,14 +235,15 @@ its CR is Healthy and reconciled, no more than one revision is in use (two or mo
 istiod is rolled out with no pod terminating (Kubernetes reports those from 1.35 on); the members
 that are not are read again, together, every 5 s until they are, up to
 `ISTIO_VERSION_READY_WAIT_SEC` (60 s) in all, unless their first read leaves the version unknown
-(not read, or not exact). With `ISTIO_VERSION_CHECK=fail` (the default) a version not read (at
-once, with no wait for the others), members on different versions, a version other than the pin
-`ISTIO_VERSION` (keep it equal to `istioVersion` in `charts/spoke-ossm/values.yaml`) or a member
-still not ready stops the suite before it changes anything; `warn` goes on and records what the
-mesh runs: a sweep notes each finding in its outcome, while a probe run on its own and gateway-api
-(read-only, it only warns) print it on stderr only. A sweep reads every member again at its end:
-another version or active revision, or generations that moved (an edit of the Istio CR, or Sail
-rendering it again), is a problem; a member not ready or not read then, a note.
+(not read, or not exact). With `ISTIO_VERSION_CHECK=fail` (the default) a version unknown at the
+first read (at once, with no wait for the others) or at the end of the wait, members on different
+versions, a version other than the pin `ISTIO_VERSION` (keep it equal to `istioVersion` in
+`charts/spoke-ossm/values.yaml`) or a member still not ready stops the suite before it changes
+anything; `warn` goes on and records what the mesh runs: a sweep notes each finding in its outcome,
+while a probe run on its own and gateway-api (read-only, it only warns) print it on stderr only. A
+sweep reads every member again at its end: another version or active revision, or generations that
+moved (an edit of the Istio CR, or Sail rendering it again), is a problem; a member not ready or not
+read then, a note.
 
 ### The platform record
 

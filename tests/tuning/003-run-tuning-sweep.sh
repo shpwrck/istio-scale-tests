@@ -341,7 +341,7 @@ tuning_cleanup() {
 		GITOPS_PAUSED=0
 		if ! "${TUNING_DIR}/006-gitops-pause.sh" --resume --state-file "$PAUSE_STATE" >&2; then
 			echo "warn: Argo CD still paused; run: ./tests/tuning/006-gitops-pause.sh --resume --state-file ${PAUSE_STATE}" >&2
-			sweep_note "Argo CD auto-sync is still paused (its resume on exit failed): run 005-cleanup.sh --contexts <the sweep's members> --results-dir <this sweep dir>, which resumes the pause recorded there"
+			sweep_note "Argo CD auto-sync is still paused (its resume on exit failed): run 005-cleanup.sh with this sweep's members as --contexts and its dir as --results-dir, which resumes the pause recorded there"
 		fi
 	fi
 }

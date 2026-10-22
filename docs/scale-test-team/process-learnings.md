@@ -7,7 +7,7 @@ Each entry:
 - **Why** — what failure mode this prevents
 - **How to preempt** — the least code or structure that applies the lesson
 
-Code comments cite PL numbers, so a PL is never renumbered and its heading never deleted. A PL whose subject was removed, or that prescribed machinery the campaign does not need, is **retired**: its body is one line saying why, plus the one sentence that still holds, if any. Briefs never cite a retired PL. The 2026-10 editing pass (PR #110) retired PL55 to PL60, PL62 and PL63 and rewrote the PLs that prescribed the machinery it removed; PL64 is its lesson.
+Code comments cite PL numbers, so a PL is never renumbered and its heading never deleted. A PL whose subject was removed, or that prescribed machinery the campaign does not need, is **retired**: its body is one line saying why, plus the one sentence that still holds, if any. Briefs never cite a retired PL. The 2026-10 editing pass (PR #110) retired PL55 to PL60, PL62 and PL63 and rewrote the PLs that prescribed the machinery it removed; PL64 is its lesson, and its review added PL65 and PL66.
 
 ## Observation labels
 
@@ -508,3 +508,17 @@ Retired (2026-10 editing pass): capped, ranked member lists are not needed at th
 **How to preempt:** Name the wrong or mislabeled number a check prevents before writing it; prefer failing loudly (stop the run, or a problem in its outcome) over recording one more state; one rule, one test; when a check needs a check, delete the first one or make it simpler.
 
 (PL64 was added by the 2026-10 editing pass, PR #110, which retired PL55 to PL60, PL62 and PL63; reviews now apply the substantive rule in [README](README.md).)
+
+## PL65 — A wait polls the rule its check applies; a terminating pod has ended
+
+**Why:** The Istio version check waited with `kubectl wait --for=condition=Ready` on the Istio CR, which Sail sets while istiod's old pods are still terminating: the wait returned at once, the check that followed found the member not ready and stopped the run, which said it had waited 60 s. The platform record had the mirror fault: its image and env reads counted terminating pods, so the tail of a rollout read as a second image and a drift problem in the sweep's outcome.
+
+**How to preempt:** Re-read and re-apply the check's own rule until it holds or one deadline passes, never a condition of another object that seems to mean the same. A read of what a workload runs leaves out pods with a `deletionTimestamp`.
+
+## PL66 — A command a run prints for later works from the state its exit leaves
+
+**Why:** Tuning 003's `clean up with:` line began with `006-gitops-pause.sh --resume --state-file`, but the sweep's EXIT trap had already resumed Argo CD and deleted that record, so the first command of the pasted line exited 1.
+
+**How to preempt:** Print only commands that are safe to run after the trap ran (they find what is left, or nothing to do), and test the line against what a stopped sweep leaves.
+
+(PL65 and PL66 were added after rounds 1 and 2 of the editing pass's review.)

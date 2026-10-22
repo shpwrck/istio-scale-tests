@@ -140,6 +140,7 @@ recheck() {
 	V_a=v1.30.5 V_b=v1.30.5 run --separate-stderr resolve_kv a,b,c 0
 	assert_failure 1
 	[[ "$stderr" == *"c: the version it runs is unknown: the Istio CR could not be read (kubectl exit 1)"* ]]
+	[[ "$stderr" == *"b: not ready (Istio CR state is IstiodNotReady) with no wait (another member's version is unknown)"* ]]
 	[ ! -s "$SLOG" ]
 	: > "$KLOG"
 	state b IstiodNotReady

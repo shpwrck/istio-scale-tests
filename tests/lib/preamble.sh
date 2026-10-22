@@ -389,7 +389,8 @@ istio_version_resolve() {
 		done
 		ivr_again=(${ivr_still[@]+"${ivr_still[@]}"})
 	done
-	waited=$((SECONDS - t0))
+	waited="after waiting $((SECONDS - t0))s"
+	[[ "$policy" == warn || "$unread" == 0 ]] || waited="with no wait (another member's version is unknown)"
 	for i in "${!ivr_ctxs[@]}"; do
 		IFS='|' read -r v rev cg rg ready why <<<"${ivr_lines[i]:-}"
 		v="${v:-unknown}"
@@ -402,7 +403,7 @@ istio_version_resolve() {
 		if [[ "$v" == unknown ]]; then
 			ivr_bad+=("${ivr_ctxs[i]}: the version it runs is unknown: ${why:-not read}")
 		elif [[ "$ready" != yes ]]; then
-			ivr_bad+=("${ivr_ctxs[i]}: not ready (${why:-not read}) after waiting ${waited}s")
+			ivr_bad+=("${ivr_ctxs[i]}: not ready (${why:-not read}) ${waited}")
 		fi
 	done
 	[[ "$live" != */* ]] || live="mixed:${live}"
