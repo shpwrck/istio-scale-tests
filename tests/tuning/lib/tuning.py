@@ -57,19 +57,20 @@ import sys
 # applied profile gets a marker of MARKER_KIND (cmd_marker) named MARKER_PREFIX<profile> in
 # MARKER_NAMESPACE. Keep them in sync with tests/lib/platform.sh (PLATFORM_TUNING_LABEL,
 # PLATFORM_TUNING_RESOURCE_KINDS, PLATFORM_TUNING_MARKER_KIND and _OBJECT_KIND,
-# PLATFORM_TUNING_MARKER_NS and PLATFORM_TUNING_MARKER_PREFIX), which every suite's platform
-# record reads and 005-cleanup.sh deletes by; platform.bats checks.
+# PLATFORM_TUNING_MARKER_NS and PLATFORM_TUNING_MARKER_PREFIX), which platform_tuning_objects
+# lists (tuning 001 and 003 refuse to start on them, the other sweeps warn) and 005-cleanup.sh
+# deletes by; platform.bats checks.
 LABEL = "istio-scale-tests/tuning-profile"
 ALLOWED_KINDS = {"DestinationRule", "Sidecar", "Telemetry", "EnvoyFilter"}
 # The marker 001-apply-profile.sh puts on each member before it changes anything there, and
-# 002-revert-profile.sh deletes last: while it is there, every platform record names the profile
-# (even one that only sets istiod's env), and 005-cleanup.sh can restore that member's Istio CR
-# from it without the state dir of the run that applied it.
+# 002-revert-profile.sh deletes last: while it is there, platform_tuning_objects names the
+# profile (even one that only sets istiod's env), and 005-cleanup.sh can restore that member's
+# Istio CR from it without the state dir of the run that applied it.
 MARKER_KIND = "ConfigMap"
 MARKER_NAMESPACE = "istio-system"
 MARKER_PREFIX = "tuning-profile-"
-# A profile's name labels its objects and names its marker: a DNS label, none of the words a
-# platform record's TUNING_OBJECTS_BY_CONTEXT value uses for itself (tests/lib/platform.sh), and
+# A profile's name labels its objects and names its marker: a DNS label, none of the words
+# platform_tuning_objects' list or a record value uses for itself (tests/lib/platform.sh), and
 # not the name of tuning 003's pass without a profile.
 NAME_RE = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 RECORD_WORDS = ("none", "unknown", "mixed", "unlabelled")

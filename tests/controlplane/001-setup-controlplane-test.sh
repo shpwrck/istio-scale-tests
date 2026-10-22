@@ -812,7 +812,7 @@ fi
 if [[ -n "$LIFECYCLE_FILE" ]] && ! ((DRY_RUN)); then
 	# A new file (a standalone run; a sweep creates it first): its preamble needs the record.
 	[[ -f "$LIFECYCLE_FILE" ]] || platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
-	ns_lifecycle_init "$LIFECYCLE_FILE" "standalone-001"
+	ns_lifecycle_init "$LIFECYCLE_FILE" "standalone-001" "$(IFS=,; echo "${CONTEXTS[*]}")"
 fi
 
 # Use server-side apply so partial updates and field-manager ownership are

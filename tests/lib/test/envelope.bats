@@ -223,11 +223,10 @@ fake_cp_report() {
 cat <<'JSON'
 {"metadata":{"run_id":"r","istio_version":"v1.30.5","harness_sha":"abc","platform":"kubernetes","test_platform":"auto",
 "node_provider_by_context":"mesh-a=kind,mesh-b=kind",
-"mesh_operator_by_context":"mesh-a=sail-operator:1.31.1@${da}/Available,mesh-b=sail-operator:1.31.1@${da}/Available",
+"mesh_operator_by_context":"mesh-a=sail-operator:1.31.1@${da},mesh-b=sail-operator:1.31.1@${da}",
 "istiod_image_by_context":"mesh-a=pilot:1.30.5@${db},mesh-b=mixed:pilot:1.30.5@${db};pilot:1.30.6@${dc}",
 "proxy_image_by_context":"mesh-a=proxyv2:1.30.5@${dc},mesh-b=proxyv2:1.30.5@${dc}",
 "istiod_env_by_context":"mesh-a=0123456789ab,mesh-b=0123456789ab",
-"tuning_objects_by_context":"mesh-a=none,mesh-b=none",
 "capacity":{"node_alloc_cpu_m":"4000","node_alloc_mem_mi":"16093"},
 "achieved_scale":{"connected_proxies_max":"10","connected_proxies_cluster_max":"10","istiod_cpu_peak_pct_of_limit_max":"20","istiod_cpu_pct_of_limit_max":"10","istiod_mem_pct_of_limit_max":"30","istiod_rss_pct_of_limit_max":"30","node_cpu_pct_max":"28","node_mem_pct_max":"35"},
 "sla":{"verdict":"CAUTION","headline":"node figures left out: the nodes are kind's"},
@@ -242,7 +241,7 @@ SH
 	source "${ROOT}/tests/lib/platform.sh"
 	local d="${BATS_TEST_TMPDIR}/sweep-r" rep="${BATS_TEST_TMPDIR}/fake-report.sh" w1 w2 t1 v
 	mkdir -p "$d"
-	fake_cp_report "$rep" '["Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host'"'"'s CPU and memory","input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members: the report mixes runs on different istiod builds; compare like with like"]'
+	fake_cp_report "$rep" '["Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host'"'"'s CPU and memory","input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for 1 of 2 members: the report mixes runs with different values of it; compare like with like"]'
 	run --separate-stderr render_scale_envelope "$d" "$rep" "mesh-a,mesh-b" false
 	assert_success
 	assert_output --partial "> **Data warning:** Nodes on kind (NODE_PROVIDER_BY_CONTEXT): every node reports the whole host's CPU and memory"
@@ -253,7 +252,7 @@ SH
 	v="$(grep -n '^> \*\*CAUTION\*\*' <<<"$output" | cut -d: -f1)"
 	((w1 < w2 && w2 < t1 && t1 < v)) || { echo "warnings at ${w1} and ${w2}, topology at ${t1}, verdict at ${v}"; false; }
 	# H17: ", " between the groups, " and " between a mixed member's builds, "; " between fields.
-	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa/Available; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member), mixed: pilot:1.30.5@sha256:bbbbbbbbbbbb and pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc; istiod env 0123456789ab; tuning objects none |"
+	assert_output --partial "| Platform / mesh build | kubernetes (TEST_PLATFORM auto); nodes kind; operator sail-operator:1.31.1@sha256:aaaaaaaaaaaa; istiod pilot:1.30.5@sha256:bbbbbbbbbbbb (1 member), mixed: pilot:1.30.5@sha256:bbbbbbbbbbbb and pilot:1.30.6@sha256:cccccccccccc (1 member); gateway proxy proxyv2:1.30.5@sha256:cccccccccccc; istiod env 0123456789ab |"
 	# The envelope is pasted into campaign docs: no member names, no full digests.
 	refute_output --partial "mesh-a="
 	refute_output --partial "mesh-b="

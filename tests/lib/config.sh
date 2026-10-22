@@ -117,10 +117,11 @@ CONFIG_SHARED_ENV_ONLY="ISTIO_VERSION_CHECK ISTIO_VERSION_READY_ SWEEP_STOP_GRAC
 # shellcheck disable=SC2034
 CONFIG_MERGED_UNKNOWN_IF_MISSING="ISTIO_VERSION_SOURCE ISTIO_VERSION_PIN ISTIO_VERSION_BY_CONTEXT ISTIO_ACTIVE_REVISIONS ISTIO_GENERATIONS"
 # CONFIG_MERGED_DROPPED: keys of older TSVs that no run writes any more (the Istio version
-# check's proxy-version and readiness records); config_merged_preamble leaves them out, so
-# a pooled report never shows the older files' value as every input's.
+# check's proxy-version and readiness records, the platform record's tuning objects);
+# config_merged_preamble leaves them out, so a pooled report never shows the older files'
+# value as every input's.
 # shellcheck disable=SC2034
-CONFIG_MERGED_DROPPED="ISTIO_PROXY_VERSIONS ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC"
+CONFIG_MERGED_DROPPED="ISTIO_PROXY_VERSIONS ISTIO_NOTREADY_AT_START ISTIO_READY_WAITED_SEC TUNING_OBJECTS_BY_CONTEXT"
 
 # _config_key_matches <key> <entry>: the key is the entry, or starts with it when the
 # entry is a prefix (ends in _).

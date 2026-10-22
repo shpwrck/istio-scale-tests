@@ -503,7 +503,7 @@ declare -A REACH_STATUS=() REACH_PCT=()
 for rctx in "${ALL_CTXS[@]}"; do REACH_STATUS["$rctx"]=UNCHECKED; REACH_PCT["$rctx"]=N/A; done
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every target (${REACH_REQUESTS} requests each; details on stderr)..."
-	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
+	if reach_write_header "$REACH_TSV" --contexts "$(IFS=,; echo "${ALL_CTXS[*]}")" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
 		"SUITE=dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$RUN_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \

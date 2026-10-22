@@ -1013,12 +1013,9 @@ data_warnings_lines() {
 	local w
 	while IFS= read -r w; do printf '%s%s\n' "$1" "$w"; done <<<"$DATA_WARNINGS"
 }
-# The record's merge warnings (inputs that disagree, a build that changed during the sweep, a
-# value not read) and the drift file's findings (a lever, limit or replica count that changed):
-# every format's body gets them with member counts, since the scale envelope prints
-# data_warnings. platform_report_values printed the merge warnings on stderr with the members'
-# names; the drift file's findings name them only there (platform-drift.txt) and in the sweep's
-# log, so no output of this report does.
+# The record's merge warnings (inputs that disagree, a value not read in some of them): every
+# format's body gets them with member counts, since the scale envelope prints data_warnings.
+# platform_report_values printed them on stderr with the members' names.
 PLATFORM_WARNINGS="$(platform_report_warnings --no-members --with KUBE_VERSIONS "${TSV_FILES[@]}")"
 [[ -z "$PLATFORM_WARNINGS" ]] || DATA_WARNINGS+="${DATA_WARNINGS:+$'\n'}${PLATFORM_WARNINGS}"
 # STATUS_ROWS / STATUS_SUMMARY: their count and "SKIPPED_MEM_GUARD 4, GROW_FAILED 1"

@@ -1,8 +1,7 @@
 #!/usr/bin/env bats
-# Reports through their real entrypoints (PL33): propagation 005's n_attempted, the TSV
-# widths that it and tuning 004 list and warn about, tuning 004's P1 cell when every
-# iteration overflowed, and every sweep's and report's help naming each cause of a sweep's
-# exit 4.
+# Reports through their real entrypoints (PL33): propagation 005's n_attempted and the TSV
+# widths it lists and warns about, tuning 004's P1 cell when every iteration overflowed, and
+# every sweep's and report's help naming each cause of a sweep's exit 4.
 
 bats_require_minimum_version 1.5.0
 load test_helper
@@ -97,7 +96,7 @@ prow23() {
 	assert_line "3,P2_discovery,4,4,50,50,50,50,N/A,N/A,,"
 }
 
-@test "propagation 005 and tuning 004: inputs of different widths (19 and 23 columns) list them (tsv_columns) and warn in every format; one width warns nothing" {
+@test "propagation 005: inputs of different widths (19 and 23 columns) list them (tsv_columns) and warn in every format; one width warns nothing" {
 	source "${ROOT}/tests/lib/propagation.sh"
 	local i
 	{ echo "# RUN_ID=r1"; platform_fixture_lines ci-a,ci-b; echo "$PROP_TSV_HEADER"; for i in 1 2 3; do prow23 "$i" ci-b OK 0 0 OK 5 OK 5; done; } > "${RES}/endpoint-r1.tsv"
@@ -119,26 +118,7 @@ prow23() {
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --allow-multi-run --format charts
 	assert_output --partial "tsv_columns: [19, 23]"
 	assert_output --partial "${w}"
-	# tuning 004: the baseline pass written by an older harness (19), the profile by this one.
-	local P="${BATS_TEST_TMPDIR}/psweep"
-	mkdir -p "${P}/baseline" "${P}/01-x"
-	printf '# SUITE=propagation\n# PASSES=baseline,01-x\n' > "${P}/sweep-metadata.txt"
-	cp "${RES}/endpoint-r2.tsv" "${P}/baseline/"
-	cp "${RES}/endpoint-r1.tsv" "${P}/01-x/"
-	run --separate-stderr "$TUNING_CMP" --results-dir "$P" --format md
-	assert_success
-	assert_line "- TSV columns: baseline 19; 01-x 23"
-	assert_line --partial "- **Warning:** the passes' TSVs have different column counts (baseline 19; 01-x 23), so their rows are filtered by different rules"
-	[[ "$stderr" == *"WARNING: the passes' TSVs have different column counts"* ]]
-	run --separate-stderr "$TUNING_CMP" --results-dir "$P"
-	assert_line "TSV columns: baseline 19; 01-x 23"
-	assert_line --partial "WARNING: the passes' TSVs have different column counts"
-	# One width: listed once, no width warning (this bare sweep dir gets others: no drift
-	# files, no profile state or objects).
-	cp "${RES}/endpoint-r1.tsv" "${P}/baseline/endpoint-r2.tsv"
-	run --separate-stderr "$TUNING_CMP" --results-dir "$P" --format md
-	assert_line "- TSV columns: 23"
-	refute_output --partial "different column counts"
+	# One width: no width warning.
 	rm -f "${RES}/endpoint-r2.tsv"
 	run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format json
 	[ -z "$stderr" ]

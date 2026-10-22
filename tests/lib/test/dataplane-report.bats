@@ -401,10 +401,10 @@ tsv() {
 	assert_success
 	assert_line "# PLATFORM=kubernetes"
 	assert_line "# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=mixed:kind;aws"
-	[[ "$stderr" == *"input TSVs disagree on NODE_PROVIDER_BY_CONTEXT for ctx-b (kind;aws)"* ]]
+	[[ "$stderr" == *"input TSVs disagree on NODE_PROVIDER_BY_CONTEXT for ctx-b (kind or aws)"* ]]
 	for fmt in md charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
-		assert_line 'MESH_OPERATOR_BY_CONTEXT: "ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"'
+		assert_line 'MESH_OPERATOR_BY_CONTEXT: "ctx-a=sail-operator:1.31.1,ctx-b=sail-operator:1.31.1"'
 		assert_line 'NODE_PROVIDER_BY_CONTEXT: "ctx-a=kind,ctx-b=mixed:kind;aws"'
 	done
 	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format csv
@@ -413,7 +413,7 @@ tsv() {
 	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.TEST_PLATFORM) \(.NODE_PROVIDER_BY_CONTEXT)"' <<<"$output")" = "kubernetes auto ctx-a=kind,ctx-b=mixed:kind;aws" ]
 }
 
-@test "004: inputs from before the platform record read unknown with one warning; beside a current one, mixed" {
+@test "004: inputs from before the platform record read unknown, without a warning of their own; beside a current one, mixed, and that warns" {
 	NO_PLATFORM=1 tsv "${RES}/latency-old.tsv" "RUN_ID=r0" <<-EOF
 	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
 	EOF
@@ -421,7 +421,7 @@ tsv() {
 	assert_success
 	assert_line "# PLATFORM=unknown"
 	assert_line "# PROXY_IMAGE_BY_CONTEXT=unknown"
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	[[ "$stderr" != *PLATFORM* ]]
 	tsv "${RES}/latency-new.tsv" "RUN_ID=r1" <<-EOF
 	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
 	EOF
@@ -429,12 +429,12 @@ tsv() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format csv
 	assert_line "# PLATFORM=mixed:kubernetes,unknown"
 	assert_line "# PLATFORM_BY_CONTEXT=mixed:unknown,ctx-a=kubernetes,ctx-b=kubernetes"
-	[[ "$stderr" == *"1 of 2 input TSV(s) have no PLATFORM line"* ]]
-	# The legacy warning says why (in the body too, H10); a value never recorded is no
-	# disagreement and no failed read.
-	assert_line "# WARNING: 1 of 2 input TSV(s) have no PLATFORM line: they predate the platform record (the suites supported only OpenShift with OSSM then); their platform and builds read unknown"
+	# Unknown beside a value (in the body too, H10); a value never recorded is no disagreement
+	# and no member's failed read.
+	[[ "$stderr" == *"PLATFORM is unknown in 1 of 2 input TSV(s) (not read, or written before the record), while others have a value"* ]]
+	assert_line "# WARNING: PLATFORM_BY_CONTEXT is unknown in some input TSVs (not recorded in 1 of 2 (written before the record had it)), while others have a value: the report cannot tell whether those runs had the same one"
 	[[ "$stderr" != *"disagree"* ]]
-	[[ "$stderr" != *"could not be read"* ]]
+	[[ "$stderr" != *"not read for"* ]]
 }
 
 # --- 002: row status through the real probe, against a stub kubectl ---
@@ -604,8 +604,8 @@ _probe() {
 
 # --- 004: the platform record's warnings in the report's body (H10, H11, H2) ---
 
-@test "004 (H10, H11, H2): inputs that disagree, a build that changed during the sweep and kind nodes warn in every format's body" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+@test "004 (H10, H11): inputs that disagree and kind nodes warn in every format's body" {
+	# One sweep's dir (its steps' TSVs): one run, whatever their RUN_IDs.
 	RES="${BATS_TEST_TMPDIR}/sweep-h10"
 	mkdir -p "$RES"
 	tsv "${RES}/latency-a.tsv" "RUN_ID=r1" <<-EOF
@@ -617,19 +617,15 @@ _probe() {
 	NO_PLATFORM=1 tsv "${RES}/latency-b.tsv" "RUN_ID=r2" "${plat[@]}" <<-EOF
 	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
 	EOF
-	# The sweep's drift check (platform_drift_check) found ctx-b's gateways on another build.
-	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# PROXY_IMAGE_BY_CONTEXT=ctx-b=proxyv2:1.30.6' > "${RES}/platform-drift.txt"
-	local dis="input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for ctx-a (pilot:1.30.5;pilot:1.30.6), ctx-b (pilot:1.30.5;pilot:1.30.6): the report mixes runs on different istiod builds; compare like with like"
-	local drift="PROXY_IMAGE_BY_CONTEXT changed during the sweep (platform-drift.txt in sweep-h10): ctx-b from proxyv2:1.30.5 to proxyv2:1.30.6; the TSVs record the value at the sweep's start"
+	local dis="input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for ctx-a (pilot:1.30.5 or pilot:1.30.6), ctx-b (pilot:1.30.5 or pilot:1.30.6): the report mixes runs with different values of it; compare like with like"
 	local kind="Nodes on kind (NODE_PROVIDER_BY_CONTEXT): the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so remote latency and the remote-minus-local delta are not a cloud load balancer's"
 	local fmt top first
 	for fmt in markdown charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
 		assert_success
 		assert_output --partial "> **Warning:** ${dis}"
-		assert_output --partial "> **Warning:** ${drift}"
 		assert_output --partial "> **Warning:** ${kind}"
-		assert_line 'PROXY_IMAGE_BY_CONTEXT: "ctx-a=proxyv2:1.30.5,ctx-b=mixed:proxyv2:1.30.5;proxyv2:1.30.6"'
+		assert_line 'ISTIOD_IMAGE_BY_CONTEXT: "ctx-a=mixed:pilot:1.30.5;pilot:1.30.6,ctx-b=mixed:pilot:1.30.5;pilot:1.30.6"'
 		# Near the top: under the title, before the first section or chart.
 		top="$(grep -n '^> \*\*Warning:\*\* input TSVs disagree' <<<"$output" | cut -d: -f1)"
 		first="$(grep -n '^## \|^```mermaid' <<<"$output" | head -1 | cut -d: -f1)"
@@ -637,25 +633,22 @@ _probe() {
 	done
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_line "WARNING: ${dis}"
-	assert_output --partial "WARNING: ${drift}"
 	assert_output --partial "WARNING: ${kind}"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# WARNING: ${dis}"
-	assert_output --partial "# WARNING: ${drift}"
 	assert_output --partial "# WARNING: ${kind}"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
-	[ "$(jq '.warnings | length' <<<"$output")" = 3 ]
+	[ "$(jq '.warnings | length' <<<"$output")" = 2 ]
 	[ "$(jq -r '.warnings[0]' <<<"$output")" = "$dis" ]
-	[[ "$(jq -r '.warnings[1]' <<<"$output")" == "${drift}"* ]]
-	[[ "$(jq -r '.warnings[2]' <<<"$output")" == "${kind}"* ]]
+	[[ "$(jq -r '.warnings[1]' <<<"$output")" == "${kind}"* ]]
 	# stderr: each merge warning once (named members), and the kind one.
 	[ "$(grep -c 'disagree on ISTIOD_IMAGE_BY_CONTEXT' <<<"$stderr")" -eq 1 ]
 	[[ "$stderr" == *"WARNING: ${kind}"* ]]
 }
 
-@test "004 (H10, H11): cloud nodes and inputs that agree, an operator state aside, warn in no format" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+@test "004 (H10, H11): cloud nodes and inputs that agree warn in no format" {
+	# One sweep's dir (its steps' TSVs): one run, whatever their RUN_IDs.
 	RES="${BATS_TEST_TMPDIR}/sweep-h10"
 	mkdir -p "$RES"
 	local -a plat=()
@@ -664,8 +657,6 @@ _probe() {
 	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
 	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
 	EOF
-	# The operator only became Unavailable: the same build, not mixed.
-	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/=kind/=aws/g; s#/Available#/Unavailable#g')
 	NO_PLATFORM=1 tsv "${RES}/latency-b.tsv" "RUN_ID=r2" "${plat[@]}" <<-EOF
 	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
 	EOF
@@ -700,12 +691,4 @@ _probe() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
 	assert_output --partial "> **Warning:** ${w}"
 	refute_output --partial "Nodes on kind"
-}
-
-@test "004 (S-B2): a record of 500 members goes through every format; json lists them all" {
-	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500 ctx-a ctx-b)" tsv "${RES}/latency-a.tsv" "RUN_ID=r1" <<-EOF
-	$(row 2 ctx-a ctx-a 10 10 OK 1 0 local)
-	$(row 2 ctx-a ctx-b 10 10 OK 1 0 remote)
-	EOF
-	wide_record_report "$REPORT" "$RES" text csv json markdown charts
 }

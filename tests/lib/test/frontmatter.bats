@@ -164,9 +164,8 @@ if d["n"] != 12:
 	[ "$(jq -r .suite <<<"$got")" = propagation ]
 	[ "$(jq -r .passes <<<"$got")" = "baseline,01-x" ]
 	[ "$(jq -r .harness_sha <<<"$got")" = abc1234 ]
-	# The merged generations (the sweep start has none: unknown) and the TSV width.
+	# The merged generations (the sweep start has none: unknown).
 	[ "$(jq -r .istio_generations <<<"$got")" = "mixed:unknown | ci-a=2/2,ci-b=2/2" ]
-	[ "$(jq -r .tsv_columns <<<"$got")" = 19 ]
 	for k in istio_version istio_active_revisions istio_generations; do
 		[ "$(jq -r --arg k "$k" 'has($k)' <<<"$got")" = true ] || { echo "no ${k}"; false; }
 	done

@@ -284,35 +284,32 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   from different Istio versions or harnesses print a `WARNING` (every format, and stderr for the
   formats other than text) and read `mixed:<a>,<b>`; different Istio versions also turn a `PASS`
   verdict into `CAUTION`.
-- **Platform record:** the preamble also carries `PLATFORM`, `TEST_PLATFORM` and, per member,
-  the platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west)
-  builds, istiod's settings, the nodes' provider and any tuning profile objects
-  (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
-  `PROXY_IMAGE_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`, `NODE_PROVIDER_BY_CONTEXT`,
-  `TUNING_OBJECTS_BY_CONTEXT`; [`tests/lib/platform.sh`](../lib/platform.sh)), read before the
-  first window (a sweep reads it once and hands it to its combos in `platform-record.txt` in the
-  sweep dir, and reads it again after its last combo: a build, istiod setting, limit or replica
-  count, tuning lever, tuning profile object or Kubernetes version that changed in between is in
-  `platform-drift.txt` there, as is what that read could not compare; `002 --phase final` reuses
-  the baseline phase's). An image carries the digest its pods run; `@unknown` when none has started
-  (an operator scaled to 0, a Pending replica), which every comparison takes as not read (a
-  warning), never as another build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT`
-  is a 12-hex digest of istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
-  `spec.values.pilot.env` or a hand edit changes it. `TUNING_OBJECTS_BY_CONTEXT` names the objects a
-  tuning profile created and its marker ConfigMap (labelled `istio-scale-tests/tuning-profile`),
-  `none` outside a tuning run. The growth mode's `ns-lifecycle-<RUN_ID>.tsv` and
-  `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates the
-  lifecycle file). `004` prints it in every format, with a warning in the report itself (members
-  counted, not named; `metadata.data_warnings` in JSON) when its inputs differ, a value could not be
-  read in some of them, the sweep's record changed or a tuning profile's objects were in place (an
-  operator that differs only in its state is not a difference). On kind nodes it also warns that the
-  capacity figures overstate the headroom, and the SLA verdict leaves the node figures out: it is
-  `CAUTION` with that reason even when istiod's figures pass. A member whose node provider was not
-  read does the same (`node provider not read on N member(s)`): it may be on kind. k3d (`k3s://`)
-  and minikube clusters that share one host are not detected, so their node figures are the host's
-  too. The scale envelope prints every data warning above its tables and a `Platform / mesh build`
-  row. A file without the record predates it (the suite supported only OpenShift with OSSM then);
-  its values read `unknown`.
+- **Platform record:** the preamble also carries `PLATFORM`, `TEST_PLATFORM` and, per member, the
+  platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
+  istiod's settings and the nodes' provider (`PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
+  `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`,
+  `NODE_PROVIDER_BY_CONTEXT`; [`tests/lib/platform.sh`](../lib/platform.sh)), read before the first
+  window (a sweep reads it once and hands it to its combos in `platform-record.txt` in the sweep
+  dir, and reads it again after its last combo: a value that changed in between is a problem of the
+  sweep's outcome, which `004` prints, and a member it cannot read again a note there; a standalone
+  `002` reads it in each phase). An image carries the digest its pods run; `@unknown` when none has
+  started (an operator scaled to 0, a Pending replica), which every comparison takes as not read,
+  never as another build; `none` when the member has no such pod. `ISTIOD_ENV_BY_CONTEXT` is a
+  12-hex digest of istiod's discovery container env without `CLUSTER_ID`: a tuning profile's
+  `spec.values.pilot.env` or a hand edit changes it. The sweep warns as it starts, and notes it in
+  its outcome, when a member holds a tuning profile's objects (labelled
+  `istio-scale-tests/tuning-profile`) or marker ConfigMap. The growth mode's
+  `ns-lifecycle-<RUN_ID>.tsv` and `mem-guard-<RUN_ID>.tsv` carry the record too (a standalone `001`
+  or `005` reads it when it creates the lifecycle file). `004` prints it in every format, with a
+  warning in the report itself (members counted, not named; `metadata.data_warnings` in JSON) when
+  its inputs differ or a value could not be read in some of them. On kind nodes it also warns that
+  the capacity figures overstate the headroom, and the SLA verdict leaves the node figures out: it
+  is `CAUTION` with that reason even when istiod's figures pass. A member whose node provider was
+  not read does the same (`node provider not read on N member(s)`): it may be on kind. k3d
+  (`k3s://`) and minikube clusters that share one host are not detected, so their node figures are
+  the host's too. The scale envelope prints every data warning above its tables and a
+  `Platform / mesh build` row. A file without the record predates it (the suite supported only
+  OpenShift with OSSM then); its values read `unknown`.
 - **Tuning levers:** `TUNING_BASELINE` reads the four levers live on the first member:
   `sidecar` (the root Sidecar `default` in `istio-system`), `discoverySelectors` (on the Istio CR
   `default`), `telemetryFiltering` and `accessLogFiltering` (the Telemetry resources

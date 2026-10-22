@@ -110,7 +110,7 @@ two_pairs() {
 	[ "$(jq '[.rows[] | to_entries[] | select(.key != "churn_convergence_p99_worst") | .value | strings] | length' <<<"$output")" = 0 ]
 }
 
-@test "005: the platform record reaches every format; an input from before it reads unknown, with a warning (PL19)" {
+@test "005: the platform record reaches every format; an input from before it reads unknown, without a warning of its own (PL19)" {
 	two_pairs
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_success
@@ -120,7 +120,7 @@ two_pairs() {
 	[[ "$stderr" == "WARNING: Nodes on kind (NODE_PROVIDER_BY_CONTEXT): the cross-cluster path runs through cloud-provider-kind's userspace Envoy"* ]]
 	[ "$(grep -c . <<<"$stderr")" -eq 1 ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
-	assert_line "# MESH_OPERATOR_BY_CONTEXT=ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"
+	assert_line "# MESH_OPERATOR_BY_CONTEXT=ctx-a=sail-operator:1.31.1,ctx-b=sail-operator:1.31.1"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
 	assert_line '| ISTIOD_IMAGE_BY_CONTEXT | `ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5` |'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
@@ -130,13 +130,13 @@ two_pairs() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -r '.metadata | "\(.platform) \(.mesh_operator_by_context)"' <<<"$output")" = "unknown unknown" ]
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	[[ "$stderr" != *PLATFORM* ]]
 }
 
 # --- the platform record's warnings in the report's body (H10, H11) ---
 
 @test "005 (H10, H11): inputs that disagree and kind nodes warn in every format's body; cloud nodes that agree warn in none" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+	# One sweep's dir (its steps' TSVs): one run, whatever their RUN_IDs.
 	RES="${BATS_TEST_TMPDIR}/sweep-h10"
 	mkdir -p "$RES"
 	two_pairs
@@ -148,7 +148,7 @@ two_pairs() {
 		crow c9 0 baseline 50 2 5 OK N/A N/A
 		crow c9 1 churn 48 4 9 OK 30 99
 	} > "${RES}/churn-dataplane-r2.tsv"
-	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for ctx-b (sail-operator:1.31.1/Available;sail-operator:1.31.2/Available): the report mixes runs on different mesh operator builds; compare like with like"
+	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for ctx-b (sail-operator:1.31.1 or sail-operator:1.31.2): the report mixes runs with different values of it; compare like with like"
 	local kind="Nodes on kind (NODE_PROVIDER_BY_CONTEXT): the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so at mesh sizes above 1"
 	local fmt top first
 	for fmt in md charts; do
@@ -175,10 +175,10 @@ two_pairs() {
 	[[ "$(jq -r '.warnings[1]' <<<"$output")" == "${kind}"* ]]
 	[[ "$stderr" == *"warning: ${dis}"* ]]
 	[[ "$stderr" == *"WARNING: ${kind}"* ]]
-	# Cloud nodes, one build (an operator state aside): no warning in any format.
+	# Cloud nodes, one build: no warning in any format.
 	local t
 	for t in r1 r2; do
-		sed 's/=kind/=aws/g; s#ctx-b=sail-operator:1.31.2/Available#ctx-b=sail-operator:1.31.1/Unavailable#' \
+		sed 's/=kind/=aws/g; s#ctx-b=sail-operator:1.31.2#ctx-b=sail-operator:1.31.1#' \
 			"${RES}/churn-dataplane-${t}.tsv" > "${RES}/${t}.tmp"
 		mv "${RES}/${t}.tmp" "${RES}/churn-dataplane-${t}.tsv"
 	done
@@ -194,11 +194,6 @@ two_pairs() {
 	refute_output --partial "WARNING:"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	refute_output --partial "WARNING:"
-}
-
-@test "005 (S-B2): a record of 500 members goes through every format; json lists them all" {
-	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500 ctx-a ctx-b)" two_pairs
-	wide_record_report "$REPORT" "$RES" text csv json md charts
 }
 
 @test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a varying key reads mixed (PL26)" {

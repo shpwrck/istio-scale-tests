@@ -255,7 +255,7 @@ fi
 if [[ -n "$LIFECYCLE_FILE" ]]; then
 	# A new file (a standalone run; a sweep creates it first): its preamble needs the record.
 	[[ -f "$LIFECYCLE_FILE" ]] || platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
-	ns_lifecycle_init "$LIFECYCLE_FILE" "standalone-005"
+	ns_lifecycle_init "$LIFECYCLE_FILE" "standalone-005" "$(IFS=,; echo "${CONTEXTS[*]}")"
 fi
 
 # count_lines <text>: non-empty lines.

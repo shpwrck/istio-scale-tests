@@ -234,7 +234,8 @@ Exit codes:
      reason), or the Istio version or active revision changed during the sweep (read
      again at its end), or the generation of a member's Istio CR or active
      IstioRevision moved at the same version (an edit of the Istio CR, or Sail rendering
-     it again), or the harness (a file under tests/, config/, charts/ or terraform/)
+     it again), or a member's platform record (a build, istiod's env: read again at
+     its end), or the harness (a file under tests/, config/, charts/ or terraform/)
      changed during the sweep (HARNESS_SHA read at its start and its end), or the cells
      could not be counted (TOTAL=unknown). A cell counts once, by its last row: a
      status row fails it, with that reason; a measurement does not. M covers every cell of
@@ -298,7 +299,8 @@ Environment:
   CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
   (default 2): warn when a cluster's connected proxies and its Running sidecar pods
   differ by more than max(tolerance %, min diff); recorded in the TSV preamble.
-$(platform_help_lines all)
+  TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and
+  PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the platform record's reads (config/options.env).
   SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
   before SIGKILL. Environment only (config/options.env).
 
@@ -1476,14 +1478,14 @@ if ((! DRY_RUN)); then
 	config_snapshot "$OUTPUT_DIR" "$RUN_ID"
 	if ((GROWTH)); then
 		# Namespace-lifecycle timings (001/005 append) and the memory guard's decisions.
-		ns_lifecycle_init "$LIFECYCLE_FILE" "$RUN_ID"
+		ns_lifecycle_init "$LIFECYCLE_FILE" "$RUN_ID" "$(IFS=,; echo "${CONTEXTS[*]}")"
 		mapfile -t _iv_kv < <(istio_version_kv)
 		write_preamble "Memory stop guard (controlplane growth mode)" "$GUARD_FILE" \
 			"RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" "${_iv_kv[@]}" \
 			"MEM_STOP_PCT=${MEM_STOP_PCT}" "MEM_GUARD_CONTEXTS=$(IFS=,; echo "${GUARD_CONTEXTS[*]}")" \
 			"GUARD_SCHEMA=2" "GW_MODEL=intercept ${GW_MI_INTERCEPT} Mi; eastwestgateway ${EWGW_MI_PER_1000} Mi per 1000 Services x ${EWGW_BURST}; ingressgateway ${INGW_MI_PER_1000} Mi per 1000 Services x ${INGW_BURST}" \
 			"NOTE=rel_projected = base + (current - base) x ratio^power from the series start (ratio 1: the first step and changes that add no Services); abs_projected (gateways) = (intercept + Mi per 1000 Services x services_after / 1000) x burst factor, plus the non-heap part of a working-set reading (ws - Envoy physical heap); services_after = the context's istiod pilot_services + the Services the step adds; projected = the larger, compared with stop_pct % of limit_mi. metric: rss = istiod process_resident_memory_bytes (max over replicas, per-replica limit); ws = the gateway container's working set (kubectl top), else physical = Envoy server.memory_physical_size, else allocated = server.memory_allocated (istio-proxy limit). verdict stale_base: a gateway's Envoy allocated memory exceeded 1.5 x the model + 100 Mi at the series start (memory kept from an earlier series)."
-		{ config_preamble_lines; platform_preamble_lines "$(platform_probed_contexts)"; } >> "$GUARD_FILE"
+		{ config_preamble_lines; platform_preamble_lines "$(IFS=,; echo "${CONTEXTS[*]}")"; } >> "$GUARD_FILE"
 		printf 'timestamp\tseries\tcell\tcontext\tcomponent\tmetric\tcurrent_mi\tbase_mi\tratio\tpower\trel_projected_mi\tservices_after\tabs_projected_mi\tprojected_mi\tlimit_mi\tstop_pct\tverdict\n' >> "$GUARD_FILE"
 	fi
 fi
@@ -2335,8 +2337,9 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete. $combo_idx combinations enumerated; no clusters touched." >&2
 	exit 0
 fi
-# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
-platform_drift_check "$OUTPUT_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
+# The platform record again: a build or istiod setting that changed during the sweep is a
+# problem of its outcome (tests/lib/platform.sh).
+platform_drift_check "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 if [[ -n "$SWEEP_STOPPED" ]]; then

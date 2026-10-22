@@ -87,15 +87,14 @@ fixture() {
 	[ "$(jq -c '.rows[0] | [.mesh_size, .n_total, .n_valid, .avg_ms, .worst_bucket]' <<<"$output")" = '[2,1,0,null,null]' ]
 }
 
-@test "005: the platform record reaches every format; an input from before it reads unknown, with a warning (PL19)" {
+@test "005: the platform record reaches every format; an input from before it reads unknown, without a warning of its own (PL19)" {
 	fixture
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_success
 	assert_line "  PLATFORM: kubernetes"
 	assert_line "  NODE_PROVIDER_BY_CONTEXT: src=kind,rmt=kind"
-	[[ "$stderr" != *"no PLATFORM line"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format markdown
-	assert_line 'MESH_OPERATOR_BY_CONTEXT: "src=sail-operator:1.31.1/Available,rmt=sail-operator:1.31.1/Available"'
+	assert_line 'MESH_OPERATOR_BY_CONTEXT: "src=sail-operator:1.31.1,rmt=sail-operator:1.31.1"'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.5,rmt=pilot:1.30.5"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
@@ -105,20 +104,10 @@ fixture() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -r '.metadata | "\(.PLATFORM) \(.MESH_OPERATOR_BY_CONTEXT)"' <<<"$output")" = "unknown unknown" ]
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	[[ "$stderr" != *PLATFORM* ]]
 }
 
-@test "005 (S-B2): a record of 500 members goes through every format; json lists them all" {
-	{
-		echo "# RUN_ID=r1"
-		platform_fixture_lines "$(wide_ctxs 500 src rmt)"
-		echo "$HDR"
-		prow 2 1 1000 100
-	} > "${RES}/endpoint-r1.tsv"
-	wide_record_report "$REPORT" "$RES" text csv json markdown charts
-}
-
-# --- 005: the platform record's warnings in the report's body (H10, H2) ---
+# --- 005: the platform record's warnings in the report's body (H10) ---
 
 # second_sweep <sed>: endpoint-r2.tsv, a mesh=4 row, with the record edited by <sed>.
 second_sweep() {
@@ -130,29 +119,27 @@ second_sweep() {
 	} > "${RES}/endpoint-r2.tsv"
 }
 
-@test "005 (H10, H2): inputs that disagree and a build that changed during the sweep warn in every format's body" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+@test "005 (H10): inputs that disagree warn in every format's body" {
+	# One sweep's dir (its steps' TSVs): one run, whatever their RUN_IDs.
 	RES="${BATS_TEST_TMPDIR}/sweep-h10"
 	mkdir -p "$RES"
 	fixture
-	second_sweep 's/rmt=sail-operator:1.31.1/rmt=sail-operator:1.31.2/'
-	# The sweep's drift check (platform_drift_check) found istiod on src on another build.
-	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_IMAGE_BY_CONTEXT=src=pilot:1.30.6' > "${RES}/platform-drift.txt"
-	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for rmt (sail-operator:1.31.1/Available;sail-operator:1.31.2/Available): the report mixes runs on different mesh operator builds; compare like with like"
-	local drift="ISTIOD_IMAGE_BY_CONTEXT changed during the sweep (platform-drift.txt in sweep-h10): src from pilot:1.30.5 to pilot:1.30.6; the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade; for publishable figures, run the sweep again on one build"
+	second_sweep 's/rmt=sail-operator:1.31.1/rmt=sail-operator:1.31.2/; s/src=pilot:1.30.5/src=pilot:1.30.6/'
+	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for rmt (sail-operator:1.31.1 or sail-operator:1.31.2): the report mixes runs with different values of it; compare like with like"
+	local img="input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for src (pilot:1.30.5 or pilot:1.30.6): the report mixes runs with different values of it; compare like with like"
 	local fmt w top first
 	run --separate-stderr "$REPORT" --results-dir "$RES"
 	assert_success
 	assert_line "WARNING: ${dis}"
-	assert_line "WARNING: ${drift}"
+	assert_line "WARNING: ${img}"
 	assert_line "  ISTIOD_IMAGE_BY_CONTEXT: src=mixed:pilot:1.30.5;pilot:1.30.6,rmt=pilot:1.30.5"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# WARNING: ${dis}"
-	assert_line "# WARNING: ${drift}"
+	assert_line "# WARNING: ${img}"
 	for fmt in markdown charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
 		assert_success
-		for w in "$dis" "$drift"; do assert_line "> **Warning:** ${w}"; done
+		for w in "$dis" "$img"; do assert_line "> **Warning:** ${w}"; done
 		# Under the title, before the file list, the first section and the first chart.
 		top="$(grep -n '^> \*\*Warning:\*\*' <<<"$output" | tail -1 | cut -d: -f1)"
 		first="$(awk 'seen && /^(\| |## |```mermaid|> [^*]|\*\*Source files)/ { print NR; exit } /^# / { seen = 1 }' <<<"$output")"
@@ -160,16 +147,16 @@ second_sweep() {
 	done
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
-	[ "$(jq -c '.warnings' <<<"$output")" = "$(jq -nc --arg a "$dis" --arg b "$drift" '[$a, $b]')" ]
+	[ "$(jq -c '.warnings' <<<"$output")" = "$(jq -nc --arg a "$dis" --arg b "$img" '[$a, $b]')" ]
 	[ "$(grep -c '^warning: ' <<<"$stderr")" -eq 2 ]
 }
 
-@test "005 (H10): inputs that agree, an operator state aside, warn in no format" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+@test "005 (H10): inputs that agree warn in no format" {
+	# One sweep's dir (its steps' TSVs): one run, whatever their RUN_IDs.
 	RES="${BATS_TEST_TMPDIR}/sweep-h10"
 	mkdir -p "$RES"
 	fixture
-	second_sweep 's#/Available#/Unavailable#g'
+	second_sweep ''
 	local fmt
 	for fmt in text csv markdown charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
@@ -182,7 +169,7 @@ second_sweep() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -c '.warnings' <<<"$output")" = '[]' ]
-	[ "$(jq -r '.metadata.MESH_OPERATOR_BY_CONTEXT' <<<"$output")" = "src=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable,rmt=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable" ]
+	[ "$(jq -r '.metadata.MESH_OPERATOR_BY_CONTEXT' <<<"$output")" = "src=sail-operator:1.31.1,rmt=sail-operator:1.31.1" ]
 	[ -z "$stderr" ]
 }
 

@@ -243,9 +243,9 @@ results will go, and:
    - the builds that ran: istiod's `discovery` image (`ISTIOD_IMAGE`), the ingress `istio-proxy`
      image (`INGRESS_PROXY_IMAGE`), each as the image's last path component plus the digest that
      ran (the registry host and path are dropped; several are `+`-joined), and the operator build
-     (`OSSM_OPERATOR`, shown as "Operator build": on OpenShift the OSSM CSV, such as
-     `servicemeshoperator3:3.4.3/Succeeded`; on Kubernetes the Sail operator's image tag, the digest
-     its pod runs and its state, such as `sail-operator:1.31.1@sha256:<digest>/Available`; read on
+     (`OSSM_OPERATOR`, shown as "Operator build": on OpenShift the OSSM CSV's version, such as
+     `servicemeshoperator3:3.4.3`; on Kubernetes the Sail operator's image tag and the digest its
+     pod runs, such as `sail-operator:1.31.1@sha256:<digest>`, without a readiness state; read on
      the platform the member serves, on `TEST_PLATFORM`'s only when the member could not be asked;
      `absent` only when that read of the served platform's operator answers with none; `unknown`,
      with a warning, when the read fails, or when the member could not be asked and the read where
@@ -263,9 +263,8 @@ results will go, and:
      `TEST_PLATFORM` and, per member, `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`,
      `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways'
      `istio-proxy` build), `NODE_PROVIDER_BY_CONTEXT` (the nodes' providerID scheme: `kind`,
-     `aws`, ...), `ISTIOD_ENV_BY_CONTEXT` (a digest of istiod's discovery container env
-     without `CLUSTER_ID`: its settings) and `TUNING_OBJECTS_BY_CONTEXT` (a tuning profile's
-     objects, `none` outside a tuning run). An image carries the digest its pods run (`@unknown`
+     `aws`, ...) and `ISTIOD_ENV_BY_CONTEXT` (a digest of istiod's discovery container env
+     without `CLUSTER_ID`: its settings). An image carries the digest its pods run (`@unknown`
      when none has started: not read, never another build); `none` means no such pod.
      `PLATFORM_BY_CONTEXT` is what each member serves (`security.openshift.io/v1` on
      OpenShift), asked of the member whatever `TEST_PLATFORM` says (`unknown` when it cannot be
@@ -455,10 +454,11 @@ repeats every TSV preamble line.
 reply slower than it is `000`, `GATE_PASSES`, `SETTLE_SEC`, `REPROBE_DELAY_SEC`) have comparable
 verdicts and answers; their codes and timings (`DATAPLANE_READY_SEC`, `WAIT_SEC`) will differ.
 `OSSM_OPERATOR` changed format after the 2026-10-14 runs: it was `<version>/<phase>`, several
-`|`-joined; it is now `servicemeshoperator3:<version>/<phase>` on OpenShift or
-`sail-operator:<tag>@<digest>/<state>` on Kubernetes, several `+`-joined. To compare with a
-2026-10-14 TSV, compare its version with the part after `servicemeshoperator3:`. The state after
-the last `/` (`Available`, `Unavailable`, a CSV phase) is not part of the build.
+`|`-joined; it is now `servicemeshoperator3:<version>` on OpenShift or
+`sail-operator:<tag>@<digest>` on Kubernetes, several `+`-joined. To compare with a 2026-10-14
+TSV, compare its version with the part after `servicemeshoperator3:`. Some later TSVs end each
+value in a readiness state (`/Available`, `/Unavailable`, a CSV phase), which is not part of the
+build: compare the part before the last `/`.
 
 TSV (`GWAPI_SCHEMA=5`; 21 tab-separated columns), one row per member × scenario: `run_id
 ingress_ctx role scenario kind host route backend expected_status observed_status expected_code

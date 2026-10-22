@@ -226,7 +226,7 @@ prow21() {
 	} > "${BATS_TEST_TMPDIR}/legacy.tsv"
 	mkdir -p "${BATS_TEST_TMPDIR}/legacy"
 	mv "${BATS_TEST_TMPDIR}/legacy.tsv" "${BATS_TEST_TMPDIR}/legacy/endpoint-r2.tsv"
-	# (It predates the platform record too: a warning on stderr.)
+	# (It predates the platform record too: its keys read unknown.)
 	run --separate-stderr "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "${BATS_TEST_TMPDIR}/legacy" --format json
 	[ "$(jq -c '[.rows[] | select(.phase == "P1_local_wall") | [.n_total, .n_valid]]' <<<"$output")" = '[[2,1]]' ]
 }

@@ -4,8 +4,8 @@
 # each profile (apply -> settle -> probe -> revert), writes sweep-comparison.md,
 # runs the suite's cleanup and resumes Argo CD. It refuses to start while a member
 # holds a tuning profile's objects or marker (a profile left applied). Each pass reads
-# its own platform record before its probes and again after them, so a profile undone
-# or istiod's settings put back during the pass show in its comparison.
+# its own platform record before its probes and again after them: a build or istiod
+# setting that changed during the pass is a problem of the sweep's outcome.
 #
 # Usage:
 #   ./tests/tuning/003-run-tuning-sweep.sh --suite SUITE --gitops-context CTX [options]
@@ -25,8 +25,6 @@ trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 source "${ROOT}/tests/lib/preamble.sh"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/reach.sh"  # reach_sanitize (platform_probe: masked addresses)
-# shellcheck disable=SC1091
-source "${ROOT}/tests/lib/capacity.sh"  # cap_istiod_limits (platform_drift_check: istiod's limits)
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/platform.sh"  # platform_validate (TEST_PLATFORM), platform_tuning_objects_refuse, each pass's record
 # shellcheck disable=SC1091
@@ -96,7 +94,8 @@ Environment:
   pass still asks every member what it serves.
   SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
   before SIGKILL. Environment only (config/options.env).
-$(platform_help_lines reads)
+  PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the
+  platform record's reads (config/options.env).
 
 Exit codes:
   0  every pass (baseline and each profile) ran its probe
@@ -111,11 +110,14 @@ Exit codes:
      non-zero, PROBE_FAILED; stderr ends with "N of M passes failed" by reason), or the
      mesh changed under it (each an "error:" line on stderr):
        - the Istio version or active revision changed during the sweep (read again at
-         its end; the generations are not compared there, since the profiles' apply and
-         revert raise them);
+         its end; the generations only when no profile was applied, since a profile's
+         apply and revert raise them);
        - the Istio CR changed during a pass, after its profile's apply settled and not
          by that profile (002-revert-profile.sh compares the generations before its
-         revert);
+         revert), or during the baseline pass (its generations read before its first
+         probe and after its last);
+       - a member's platform record (a build, istiod's env) changed during a pass (read
+         again after its probes);
        - the harness (a file under tests/, config/, charts/ or terraform/) changed
          during the sweep (HARNESS_SHA read at its start and its end);
        - a member's Istio CR spec after the last revert differs from the sweep's start
@@ -305,9 +307,11 @@ if ((DRY_RUN)); then
 		fi
 		echo "sleep ${SETTLE_SEC}"
 		show "# read the platform record of every member into ${SWEEP_DIR}/${p}/platform-record.txt, and the tuning levers on ${SOURCE_CTX}"
+		[[ "$p" != baseline ]] || echo "# read the Istio CR generations of every member"
 		n=1
 		while probe_argv "$n" "$p" "${SWEEP_DIR}/${p}"; do show "${PROBE_ARGV[@]}"; n=$((n + 1)); done
-		show "# read it again; what changed during the pass, and what it could not compare, goes to ${SWEEP_DIR}/${p}/platform-drift.txt"
+		show "# read the platform record again: a value that changed during the pass is a problem of the outcome"
+		[[ "$p" != baseline ]] || echo "# read the generations again: a move during the pass is a problem of the outcome"
 		if [[ "$p" != baseline ]]; then
 			show "${TUNING_DIR}/002-revert-profile.sh" --state-dir "${SWEEP_DIR}/${p}/state" \
 				--rollout-timeout "$ROLLOUT_TIMEOUT"
@@ -430,7 +434,7 @@ fi
 
 # Run one pass's probe(s) into its result directory.
 run_pass() {
-	local label="$1" dir="${SWEEP_DIR}/$1" n=1 rc
+	local label="$1" dir="${SWEEP_DIR}/$1" n=1 rc gens="" moved
 	mkdir -p "$dir"
 	if [[ "$SUITE" == churn-dataplane ]]; then
 		# A churn phase leaves churn-target replicas mixed; start each pass from base.
@@ -442,12 +446,9 @@ run_pass() {
 	fi
 	echo "--- Settle ${SETTLE_SEC}s ---"
 	sleep "$SETTLE_SEC"
-	# This pass's own platform record (a profile changes istiod's env and its objects), read once
-	# for its probes, which reuse it (platform-record.txt in the pass dir), and its tuning levers,
-	# which its TSVs record; both read again after the probes: a profile undone, istiod's
-	# settings put back, a lever, an istiod limit or a Kubernetes version changed during the pass
-	# go to its platform-drift.txt, which 004 reads for the pass.
-	platform_probe_reset
+	# This pass's own platform record (a profile changes istiod's env), read once for its probes,
+	# which reuse it (platform-record.txt in the pass dir), and read again after them
+	# (platform_drift_check); and its tuning levers, which its TSVs record.
 	platform_probe "$CONTEXTS_CSV"
 	platform_probe_share "$dir"
 	while IFS= read -r kv; do
@@ -456,6 +457,9 @@ run_pass() {
 		SIDECAR_EGRESS_HOSTS=*) SIDECAR_EGRESS_HOSTS="${kv#*=}" ;;
 		esac
 	done < <(tuning_baseline_state "$SOURCE_CTX" "${KUBECTL[@]}")
+	# The baseline has no apply and revert to bracket it (001 and 002 do for a profile pass): its
+	# generations before its first probe and after its last.
+	[[ "$label" != baseline ]] || gens="$(istio_generations_read "$CONTEXTS_CSV" "${KUBECTL[@]}")"
 	while probe_argv "$n" "$label" "$dir"; do
 		echo "--- Probe: $(show "${PROBE_ARGV[@]}")"
 		rc=0
@@ -469,10 +473,17 @@ run_pass() {
 		fi
 		n=$((n + 1))
 	done
-	platform_drift_check "$dir" "$CONTEXTS_CSV" pass
+	if [[ "$label" == baseline ]]; then
+		moved="$(istio_generations_diff "$gens" "$(istio_generations_read "$CONTEXTS_CSV" "${KUBECTL[@]}")")"
+		[[ -z "$moved" ]] || sweep_problem "pass baseline: the Istio CR changed during the pass: ${moved}; its probes may have measured another configuration"
+	fi
+	platform_drift_check "$CONTEXTS_CSV" "${label} pass"
 }
 
 ABORTED=0 ABORT_REASON=""
+# An apply that got as far as its state (active-profile) may have patched the Istio CR, and its
+# revert does: the end's read then cannot compare the generations.
+patched=0
 step=0
 for p in "${PASSES[@]}"; do
 	step=$((step + 1))
@@ -502,6 +513,7 @@ for p in "${PASSES[@]}"; do
 		run_pass "$p"
 	fi
 	if [[ -f "${state_dir}/active-profile" ]]; then
+		patched=1
 		revert_ok=1
 		sweep_step "${TUNING_DIR}/002-revert-profile.sh" --state-dir "$state_dir" --rollout-timeout "$ROLLOUT_TIMEOUT" || revert_ok=0
 		# 002 found an edit of the Istio CR by something else during the pass.
@@ -520,8 +532,13 @@ done
 
 echo ""
 # The Istio version and active revision again, after the last pass and its revert, before
-# the comparison (read-only; not the generations, which each apply and revert raise).
-istio_version_recheck --no-generations "${KUBECTL[@]}"
+# the comparison (read-only); the generations too when no profile was applied (every apply
+# stopped before its first change), since then nothing of the sweep's raised them.
+if ((patched)); then
+	istio_version_recheck --no-generations "${KUBECTL[@]}"
+else
+	istio_version_recheck "${KUBECTL[@]}"
+fi
 # An incomplete revert, or an edit by something else that no revert undid (they restore
 # only the profiles' keys): a member's Istio CR spec now, against the start's.
 if ((has_profile)); then

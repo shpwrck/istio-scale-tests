@@ -240,7 +240,7 @@ mkdir -p "$OUTPUT_DIR"
 
 # Preflight every context: require >= 1 Running istiod pod (all pods are scraped
 # via tests/lib/fanout.sh). Each member's count goes into the preamble, as
-# ISTIOD_REPLICAS=<ctx>=<n>,... (as propagation records it; a sweep reads it again at its end).
+# ISTIOD_REPLICAS=<ctx>=<n>,... (as propagation records it).
 echo "Preflighting istiod replicas..."
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
 echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"

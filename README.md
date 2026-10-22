@@ -245,41 +245,34 @@ the shared host, so the dataplane and churn-dataplane reports flag their remote 
 | `PLATFORM` | `kubernetes` or `openshift` over the members; `mixed` when they run both, else `unknown` when any member is |
 | `TEST_PLATFORM` | The override as set: `auto`, `kubernetes` or `openshift` |
 | `PLATFORM_BY_CONTEXT` | What each member serves, asked even with an override |
-| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>@<digest>/<state>` (Kubernetes) or `servicemeshoperator3:<version>/<phase>` (OpenShift). The state (`Available`, `Unavailable`: no available replica, or a CSV phase) is never compared, only the build before it (`@unknown` as below). `absent`: the member answered and runs none where the charts install it |
+| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>@<digest>` (Kubernetes: the digest its pods run; `@unknown` as below) or `servicemeshoperator3:<version>` (OpenShift: its CSV). `absent`: the member answered and runs none where the charts install it. Older TSVs end in a readiness state (`/Available`, a CSV phase), so a report that pools them with newer ones warns that the key differs |
 | `ISTIOD_IMAGE_BY_CONTEXT` | The istiod pods' `discovery` image and the digest that ran; `<image>@unknown`: none of them has started (below); `none`: no istiod pod on that member |
 | `PROXY_IMAGE_BY_CONTEXT` | The `istio-proxy` image of the ingress and east-west gateway pods; `@unknown` and `none` as for istiod. The test pods' sidecars get the injector's current build (normally istiod's), which can be newer than a gateway not restarted since an upgrade |
-| `ISTIOD_ENV_BY_CONTEXT` | A 12-hex digest of istiod's `discovery` container env (each `name=value`, or `name=` and its `valueFrom`, sorted) without `CLUSTER_ID`, the one variable that differs by member. It changes when a tuning profile's `spec.values.pilot.env` or a hand edit changes istiod's settings (tuning 004 leaves it out of its pass comparison: a profile changes it on purpose). `none` and `unknown` as for the images |
+| `ISTIOD_ENV_BY_CONTEXT` | A 12-hex digest of istiod's `discovery` container env (each `name=value`, or `name=` and its `valueFrom`, sorted) without `CLUSTER_ID`, the one variable that differs by member. It changes when a tuning profile's `spec.values.pilot.env` or a hand edit changes istiod's settings (tuning 004 shows it per pass in its `istiod env` row: a profile changes it on purpose). `none` and `unknown` as for the images |
 | `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...); `none`: nodes without one; `no-nodes`: no nodes listed; `unrecognized`: a providerID without `<scheme>://`. Nodes without one beside a provider's (`aws+none`: a control-plane node, a virtual node) compare as that provider's |
-| `TUNING_OBJECTS_BY_CONTEXT` | The objects a tuning profile created, labelled `istio-scale-tests/tuning-profile` (DestinationRules, Sidecars, EnvoyFilters and Telemetries in any namespace), and the marker ConfigMap `istio-system/tuning-profile-<profile>` that `tests/tuning/001-apply-profile.sh` puts on each member it applies a profile to (so a profile that only sets istiod's env shows too), as `<profile>:<Kind>/<namespace>/<name>`; `none` outside a tuning run. A member that has some was left with a profile applied (a tuning run killed before its revert; `tests/tuning/005-cleanup.sh` restores the Istio CR from each marker and deletes the objects): every sweep warns as it starts and every report in its body, since profile 04's root DestinationRule changes every proxy's clusters, and a tuning run refuses to start. Tuning 004 leaves the key out of its pass comparison and checks instead that each pass held every object of its own profile on every member and no other profile's (its "Tuning objects" row) |
 
 In every key `unknown` means not read (a failed read, with a warning; a `--dry-run`; a file from
 before the record), never none, and several values on one member are `+`-joined. An image whose
 pods have not started (Pending, still pulling, evicted; an operator scaled to 0) is not another
 build: the record takes the pods that report a digest, and when none does it records the spec image
 as `<name>:<tag>@unknown` (its pinned digest when the spec image has one), which every comparison
-takes as not read (a warning), never as a different build. A report whose
-inputs disagree for a member shows `mixed:<a>;<b>` there and says so in its body
-(`mixed:unknown,...` when only some inputs carry the key, with a warning that counts the inputs
-from before the key). A sweep reads the record once at its start and hands it to its steps in
-`platform-record.txt` in the sweep dir (each step still reads a member it recorded `unknown`).
-It reads the record again at its end, with each member's
-Kubernetes version and its first member's tuning levers, Sidecar egress hosts and istiod limits
-when its TSVs record them (`TUNING_BASELINE`: four levers, each `on`, `off` or `unknown`, as
-"Tuning levers" in [tests/controlplane/README.md](tests/controlplane/README.md) describes), and
-every other member's istiod limits against the recorded ones (the controlplane report divides
-every member's window-peak CPU and RSS % by those), and each member's istiod replica count against
-the recorded one (controlplane: its Deployment's replicas; propagation, churn and churn-dataplane:
-its Running istiod pods, churn-dataplane's on its source member only): a value that changed goes to
-`platform-drift.txt` in the sweep dir, and every report of the sweep says so in its body, naming
-the sweep dir and the value at the start and at the end (the record's keys read `mixed:`, as does
-`KUBE_VERSIONS` in churn's report, which merges it); so does a value the read could not compare
-(not read at either end, or a digest `@unknown`), which the reports call not known. Members that
-changed the same way share one warning, which names five of them and counts the rest. A record read
-is bounded by `PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many
-nodes), and `PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile
-objects, the Kubernetes versions, istiod's replica counts, and istiod's limits and replica counts
-read again at a run's end (20; lower it when the machine running the suite runs short of memory or
-processes on a large mesh).
+takes as not read, never as a different build. A report whose inputs disagree for a member shows
+`mixed:<a>;<b>` there and warns in its body, naming the members and their values; a value unknown
+in some inputs beside a read one is one more warning (`mixed:unknown,...` when only some inputs
+carry the key). A sweep reads the record once at its start and hands it to its steps in
+`platform-record.txt` in the sweep dir (a step reads only the members that file lacks), and reads
+it again after its last step: a value that changed is a problem of the sweep's outcome
+(`sweep-outcome.txt`, exit 4, printed by every report of the sweep) naming the key, the member and
+both values, since the sweep's rows are then not all from one build; a member it cannot read again
+is a note there. A tuning profile's objects (labelled `istio-scale-tests/tuning-profile`) and its
+marker ConfigMap `istio-system/tuning-profile-<profile>` are not in the record: tuning 001 and 003
+refuse to start while a member holds any (run `tests/tuning/005-cleanup.sh`), and the other sweeps
+warn as they start and note it in their outcome, since a profile changes what they measure (profile
+04's root DestinationRule changes every proxy's clusters). A record read is bounded by
+`PLATFORM_READ_TIMEOUT` (`config/options.env`, 20s; raise it for members with many nodes), and
+`PLATFORM_READ_PARALLEL` members are read at once for the record, the tuning profile objects and the
+Kubernetes and Istio versions (20; lower it when the machine running the suite runs short of memory
+or processes on a large mesh).
 
 ### Run config (`--config FILE`)
 

@@ -71,8 +71,11 @@ value. 002 reads them again before its revert: a move means something else edite
 during the pass (Argo CD not paused, another operator, an OSSM operator upgrade), so 002 warns,
 writes `istio-edited-during-pass` in `state/`, and the sweep makes it a problem naming the pass
 (a re-run of 002 after a revert that stopped partway, `revert-started` in `state/`, skips the
-check with a note). After the last revert the sweep reads each member's Istio version and active
-revision again (a change is a problem), and compares its Istio CR `spec` with the sweep's start:
+check with a note). The baseline pass has no apply and revert to bracket it: the sweep reads the
+generations before its first probe and after its last, and a move is a problem naming the pass.
+After the last revert the sweep reads each member's Istio version and active revision again (a
+change is a problem), and the generations too when no profile was applied (every apply stopped
+before its first change), and compares its Istio CR `spec` with the sweep's start:
 a difference (an incomplete revert, or an edit no revert undid, since they restore only the
 profiles' keys) is a problem naming the differing paths, with both specs in `istio-spec/`.
 
@@ -81,8 +84,9 @@ another live run that holds the sweep dir's `.sweep.lock`; a failed suite setup,
 revert, or an unexpected error); `4` it finished, reverted every profile and wrote
 `sweep-comparison.md`, but some passes failed (`SETUP_FAILED`: the profile did not apply;
 `PROBE_FAILED`: the probe exited non-zero, including a reachability stop), or the mesh changed
-under it: the Istio version or active revision changed during the sweep, the Istio CR changed
-during a pass (above), or the last revert left the Istio CR's spec unlike the start; or its
+under it: the Istio version or active revision changed during the sweep, the Istio CR or a
+member's platform record changed during a pass (above and below), or the last revert left the
+Istio CR's spec unlike the start; or its
 harness (`HARNESS_SHA`) changed during the sweep (read at its start and its end). Each is an
 `error:` line on stderr; the failed passes' line says how many, by reason. `sweep-outcome.txt` keeps the outcome
 (`STATUS=running` until the sweep ends, then `finished`, `stopped` or `interrupted`), and
@@ -101,178 +105,86 @@ tests/tuning/results/sweep-<RUN_ID>/
 ├── sweep-comparison.md      # means of valid rows with n and range (histogram p99s: worst bucket); % change vs baseline
 ├── gitops-pause.json        # only while the sweep holds Argo CD paused, or after it was killed
 ├── istio-spec/              # each member's Istio CR spec at the start and after the last revert (start-<ctx>.json, end-<ctx>.json)
-├── baseline/                # suite TSV + .md, probe-output.log, platform-record.txt, platform-drift.txt
-└── 01-push-throttling/      # same, plus state/ (patch.json, objects, the revert data and istio-generations-applied)
+├── baseline/                # suite TSV + .md, probe-output.log, platform-record.txt
+└── 01-push-throttling/      # same, plus state/ (patch.json, the revert data and istio-generations-applied)
 ```
 
-004 reads each pass's TSVs, its `platform-drift.txt` (what the read after its probe found
-changed during the pass and could not compare) and, for a profile pass, `state/patch.json` and
-`state/objects` (what 001 patched and applied): keep them when you archive a sweep. Without the
-drift file 004 warns that the pass was not read again at its end; without the state it cannot
-see what the profile sets, and checks the profile against its marker alone, with a warning that
-its istiod settings were not checked. `platform-record.txt` hands the record read before a
-pass's probe to the probe; `gitops-pause.json` is what 005 resumes a pause from (see "After a
-killed run").
+004 reads each pass's TSVs, `sweep-metadata.txt` and `sweep-outcome.txt`: keep them when you
+archive a sweep. `platform-record.txt` hands the record read before a pass's probe to the probe;
+`gitops-pause.json` is what 005 resumes a pause from (see "After a killed run").
 
-`SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the
-table's `Pass status` row (`ok` otherwise), and so does `no data`: a pass without TSVs (one the
-metadata lists without its directory, or whose probe wrote none). Data-plane rows are split by
-target class (local or remote) and QPS; a row that missed its target QPS (`QPS_SHORTFALL`) is
-not valid, and the data-plane servers run `DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by
-default). Histogram p99 rows (convergence, push time) are never averaged: they show the worst
-bucket range a valid row hit, or `overflow (N rows)` when N rows had their p99 in the +Inf
-bucket; propagation's P1 convergence counts iterations instead, `overflow (N iterations)`: N
-iterations put a sample in the +Inf bucket (counted, although propagation 005 leaves them out of
-its means). The `P1 local push` cell adds `(N overflowed)` for the iterations its mean leaves
-out for that overflow (`- (N overflowed)` when every one did); P1 is left out of an iteration
-only for a source-side reason, as in 005 (a remote that timed out or restarted keeps it). Units:
-memory in Mi, CPU in millicores (the controlplane's `istiod CPU peak (m)` and `istiod memory
-peak (Mi)` are window peaks), the sidecar config in KiB. Under each metric, `n (got/attempted)`
-counts the valid samples with a value over what the pass's probe was configured to take, where
-its TSV records it (propagation: iterations for P1 and its convergence, iterations x remotes for
-P2 and P3; churn: iterations), else over every row the pass wrote (failed and timed-out rows
-included); `range` gives its min to max. "TSV columns" gives the data rows' column count, per
-pass when the passes differ, with a warning: their rows were written by different harness
-versions. It reads `none (no pass wrote a TSV)` when no pass wrote one, and `none (no pass's TSV
-has a data row)` when none has a row. The `Istio CR / IstioRevision generations` row gives each
-pass's `ISTIO_GENERATIONS` from its own TSVs: a profile's apply and revert raise them, so each
-pass ran on its own (`2/2 (every member)` when every member has one value; `mixed:...` when the
-pass's TSVs disagree, `unknown` for a TSV without the key, `-` for a pass without a TSV). The
-"Harness (HARNESS_SHA)" row gives each pass's `HARNESS_SHA` from its own TSVs: passes on
-different harnesses get a WARNING (a profile's change may come from the harness). A propagation
-comparison counts a `DRAIN_TIMEOUT` side, as 005 does (measured before that drain), and adds a
-"Drain timeouts (iterations, counted)" row when a pass has one. The markdown starts with a YAML
-frontmatter of these keys (`suite`, `run_id`, `contexts`, `passes`, the `istio_*` keys,
-`harness_sha`, `tsv_columns`). A profile whose n differs from the baseline's shows `(baseline n ...)` and the
-page warns: its mean comes from other iterations, so a profile that timed out on the slow ones
-can look faster than it is. Re-render:
+`SETUP_FAILED`, `PROBE_FAILED` or `REVERT_FAILED` in a pass directory shows in the table's
+`Pass status` row (`ok` otherwise), and so does `no data`: a pass without TSVs (one the metadata
+lists without its directory, or whose probe wrote none). Data-plane rows are split by target class
+(local or remote) and QPS; a row that missed its target QPS (`QPS_SHORTFALL`) is not valid, and the
+data-plane servers run `DATAPLANE_SERVER_REPLICAS` pods per cluster (2 by default). Histogram p99
+rows (convergence, push time) are never averaged: they show the worst bucket range a valid row hit,
+or `overflow (N rows)` when N rows had their p99 in the +Inf bucket; propagation's P1 convergence
+counts iterations instead, `overflow (N iterations)`: N iterations put a sample in the +Inf bucket
+(counted, although propagation 005 leaves them out of its means). The `P1 local push` cell adds
+`(N overflowed)` for the iterations its mean leaves out for that overflow (`- (N overflowed)` when
+every one did); P1 is left out of an iteration only for a source-side reason, as in 005 (a remote
+that timed out or restarted keeps it). Units: memory in Mi, CPU in millicores (the controlplane's
+`istiod CPU peak (m)` and `istiod memory peak (Mi)` are window peaks), the sidecar config in KiB.
+Under each metric, `n (got/attempted)` counts the valid samples with a value over what the pass's
+probe was configured to take, where its TSV records it (propagation: iterations for P1 and its
+convergence, iterations x remotes for P2 and P3; churn: iterations), else over every row the pass
+wrote (failed and timed-out rows included); `range` gives its min to max. The header gives the
+sweep's `HARNESS_SHA`; a "Harness (HARNESS_SHA)" row, each pass's from its own TSVs, shows only when
+one differs from it, and passes on different harnesses get a WARNING (a profile's change may come
+from the harness). The header also gives each member's active revision and Istio CR generations over
+the sweep's start and its passes (a profile's apply and revert raise them). A propagation comparison
+counts a `DRAIN_TIMEOUT` side, as 005 does (measured before that drain), and adds a "Drain timeouts
+(iterations, counted)" row when a pass has one. The markdown starts with a YAML frontmatter of these
+keys (`suite`, `run_id`, `contexts`, `passes`, the `istio_*` keys, `harness_sha`, and `settle_sec`
+and `churn_rate` when the sweep recorded them). A profile whose n differs from the baseline's shows
+`(baseline n ...)` and the page warns: its mean comes from other iterations, so a profile that timed
+out on the slow ones can look faster than it is. Re-render:
 `./tests/tuning/004-compare-profiles.sh --results-dir <sweep-dir> --format md`.
 
 Each pass reads the platform record live before its probe
 ([`tests/lib/platform.sh`](../lib/platform.sh): the platform, the mesh operator, istiod and
-gateway proxy builds, the nodes' provider, istiod's settings, the tuning profile objects), and
-its tuning levers and root Sidecar egress hosts on the source member; the probe's TSVs carry
-them, with each member's Kubernetes version, for the controlplane suite istiod's limits, and
-istiod's replica counts at the probe's start as the suite records them (controlplane: each
-member's Deployment replicas; propagation and churn: each member's Running istiod pods;
-churn-dataplane: the source member's; dataplane: none). `platform-record.txt` in the pass
-directory hands the record over. The pass reads them again after the probe, always, and writes
-what that read found to the pass's `platform-drift.txt`: what changed in between (a profile
-reverted by hand, an Argo CD sync that put istiod's settings back, a lever, an istiod limit, a
-member's istiod replica count, a control-plane upgrade), the other members' istiod limits where
-they differ from the source member's, and what it could not compare (a value not read at either
-end, or an image whose digest is `@unknown`: no pod had started). Nothing records the other
-members' limits at a pass's start, so theirs are their limits at its end: a change there during
-a pass reads as a difference from that pass on, not as a change during it, and one undone before
-the pass ends is not seen. That read compares each member's istiod replica count with the one its
-TSVs record, counted as they count it (controlplane: the Deployment's replicas; the others:
-Running istiod pods): a pass whose profile turns autoscaling on is said to have its HPA move them,
-and when they read the same at its end on every member, it has a note that the HPA may have raised
-and lowered them in between (`same (see notes)` when nothing else differs), which says where a
-row shows what it ran with: in a controlplane pass, each cell's own count of istiod pods,
-`istiod_pods_avg` in `tests/controlplane/004-report-results.sh --results-dir <pass dir> --format
-csv`; in the other suites, a row whose window saw istiod's pods change counts it as an istiod
-restart. Where its TSVs do not record each member's count (churn-dataplane's remotes, every member
-in dataplane), such a pass reads `unknown (see notes)` and warns that whether its HPA held the
-count all through the pass is not known. A controlplane window whose Running istiod pods changed
-also writes its `cluster_connected_proxies` as `N/A`.
+gateway proxy builds, the nodes' provider, istiod's settings), and its tuning levers and root
+Sidecar egress hosts on the source member; the probe's TSVs carry them, with each member's
+Kubernetes version and, as its suite records them, istiod's limits (controlplane) and replica
+counts (controlplane: each member's Deployment replicas; propagation and churn: each member's
+Running istiod pods; churn-dataplane: the source member's; dataplane: none). `platform-record.txt`
+in the pass directory hands the record over. After the probe the pass reads the record again: a
+value that changed during the pass (a profile reverted by hand, an Argo CD sync that put istiod's
+settings back, a control-plane upgrade) is a problem of the sweep's outcome naming the pass, the
+key, the member and both values, and a member it cannot read again is a note there.
 
-The table's `Platform record` row compares each pass's record and the values its TSVs record
-outside it with the baseline's (without a baseline, the first pass with data's, which reads
-`reference`; the baseline reads `baseline`): member by member for the builds, the Kubernetes
-versions, istiod's limits and replica counts, lever by lever for the levers. Those values are
-`TUNING_BASELINE` (each lever `on` or `off`), `SIDECAR_EGRESS_HOSTS` (the root Sidecar's),
-`ISTIOD_CPU_LIMIT_M_BY_CONTEXT` (millicores), `ISTIOD_MEM_LIMIT_MI_BY_CONTEXT` (Mi) and
-`ISTIOD_REPLICAS_BY_CONTEXT`. A pass reads:
-
-- `same`;
-- `same (see notes)`: only what its profile sets differs (a lever or the egress hosts whose
-  object its `state/objects` lists: a root Sidecar of its own, a `tuning-metrics` or
-  `tuning-access-log` Telemetry; or `discoverySelectors`, a limit or the replica count its
-  `state/patch.json` sets; without a baseline, also what the reference pass's profile sets), or
-  it ran one of the values the reference pass ran more than one of (one that changed during that
-  pass, or that its TSVs disagree on), or its profile turns autoscaling on and the read at its
-  end found each member's replica count it started with; the notes say which;
-- `differs (see notes)`;
-- `not in effect (see notes)`: a member did not run a limit or the replica count that its
-  `state/patch.json` sets to one value (not rolled out there; a limit or a count that changed
-  during the pass, a count its TSVs disagree on or an HPA set, or a Terminating pod still
-  counted as Running after a short `--settle`: the suites other than controlplane count
-  Running istiod pods; a patch that turns autoscaling on is not checked against its
-  `replicaCount`);
-- `changed (see notes)`: the read after its probe found a build, a Kubernetes version, a tuning
-  lever, an istiod limit or a member's istiod replica count changed during the pass;
-- `mixed (see notes)`: its TSVs disagree;
-- `unknown (see notes)`: a value not read or not recorded in one of them (a digest `@unknown`, a
-  member's version `unreachable`, a lever `unknown`), a limit or replica count its profile sets
-  that its TSVs do not record on a member, a replica count its profile's HPA sets (autoscaling
-  on) where its TSVs do not record each member's count (churn-dataplane's remotes, dataplane), or
-  not compared at the pass's end (a value the read after its probe could not compare, or no
-  `platform-drift.txt`: that read did not run);
-- `-`: no data.
-
-The baseline pass reads `baseline (see notes)` (a reference pass `reference (see notes)`) when its
-own values changed during it, its TSVs disagree, it was not compared at its end or (a reference
-pass) its profile's value was not in effect or is not known to be, and its warning says that no
-profile's change against it is the profile's alone, or, when it was not compared at its end, that
-none is known to be. A reference pass whose one note is its profile's HPA (the counts it started
-with held to its end on every member) reads `reference (see notes)` and does not warn, as
-`same (see notes)` does not. A member that changed during a pass, or whose TSVs disagree, matches
-the other side when one of its values is that side's (the pass's own warning covers the change), so
-a pass on a version the baseline ended with reads `same (see notes)`, its notes naming that
-version, and one on a version the baseline never ran there still `differs`: an upgrade rolling
-through the members shows in each pass it reaches. A mesh operator that differs only in its state
-(`Available`, `Unavailable`) is the same build.
+The table's `Platform record` row compares each pass with the baseline (without a baseline, the
+first pass with data, which reads `reference`; the baseline reads `baseline`), each side merged
+over its TSVs: on every record key but istiod's settings, and on `KUBE_VERSIONS`,
+`TUNING_BASELINE` (each lever `on` or `off`), `SIDECAR_EGRESS_HOSTS` (the root Sidecar's) and
+istiod's limits (`ISTIOD_LIM_CPU_M`, `ISTIOD_LIM_MEM_MI`) and replica counts
+(`ISTIOD_REPLICAS_BY_CONTEXT`, `ISTIOD_REPLICAS`) where its suite records them. A pass reads
+`same`; `differs (see warnings)` when a key differs, with a warning that names the pass and the
+key and gives both values (each with its member count, digests shortened, a long value cut), since
+its change against the baseline is then not the profile's alone; `unknown (see notes)` when a key
+was not read or not recorded on one side (a digest `@unknown`, a member's version `unreachable`, a
+lever `unknown`, a TSV from before the key), so whether it differs is not known; `-` without data.
+A member whose TSVs disagree (`mixed:<a>;<b>`) matches the other side when that side ran the same
+values. The profiles in `profiles/` set only istiod's env and root-namespace resources, so a lever
+or replica count that differs was changed by something else. The header gives the reference
+pass's record in one line.
 
 Only the controlplane suite's TSVs record istiod's limits, and the dataplane suite's record no
-replica count, so those sweeps compare none of them, and a pass whose profile sets one reads
-`unknown (see notes)` and warns that whether it was in effect is not known; so does one whose
-profile sets the replica count in a churn-dataplane sweep, which records the source member's
-only, for every other member. Nothing else shows a CPU limit that changes: istiod's
-Deployment sets `GOMAXPROCS` from `limits.cpu` by reference (`valueFrom`, so the env digest does
-not change with it), and `GOMAXPROCS` sets the defaults of `PILOT_PUSH_THROTTLE` (which profile
-01 tunes) and `PILOT_MAX_REQUESTS_PER_SECOND`, each min(15 + 5 × `GOMAXPROCS`, 100); keep
-istiod's resources fixed during such a sweep. No pass records the rest of the Istio CR either
-(`meshConfig` but `discoverySelectors`, `global.proxy`), which istiod reloads without a restart:
-keep it fixed during a sweep, but for what the profiles change.
+replica count, so those sweeps compare none of them. Nothing else shows a CPU limit that changes:
+istiod's Deployment sets `GOMAXPROCS` from `limits.cpu` by reference (`valueFrom`, so the env
+digest does not change with it), and `GOMAXPROCS` sets the defaults of `PILOT_PUSH_THROTTLE`
+(which profile 01 tunes) and `PILOT_MAX_REQUESTS_PER_SECOND`, each min(15 + 5 × `GOMAXPROCS`,
+100); keep istiod's resources fixed during such a sweep. No pass records the rest of the Istio CR
+either (`meshConfig` but `discoverySelectors`, `global.proxy`), which istiod reloads without a
+restart: keep it fixed during a sweep, but for what the profiles change.
 
-The row leaves out istiod's settings (`ISTIOD_ENV_BY_CONTEXT`) and the profile's objects
-(`TUNING_OBJECTS_BY_CONTEXT`), which a profile changes on purpose (`spec.values.pilot.env`, the
-objects labelled `istio-scale-tests/tuning-profile`); two rows of their own show them, and both
-read `-` for a pass without data. `istiod env` is each pass's digest of istiod's settings, so you
-can see that a profile reached istiod and match a re-run's pass to this one's. With a warning, it
-reads `by member (see notes)` when the pass's members ran different settings, `mixed (see notes)`
-when its TSVs or the read after its probe disagree (the settings changed during the pass),
-`unknown (see notes)` when no member's settings could be read, and the digest with `(see notes)`
-when a member's could not be read (not known, never other settings), when a member's istiod pods
-ran different settings at once (their digests `+`-joined: a rollout caught midway, a pod stuck
-Terminating or a second istiod Deployment), or when it contradicts the profile: the baseline's
-digest, on a member or one of its pods, though the profile sets `spec.values.pilot.env` (the
-pass's `state/patch.json`), or another though it does not patch the Istio CR (a profile that
-changes other Istio CR values only is not checked, since some of them reach istiod's env too).
-A pass whose `state/patch.json` is gone warns that this was not checked. `Tuning objects` reads
-`none` (no profile's objects or marker, as in the baseline), `own` (every object of the pass's
-own profile on every member, its marker and its resources as `state/objects` lists them, and no
-other), `other (see notes)` (another profile's, or any in the baseline: a profile left applied),
-`missing (see notes)` (one of its own is not on a member: the profile was undone during the pass
-or never applied there, or the TSVs predate the markers) or `unknown (see notes)` (not read);
-all but `none` and `own` warn that the pass did not measure what its name says.
-
-The record follows the table once, digests shortened to 12 hex digits (a value its members do not
-share by value, five named, as is one that names fewer members than the record: churn-dataplane's
-replica counts), then each pass with notes, with those keys' values: where it differs, is mixed or
-cannot be compared, the one value every member shares when all of them differ, else the members
-that differ from the reference pass, then those not read or not recorded on a side (`m2=unknown`),
-then those that ran more than one value (`m3=mixed: 1 and 2`), five at most, with a count
-(`m7=proxyv2:1.30.6 (1 of 500 members; the other 499 match)`); what changed during it (`v1.33.1 to
-v1.33.2 on m7`); what it could not compare at its end; what its profile sets; the members that did
-not run the profile's value; and which value it ran where the reference pass ran more than one. One
-line stands for a pass whose every value is unknown, such as one from before the record. A pass
-that differs (an operator upgrade, a gateway roll or a lever put back between passes), whose
-profile's value was not in effect, that changed, is mixed or cannot be compared gets a warning in
-the notes and on stderr: its change against the baseline is then not the profile's alone, or not
-known to be (without a baseline, its difference from the reference pass is not the profiles'
-alone). The passes not read again at their end share one warning.
+The `istiod env` row is each pass's digest of istiod's settings (`ISTIOD_ENV_BY_CONTEXT`, which a
+profile's `spec.values.pilot.env` changes on purpose), so you can see that a profile reached
+istiod and match a re-run's pass to this one's: one digest when every member ran the same
+settings (`(partly unknown)` after it when some were not read), `unknown` when none was read,
+`mixed` when the members, the TSVs or a member's istiod pods differ (a rollout caught midway), and
+`-` for a pass without data. 001 verifies that its apply reached istiod.
 
 `TEST_PLATFORM` (`config/options.env`; `auto`, `kubernetes` or `openshift`) sets the platform
 instead of asking each cluster, for the probe suite's chart overlay and, with
@@ -282,10 +194,7 @@ what it serves, and warns when that is not `TEST_PLATFORM`. 001 and 003 also rea
 before they change anything (a profile's objects or marker), and 003 reads every member's record
 twice per pass (before and after its probe): each read is bounded by `PLATFORM_READ_TIMEOUT`
 (20 s by default) and `PLATFORM_READ_PARALLEL` members (20) are read at once, so raise the first
-for slow API servers and lower the second on a small runner. The read after the probe also reads
-the levers, each member's istiod limits and Kubernetes version, each bounded by 5 s as the
-probes' own reads are and asked once more when it comes back unknown; what still does not answer
-is not compared at the pass's end.
+for slow API servers and lower the second on a small runner.
 
 ## One profile by hand
 
@@ -306,15 +215,15 @@ there are none).
   or removes the key, at every path the profile sets. Before it changes anything it
   puts a marker ConfigMap, `istio-system/tuning-profile-<profile>` (labelled
   `istio-scale-tests/tuning-profile=<profile>`), on each member: the profile's name,
-  description, when it was applied and that member's revert patch. Every platform
-  record lists the marker with the profile's objects (`TUNING_OBJECTS_BY_CONTEXT`), so
-  a profile that only sets istiod's env shows too. It refuses to overwrite a resource
+  description, when it was applied and that member's revert patch. While a marker or a
+  profile's objects are on a member, 001 and 003 refuse to start and the other sweeps
+  warn, so a profile that only sets istiod's env shows too. It refuses to overwrite a resource
   that already exists, so it never touches baseline objects, and refuses to start while
   any member holds a profile's objects or marker.
 - **002** applies that patch, deletes the profile's resources, then checks that those
   paths and resources match the pre-apply state. Only when the check passes does it
   delete the markers. On failure it exits 3 and keeps the `active-profile` state and
-  the markers, so it can be retried and every record and sweep keeps warning. With
+  the markers, so it can be retried and the sweeps keep refusing to start or warning. With
   `TUNING_REVERT_HEALTHCHECK_NS_PROBE=1` it also checks that istiod still delivers
   `istio-ca-root-cert` to a new namespace.
 - **006** adds a deny sync window for the Applications to their AppProject. Resume

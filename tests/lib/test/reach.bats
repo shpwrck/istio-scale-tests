@@ -294,9 +294,9 @@ rrow() {
 	assert_failure
 	[[ "$stderr" == *"config_preamble_lines missing"* ]]
 	[ ! -e "${RES}/reach-z.tsv" ]
-	# The platform record of the members the last platform_probe read (tests/lib/platform.sh).
-	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\tsail-operator:1.31.1/Available\tpilot:1.30.5\tproxyv2:1.30.5\tkind'
-		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-p.tsv" RUN_ID=p)
+	# The platform record of the members platform_probe read (tests/lib/platform.sh).
+	(_platform_put c1 $'kubernetes\tsail-operator:1.31.1\tpilot:1.30.5\tproxyv2:1.30.5\tkind\t0123456789ab'
+		reach_write_header "${RES}/reach-p.tsv" RUN_ID=p)
 	grep -qx '# PLATFORM=kubernetes' "${RES}/reach-p.tsv"
 	grep -qx '# PLATFORM_BY_CONTEXT=c1=kubernetes' "${RES}/reach-p.tsv"
 	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind' "${RES}/reach-p.tsv"
@@ -308,18 +308,17 @@ rrow() {
 	[ ! -e "${RES}/reach-y.tsv" ]
 }
 
-@test "reach_write_header --contexts (H13): the record of every member listed, not only the last platform_probe's" {
-	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\top\tpilot\tproxy\tkind\nc2\tkubernetes\top\tpilot\tproxy\taws\n'
-		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-s.tsv" --contexts c1,c2 RUN_ID=s SUITE=churn-dataplane)
-	grep -qx '# PLATFORM_BY_CONTEXT=c1=kubernetes,c2=kubernetes' "${RES}/reach-s.tsv"
-	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind,c2=aws' "${RES}/reach-s.tsv"
+@test "reach_write_header --contexts (H13): the record of the members listed; without it, of every member the record holds" {
+	(_platform_put c1 $'kubernetes\top\tpilot\tproxy\tkind\tenv'
+		_platform_put c2 $'kubernetes\top\tpilot\tproxy\taws\tenv'
+		reach_write_header "${RES}/reach-s.tsv" --contexts c2 RUN_ID=s SUITE=churn-dataplane
+		reach_write_header "${RES}/reach-1.tsv" RUN_ID=s)
+	grep -qx '# PLATFORM_BY_CONTEXT=c2=kubernetes' "${RES}/reach-s.tsv"
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c2=aws' "${RES}/reach-s.tsv"
 	grep -qx '# RUN_ID=s' "${RES}/reach-s.tsv"
 	grep -qx '# SUITE=churn-dataplane' "${RES}/reach-s.tsv"
 	! grep -q -- '--contexts' "${RES}/reach-s.tsv" || false
-	# Without --contexts: the last platform_probe's members, as before.
-	(PLATFORM_PROBE_ROWS=$'c1\tkubernetes\top\tpilot\tproxy\tkind\nc2\tkubernetes\top\tpilot\tproxy\taws\n'
-		PLATFORM_PROBE_LAST=c1 reach_write_header "${RES}/reach-1.tsv" RUN_ID=s)
-	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind' "${RES}/reach-1.tsv"
+	grep -qx '# NODE_PROVIDER_BY_CONTEXT=c1=kind,c2=aws' "${RES}/reach-1.tsv"
 	# churn-dataplane 002 writes the sweep's per-sweep file with every member the record holds
 	# (a sweep's 002 inherits all of them), so later mesh sizes' members are in its header.
 	grep -q 'reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)"' "${ROOT}/tests/churn-dataplane/002-run-baseline-probe.sh"
@@ -521,8 +520,8 @@ _dp_fixture() {
 	assert_output --partial "Remotes with no valid latency rows: mesh_size=2 from s: r2 (0/2; ERROR_RATE_HIGH=2)"
 	[[ "$stderr" == *"rule=no_valid_rows"* ]]
 	[[ "$stderr" != *"rule=reach_coverage"* ]]
-	# A file from before the platform record: one warning; its platform reads unknown.
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	# A file from before the platform record: its platform reads unknown, without a warning.
+	[[ "$stderr" != *PLATFORM* ]]
 }
 
 # --- dataplane 002 / 003 (entrypoints, stub kubectl) ---

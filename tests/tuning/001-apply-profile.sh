@@ -7,7 +7,8 @@
 # state dir (revert-started, istio-edited-during-pass, istio-generations-applied). First it
 # puts a marker ConfigMap on each member
 # (tuning.py marker) that names the profile and holds that member's Istio CR revert patch:
-# every platform record shows it, and 005-cleanup.sh can undo the profile from it alone.
+# a tuning run refuses to start and every other sweep warns while it is there, and
+# 005-cleanup.sh can undo the profile from it alone.
 # Refuses while any member holds a profile's objects already (a profile left applied).
 #
 # Does not pause Argo CD; use 006-gitops-pause.sh (or 003-run-tuning-sweep.sh).
@@ -63,7 +64,8 @@ Options:
   -h, --help             Show this help.
 
 Environment:
-$(platform_help_lines reads)
+  PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the
+  check for a profile's objects already on a member (config/options.env).
 
 Exit status: 0 applied and verified, 1 error, 2 applied but verification failed.
 Requires python3 with PyYAML.
@@ -193,15 +195,6 @@ echo "$PROFILE_NAME" >"${STATE_DIR}/active-profile"
 
 # The marker on every member before any change (002-revert-profile.sh deletes it last).
 read -r MARKER_KIND MARKER_NAME MARKER_NS < <(python3 -I "$HELPER" resources "${STATE_DIR}/marker-$(ctx_key "${CONTEXTS[0]}").json")
-# The objects the profile puts on every member, as the platform record names them: tuning 004
-# checks that each pass's record holds them all.
-{
-	echo "${MARKER_KIND}/${MARKER_NS}/${MARKER_NAME}"
-	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
-		read -r kind name ns <<<"$line"
-		echo "${kind}/${ns}/${name}"
-	done
-} >"${STATE_DIR}/objects"
 for ctx in "${CONTEXTS[@]}"; do
 	echo "--- ${ctx}: marking ${PROFILE_NAME} applied (${MARKER_KIND} ${MARKER_NS}/${MARKER_NAME}) ---"
 	"${KUBECTL[@]}" --context="$ctx" apply --server-side --field-manager=tuning-profile \

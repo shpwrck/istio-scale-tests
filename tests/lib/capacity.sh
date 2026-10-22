@@ -2,9 +2,8 @@
 # Read-only cluster-capacity probes for scale-coverage legibility (O9).
 # Sourced, never executed.
 #
-# Consumers: controlplane (Phase 1 legibility + Phase-2 auto-sizing; its report's quantity parsers),
-# envelope.sh (CAP_JQ_QTY), platform.sh (platform_drift_check: cap_istiod_limits, which tuning
-# 003 sources for it) and tuning 004 (CAP_JQ_QTY: a profile's istiod limits in m and Mi)
+# Consumers: controlplane (Phase 1 legibility + Phase-2 auto-sizing; its report's quantity parsers)
+# and envelope.sh (CAP_JQ_QTY)
 #
 # This library is STRICTLY READ-ONLY: every kubectl call is a `get`/`top`/
 # `version`, never apply/scale/delete/patch. All reads carry

@@ -436,10 +436,8 @@ istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 
 # The platform record (tests/lib/platform.sh), before any scrape: inherited from 003, else read
-# here. --phase baseline keeps it in the state dir, so --phase final reads nothing in its window.
-[[ "$PHASE" != final ]] || platform_probe_load "${STATE_DIR}/platform-record.tsv"
+# here, by each phase (read-only API GETs, like the version reads above).
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
-[[ "$PHASE" != baseline ]] || platform_probe_save "${STATE_DIR}/platform-record.tsv"
 
 # Source context's node allocatable + istiod limits for the preamble (read-only;
 # `unknown` on failure). Skipped when no preamble is written: --phase baseline, or a TSV

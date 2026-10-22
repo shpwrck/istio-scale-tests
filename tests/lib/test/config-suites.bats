@@ -942,3 +942,55 @@ platform_pairs_ok() {
 		grep -q 'platform_report_values "' "$r"
 	done
 }
+
+# sweep_pairs_ok <sweep>: platform_probe, platform_probe_share within two lines of it, then
+# platform_start_warnings; platform_drift_check after its last sweep_step, before sweep_finish.
+sweep_pairs_ok() {
+	local p s w last d fin
+	p="$(grep -n '^[[:space:]]*platform_probe "' "$1" | head -1 | cut -d: -f1)"
+	s="$(grep -n '^[[:space:]]*platform_probe_share "' "$1" | head -1 | cut -d: -f1)"
+	w="$(grep -n '^[[:space:]]*platform_start_warnings "' "$1" | head -1 | cut -d: -f1)"
+	last="$(grep -n '^[^#]*sweep_step "' "$1" | tail -1 | cut -d: -f1)"
+	d="$(grep -n '^platform_drift_check "' "$1" | head -1 | cut -d: -f1)"
+	fin="$(grep -n '^sweep_finish ' "$1" | head -1 | cut -d: -f1)"
+	[[ -n "$p" && -n "$s" && -n "$w" && -n "$last" && -n "$d" && -n "$fin" ]] && ((p < s && s <= p + 2 && s < w && last < d && d < fin)) || {
+		echo "$(basename "$1"): probe '${p}', share '${s}', warnings '${w}', last step '${last}', drift check '${d}', sweep_finish '${fin}'"
+		return 1
+	}
+}
+
+@test "PL36: each sweep shares its probe's record right after it and reads it again after its last step, before sweep_finish; every script that sources platform.sh validates it" {
+	local f p s w d body n=0
+	for f in "$ROOT"/tests/*/0*-run-sweep.sh; do
+		[[ "$f" != */tuning/* ]] || continue
+		n=$((n + 1))
+		sweep_pairs_ok "$f"
+	done
+	[ "$n" -eq 5 ]
+	# The check fires on a sweep that reads the record again after sweep_finish.
+	{ sed '/^platform_drift_check "/d' "$CH/003-run-sweep.sh"; echo 'platform_drift_check "x"'; } > "${BATS_TEST_TMPDIR}/003.sh"
+	run sweep_pairs_ok "${BATS_TEST_TMPDIR}/003.sh"
+	assert_failure
+	# tuning 003: each pass reads its own record and shares it before its probes, then reads it
+	# again; a failed probe ends the probes, not the pass.
+	body="$(sed -n '/^run_pass() {$/,/^}$/p' "${ROOT}/tests/tuning/003-run-tuning-sweep.sh")"
+	p="$(grep -n '^[[:space:]]*platform_probe "\$CONTEXTS_CSV"$' <<<"$body" | cut -d: -f1)"
+	s="$(grep -n '^[[:space:]]*platform_probe_share "\$dir"$' <<<"$body" | cut -d: -f1)"
+	w="$(grep -n '^[[:space:]]*while probe_argv ' <<<"$body" | cut -d: -f1)"
+	d="$(grep -n '^[[:space:]]*platform_drift_check "\$CONTEXTS_CSV" "\${label} pass"$' <<<"$body" | cut -d: -f1)"
+	[[ -n "$p" && -n "$s" && -n "$w" && -n "$d" ]] && ((p < s && s < w && w < d)) || { echo "run_pass: probe '${p}', share '${s}', probes '${w}', drift check '${d}'"; false; }
+	! sed -n "${w},${d}p" <<<"$body" | grep -q '^[[:space:]]*return' || false
+	# TEST_PLATFORM and the read knobs are checked; reach.sh masks the reads' addresses; the
+	# ns-lifecycle TSV's writers read the record before they create it.
+	for f in "$ROOT"/tests/*/0*.sh; do
+		if grep -q 'source "${ROOT}/tests/lib/platform.sh"' "$f"; then
+			grep -qx 'platform_validate' "$f" || { echo "${f}: sources platform.sh without a top-level platform_validate"; false; }
+		fi
+		if grep -qE '(^[[:space:]]*|(\|\||&&)[[:space:]]*)(platform_probe|platform_drift_check) ' "$f"; then
+			grep -q 'source "${ROOT}/tests/lib/reach.sh"' "$f" || { echo "${f}: reads the record without reach.sh"; false; }
+		fi
+		p="$(grep -nE '(^[[:space:]]*|\|\|[[:space:]]*)platform_probe ' "$f" | head -1 | cut -d: -f1)"
+		s="$(grep -n '^[[:space:]]*ns_lifecycle_init "' "$f" | head -1 | cut -d: -f1)"
+		[[ -z "$s" ]] || { [[ -n "$p" ]] && ((p < s)); } || { echo "${f}: ns_lifecycle_init at ${s}, platform_probe at '${p}'"; false; }
+	done
+}

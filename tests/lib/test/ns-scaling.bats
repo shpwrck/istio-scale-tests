@@ -97,10 +97,9 @@ CHART="${CP}/chart"
 	source "${ROOT}/tests/lib/config.sh"    # config_preamble_lines
 	source "${ROOT}/tests/lib/platform.sh"  # platform_preamble_lines
 	f="${BATS_TEST_TMPDIR}/lc/ns-lifecycle.tsv"
-	PLATFORM_PROBE_ROWS=$'mesh-a\tkubernetes\tsail-operator:1.31.1/Available\tpilot:1.30.5\tproxyv2:1.30.5\tkind\n'
-	PLATFORM_PROBE_LAST=mesh-a
-	ns_lifecycle_init "$f" run-1
-	ns_lifecycle_init "$f" run-2
+	_platform_put mesh-a $'kubernetes\tsail-operator:1.31.1\tpilot:1.30.5\tproxyv2:1.30.5\tkind\t0123456789ab'
+	ns_lifecycle_init "$f" run-1 mesh-a
+	ns_lifecycle_init "$f" run-2 mesh-a
 	[ "$(grep -c '^# RUN_ID=' "$f")" -eq 1 ]
 	grep -q '^# RUN_ID=run-1$' "$f"
 	grep -q '^# NS_LIFECYCLE_SCHEMA=2$' "$f"
@@ -123,12 +122,12 @@ CHART="${CP}/chart"
 	assert_success
 }
 
-@test "ns_lifecycle_init: without a platform_probe in the shell the record reads unknown; without config.sh or platform.sh it refuses" {
-	# (A standalone 001 or 005 probes before it creates the file: platform.bats, H3.)
+@test "ns_lifecycle_init: without members the record reads unknown; without config.sh or platform.sh it refuses" {
+	# (A standalone 001 or 005 probes its members before it creates the file: config-suites.bats.)
 	source "${ROOT}/tests/lib/config.sh"
 	source "${ROOT}/tests/lib/platform.sh"
 	f="${BATS_TEST_TMPDIR}/lc/standalone.tsv"
-	(unset PLATFORM_PROBE_ROWS PLATFORM_PROBE_LAST; ns_lifecycle_init "$f" standalone-001)
+	ns_lifecycle_init "$f" standalone-001
 	grep -qx '# PLATFORM=unknown' "$f"
 	grep -qx '# PLATFORM_BY_CONTEXT=unknown' "$f"
 	run bash -c 'source "$1/tests/lib/common.sh"; source "$1/tests/lib/preamble.sh"; ns_lifecycle_init "$2" r' _ "$ROOT" "${BATS_TEST_TMPDIR}/lc/x.tsv"

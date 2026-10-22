@@ -778,7 +778,7 @@ render_sha() {
 	digest="sha256:$(printf '%064d' 7)"
 	grep -qx "# ISTIOD_IMAGE\[ctx-a\]=istio-pilot-rhel9:1.30.5@${digest}" "$t"
 	grep -qx "# INGRESS_PROXY_IMAGE\[ctx-a\]=istio-proxyv2-rhel9:1.30.5@${digest}" "$t"
-	grep -qx '# OSSM_OPERATOR\[ctx-b\]=servicemeshoperator3:3.4.3/Succeeded' "$t"
+	grep -qx '# OSSM_OPERATOR\[ctx-b\]=servicemeshoperator3:3.4.3' "$t"
 	# The version each member runs (its active IstioRevision), not the CR's alias.
 	grep -qx '# ISTIO_VERSION=v1.30.5' "$t"
 	grep -qx '# ISTIO_VERSION_SOURCE=live' "$t"
@@ -790,7 +790,7 @@ render_sha() {
 	grep -qx '# PLATFORM=openshift' "$t"
 	grep -qx '# TEST_PLATFORM=auto' "$t"
 	grep -qx '# PLATFORM_BY_CONTEXT=ctx-a=openshift,ctx-b=openshift' "$t"
-	grep -qx '# MESH_OPERATOR_BY_CONTEXT=ctx-a=servicemeshoperator3:3.4.3/Succeeded,ctx-b=servicemeshoperator3:3.4.3/Succeeded' "$t"
+	grep -qx '# MESH_OPERATOR_BY_CONTEXT=ctx-a=servicemeshoperator3:3.4.3,ctx-b=servicemeshoperator3:3.4.3' "$t"
 	grep -qx "# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=istio-pilot-rhel9:1.30.5@${digest},ctx-b=istio-pilot-rhel9:1.30.5@${digest}" "$t"
 	grep -qx "# PROXY_IMAGE_BY_CONTEXT=ctx-a=istio-proxyv2-rhel9:1.30.5@${digest},ctx-b=istio-proxyv2-rhel9:1.30.5@${digest}" "$t"
 	grep -qx '# NODE_PROVIDER_BY_CONTEXT=ctx-a=aws,ctx-b=aws' "$t"
@@ -852,7 +852,7 @@ render_sha() {
 	[ "$(grep -v '^"\|^---\|^#\|^$' "$s" | sed -n 3p)" = "$(grep -m1 '^- kind: Service' "$s")" ]
 	grep -q '^- Hostname — \*\*NO\*\*' "$s"
 	grep -q '| Run config | `none` (sha256 `none`) |' "$s"
-	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3/Succeeded; istiod istio-pilot-rhel9:1.30.5@${digest}; gateway proxy istio-proxyv2-rhel9:1.30.5@${digest}; istiod env ${envd}; tuning objects none |" "$s"
+	grep -qF "| Platform | openshift (TEST_PLATFORM auto); nodes aws; operator servicemeshoperator3:3.4.3; istiod istio-pilot-rhel9:1.30.5@${digest}; gateway proxy istio-proxyv2-rhel9:1.30.5@${digest}; istiod env ${envd} |" "$s"
 	grep -q '| Member | istiod image | Ingress istio-proxy image | Operator build |' "$s"
 	grep -q '| Traffic | ' "$s"
 	grep -q "istio-pilot-rhel9:1.30.5@${digest}" "$s"
@@ -1511,8 +1511,8 @@ if got.get("SCENARIO_SET[ctx-a]") != "v0: \"q\" #1 \\b":
 	digest="sha256:$(printf '%064d' 7)"
 	STUB_PLATFORM=kubernetes gw_run
 	assert_success
-	grep -qx "# OSSM_OPERATOR\[ctx-a\]=sail-operator:1.31.1@${digest}/Available" "$(tsv)"
-	grep -qx "# OSSM_OPERATOR\[ctx-b\]=sail-operator:1.31.1@${digest}/Available" "$(tsv)"
+	grep -qx "# OSSM_OPERATOR\[ctx-a\]=sail-operator:1.31.1@${digest}" "$(tsv)"
+	grep -qx "# OSSM_OPERATOR\[ctx-b\]=sail-operator:1.31.1@${digest}" "$(tsv)"
 	grep -qx '# PLATFORM=kubernetes' "$(tsv)"
 	grep -qx '# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=kind' "$(tsv)"
 	! grep -q clusterserviceversions "$STUB_LOG" || false
@@ -1527,7 +1527,7 @@ if got.get("SCENARIO_SET[ctx-a]") != "v0: \"q\" #1 \\b":
 	grep -qx '# TEST_PLATFORM=openshift' "$(tsv)"
 	grep -qx '# PLATFORM=kubernetes' "$(tsv)"
 	grep -qx '# PLATFORM_BY_CONTEXT=ctx-a=kubernetes,ctx-b=kubernetes' "$(tsv)"
-	grep -qx "# OSSM_OPERATOR\[ctx-b\]=sail-operator:1.31.1@${digest}/Available" "$(tsv)"
+	grep -qx "# OSSM_OPERATOR\[ctx-b\]=sail-operator:1.31.1@${digest}" "$(tsv)"
 	assert_output --partial "ctx-b: TEST_PLATFORM=openshift, but the member serves kubernetes: the record keeps kubernetes (PLATFORM_BY_CONTEXT)"
 	grep -q -- '--context=ctx-b .*api-versions' "$STUB_LOG"
 	! grep -q clusterserviceversions "$STUB_LOG" || false
@@ -1540,13 +1540,14 @@ if got.get("SCENARIO_SET[ctx-a]") != "v0: \"q\" #1 \\b":
 	STUB_PLATFORM=kubernetes STUB_APIV_FAIL=ctx-a gw_run
 	assert_success
 	grep -qx '# OSSM_OPERATOR[[]ctx-a[]]=unknown' "$(tsv)"
-	grep -qx "# OSSM_OPERATOR[[]ctx-b[]]=sail-operator:1.31.1@${digest}/Available" "$(tsv)"
+	grep -qx "# OSSM_OPERATOR[[]ctx-b[]]=sail-operator:1.31.1@${digest}" "$(tsv)"
 	grep -qx '# PLATFORM=unknown' "$(tsv)"
 	grep -qx '# PLATFORM_BY_CONTEXT=ctx-a=unknown,ctx-b=kubernetes' "$(tsv)"
 	! grep -q 'OSSM_OPERATOR.*absent' "$(tsv)" || false
 	! grep -q -- '--context=ctx-a .*clusterserviceversions' "$STUB_LOG" || false
 	assert_output --partial "ctx-a: could not read the platform (so the mesh operator build is not read either); recorded as unknown"
-	assert_output --partial "ctx-a: did not answer within PLATFORM_READ_TIMEOUT (20s); its platform record stops here"
+	assert_output --partial "no answer within PLATFORM_READ_TIMEOUT (20s)"
+	assert_output --partial "ctx-a: did not answer; its platform record stops here"
 	# The run itself goes on: the preflight's own reads answered.
 	assert_output --partial "traffic: NO"
 }

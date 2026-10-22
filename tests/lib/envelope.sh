@@ -649,7 +649,7 @@ render_scale_envelope() {
 	local _env_w _env_platform_row _env_nl=$'\n'
 	_env_w="$(env_limit_drift_warning "$_env_rec_cpu" "$_env_rec_mem" "$lim_cpu" "$lim_mem")"
 	[[ -z "$_env_w" ]] || dw_lines+="${dw_lines:+${_env_nl}}> **Data warning:** ${_env_w}"
-	_env_platform_row="$(jq_get '.metadata.platform') (TEST_PLATFORM $(jq_get '.metadata.test_platform')); nodes $(platform_summary "$(jq_get '.metadata.node_provider_by_context')"); operator $(platform_summary "$(jq_get '.metadata.mesh_operator_by_context')"); istiod $(platform_summary "$(jq_get '.metadata.istiod_image_by_context')"); gateway proxy $(platform_summary "$(jq_get '.metadata.proxy_image_by_context')"); istiod env $(platform_summary "$(jq_get '.metadata.istiod_env_by_context')"); tuning objects $(platform_summary "$(jq_get '.metadata.tuning_objects_by_context')")"
+	_env_platform_row="$(jq_get '.metadata.platform') (TEST_PLATFORM $(jq_get '.metadata.test_platform')); nodes $(platform_summary "$(jq_get '.metadata.node_provider_by_context')"); operator $(platform_summary "$(jq_get '.metadata.mesh_operator_by_context')"); istiod $(platform_summary "$(jq_get '.metadata.istiod_image_by_context')"); gateway proxy $(platform_summary "$(jq_get '.metadata.proxy_image_by_context')"); istiod env $(platform_summary "$(jq_get '.metadata.istiod_env_by_context')")"
 	md_cell -v _env_platform_row "$_env_platform_row"
 
 	# ---- render ----
@@ -680,7 +680,7 @@ ${outcome_lines}
 | Sidecar scoping | ${peak_scope} | sweep peak \`sidecar_scoping\` |
 | Traffic management | ${peak_traffic} | sweep peak \`traffic_config\` (none preferred when a vsdr cell ties at the peak mesh size) |
 | Istio version | ${istio_version}, source ${istio_version_src} | sweep header \`ISTIO_VERSION\` (\`ISTIO_VERSION_SOURCE\` live: each member's active IstioRevision \`.spec.version\` at the start; the end-of-sweep read is under "Sweep outcome" above when it found a change) |
-| Platform / mesh build | ${_env_platform_row} | report \`platform\` and the \`*_by_context\` keys of the TSVs' platform record (gateway proxy: the ingress and east-west gateways' build; tuning objects: a tuning profile's labelled objects and marker, none outside a tuning run; digests shortened) |
+| Platform / mesh build | ${_env_platform_row} | report \`platform\` and the \`*_by_context\` keys of the TSVs' platform record (gateway proxy: the ingress and east-west gateways' build; digests shortened) |
 
 > **Connected proxies per cluster** is \`pilot_xds\` summed over one cluster's istiod replicas at one scrape. It should be about equal to that cluster's Running injected pods (gateways included), which the proxy check compares. It is still not a mesh-wide sum and not endpoints; do not expect it to equal total endpoints. **Per istiod replica** is the busiest single replica (max over the per-pod rows), about 1/R of the cluster figure with R replicas.
 

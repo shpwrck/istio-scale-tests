@@ -206,14 +206,13 @@ with_platform() {
 	assert_success
 	[ "$(jq -r '.metadata | "\(.platform) \(.test_platform) \(.node_provider_by_context)"' <<<"$output")" = "kubernetes auto mesh-a=aws,mesh-b=aws" ]
 	[ "$(jq '[(.metadata.data_warnings // [])[] | select(test("kind"))] | length' <<<"$output")" = 0 ]
-	[[ "$stderr" != *"no PLATFORM line"* ]]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
 	assert_output --partial "# platform: PLATFORM=kubernetes  TEST_PLATFORM=auto  PLATFORM_BY_CONTEXT=mesh-a=kubernetes,mesh-b=kubernetes"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_output --partial "# platform: PLATFORM=kubernetes TEST_PLATFORM=auto PLATFORM_BY_CONTEXT=mesh-a=kubernetes,mesh-b=kubernetes"
 	for fmt in markdown charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_line 'mesh_operator_by_context: "mesh-a=sail-operator:1.31.1/Available,mesh-b=sail-operator:1.31.1/Available"'
+		assert_line 'mesh_operator_by_context: "mesh-a=sail-operator:1.31.1,mesh-b=sail-operator:1.31.1"'
 		assert_line 'node_provider_by_context: "mesh-a=aws,mesh-b=aws"'
 		refute_output --partial "Nodes on kind"
 	done
@@ -237,7 +236,7 @@ with_platform() {
 	cp "$FIXTURE" "${RES}/controlplane-fixture-t2.tsv"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format text
 	refute_output --partial "Nodes on kind"
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	[[ "$stderr" != *"Nodes on kind"* && "$stderr" != *"Node provider not read"* ]]
 }
 
 @test "report (H5): a member whose node provider was not read warns and leaves the node figures out of the verdict" {
@@ -280,8 +279,8 @@ second_input() {
 	second_input 's/=kind/=aws/g; s/proxyv2:1.30.5/proxyv2:1.30.6/g'
 	# The body counts members (its warnings reach the scale envelope, pasted into campaign
 	# docs); stderr names them.
-	local unread="ISTIOD_IMAGE_BY_CONTEXT could not be read for 1 of 2 members in some of the 2 input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same istiod builds as the others"
-	local dis="input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for 2 of 2 members: the report mixes runs on different gateway proxy builds; compare like with like"
+	local unread="ISTIOD_IMAGE_BY_CONTEXT is unknown in some input TSVs (not read for 1 of 2 members), while others have a value: the report cannot tell whether those runs had the same one"
+	local dis="input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for 2 of 2 members: the report mixes runs with different values of it; compare like with like"
 	local fmt top first
 	for fmt in text csv; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
@@ -303,23 +302,23 @@ second_input() {
 	assert_success
 	[ "$(jq --arg u "$unread" --arg d "$dis" '[.metadata.data_warnings[] | select(. == $u or . == $d)] | length' <<<"$output")" = 2 ]
 	[[ "$(jq -r '.metadata.proxy_image_by_context' <<<"$output")" == "mesh-a=mixed:proxyv2:1.30.5;proxyv2:1.30.6,mesh-b=mixed:proxyv2:1.30.5;proxyv2:1.30.6" ]]
-	[[ "$stderr" == *"warning: input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for mesh-a (proxyv2:1.30.5;proxyv2:1.30.6), mesh-b (proxyv2:1.30.5;proxyv2:1.30.6)"* ]]
-	[[ "$stderr" == *"warning: ISTIOD_IMAGE_BY_CONTEXT could not be read for mesh-b in 1 of 2 input TSV(s)"* ]]
+	[[ "$stderr" == *"warning: input TSVs disagree on PROXY_IMAGE_BY_CONTEXT for mesh-a (proxyv2:1.30.5 or proxyv2:1.30.6), mesh-b (proxyv2:1.30.5 or proxyv2:1.30.6)"* ]]
+	[[ "$stderr" == *"warning: ISTIOD_IMAGE_BY_CONTEXT is unknown in some input TSVs (not read for mesh-b)"* ]]
 }
 
-@test "report (H10): inputs that agree, an operator state aside, add no platform warning" {
+@test "report (H10): inputs that agree add no platform warning" {
 	with_platform 's/=kind/=aws/g'
-	second_input 's/=kind/=aws/g; s#/Available#/Unavailable#g'
+	second_input 's/=kind/=aws/g'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
-	[ "$(jq '[.metadata.data_warnings[] | select(test("input TSVs|could not be read|changed during the sweep|Nodes on kind"))] | length' <<<"$output")" = 0 ]
+	[ "$(jq '[.metadata.data_warnings[] | select(test("input TSVs|is unknown in some|Nodes on kind"))] | length' <<<"$output")" = 0 ]
 	[[ "$(jq -r '.metadata.mesh_operator_by_context' <<<"$output")" != *mixed* ]]
-	[[ "$stderr" != *"warning: input TSVs"* && "$stderr" != *"could not be read"* ]] || { echo "$stderr"; false; }
+	[[ "$stderr" != *"warning: input TSVs"* && "$stderr" != *"is unknown in some"* ]] || { echo "$stderr"; false; }
 	local fmt
 	for fmt in text csv markdown charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
 		refute_output --partial "input TSVs disagree"
-		refute_output --partial "could not be read"
+		refute_output --partial "is unknown in some"
 	done
 }
 
@@ -329,12 +328,12 @@ second_input() {
 	sed -i.bak 's/^# KUBE_VERSIONS=.*/# KUBE_VERSIONS=mesh-a=v1.34.8,mesh-b=v1.35.0/' "${RES}/controlplane-fixture-t3.tsv"
 	rm -f "${RES}/controlplane-fixture-t3.tsv.bak"
 	local kv="mesh-a=v1.34.8,mesh-b=mixed:v1.34.8;v1.35.0" fmt
-	local w="input TSVs disagree on KUBE_VERSIONS for 1 of 2 members: the report mixes runs on different Kubernetes versions; compare like with like"
+	local w="input TSVs disagree on KUBE_VERSIONS for 1 of 2 members: the report mixes runs with different values of it; compare like with like"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq -r '.metadata.kube_versions' <<<"$output")" = "$kv" ]
 	[ "$(jq --arg w "$w" '[.metadata.data_warnings[] | select(. == $w)] | length' <<<"$output")" = 1 ]
-	[[ "$stderr" == *"warning: input TSVs disagree on KUBE_VERSIONS for mesh-b (v1.34.8;v1.35.0)"* ]]
+	[[ "$stderr" == *"warning: input TSVs disagree on KUBE_VERSIONS for mesh-b (v1.34.8 or v1.35.0)"* ]]
 	for fmt in text csv; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
 		assert_success
@@ -349,15 +348,6 @@ second_input() {
 		assert_line "kube_versions: \"${kv}\""
 		assert_line "> **Warning:** ${w}"
 	done
-}
-
-@test "report (S-B2): a record of 500 members goes through every format; json lists them all" {
-	{
-		head -1 "$FIXTURE"
-		platform_fixture_lines "$(wide_ctxs 500 mesh-a mesh-b)"
-		tail -n +2 "$FIXTURE"
-	} > "${RES}/controlplane-fixture-t2.tsv"
-	wide_record_report "$REPORT" "$RES" text csv json markdown charts
 }
 
 # --- VirtualService/DestinationRule traffic axis -------------------------------

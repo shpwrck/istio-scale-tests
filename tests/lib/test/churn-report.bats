@@ -56,7 +56,7 @@ tsv() {
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
 	assert_output --partial 'harness_sha: "feed123-test"'
 	assert_output --partial 'istio_version: "1.99.0"'
-	assert_line 'mesh_operator_by_context: "ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"'
+	assert_line 'mesh_operator_by_context: "ctx-a=sail-operator:1.31.1,ctx-b=sail-operator:1.31.1"'
 	refute_output --partial 'waited'
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_line "# HARNESS_SHA=feed123-test"
@@ -73,13 +73,6 @@ tsv() {
 	[ -z "$stderr" ]
 }
 
-@test "004 (S-B2): a record of 500 members goes through every format" {
-	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500 ctx-a ctx-b)" tsv "${RES}/churn-a.tsv" <<-EOF
-	$(crow 1 99 N/A 10 N/A OK)
-	EOF
-	wide_record_report "$REPORT" "$RES" text csv md charts
-}
-
 @test "004: a TSV without the keys reads 'unknown (not recorded)', never this checkout's HEAD" {
 	NO_PLATFORM=1 tsv "${RES}/churn-old.tsv" "TUNING_BASELINE=unknown" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
@@ -91,11 +84,11 @@ tsv() {
 	assert_output --partial 'istio_version: "unknown (not recorded)"'
 	[[ "$output" != *"$head"* ]]
 	refute_output --partial "istio_version: \"${ISTIO_VERSION}\""
-	# From before the platform record: unknown, with one warning, never this host's platform.
+	# From before the platform record: unknown, never this host's platform, and no warning.
 	assert_line 'platform: "unknown"'
 	assert_line 'mesh_operator_by_context: "unknown"'
 	assert_line 'kube_versions: "unknown"'
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
+	[[ "$stderr" != *PLATFORM* ]]
 	# Beside a TSV that recorded them: mixed, with a warning naming the key.
 	tsv "${RES}/churn-new.tsv" "HARNESS_SHA=feed123-test" "ISTIO_VERSION=1.99.0" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
@@ -188,22 +181,20 @@ warned_in_body() {
 	done
 }
 
-@test "004 (H10, H2): a build that changed during the sweep, a value not read and other Kubernetes versions warn in every format's body" {
+@test "004 (H10, H2): inputs on different builds, a value not read and other Kubernetes versions warn in every format's body" {
 	tsv "${RES}/churn-a.tsv" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
 	EOF
 	local -a plat=()
-	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/ctx-b=proxyv2:1.30.5/ctx-b=unknown/')
+	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s/ctx-a=pilot:1.30.5/ctx-a=pilot:1.30.6/; s/ctx-b=proxyv2:1.30.5/ctx-b=unknown/')
 	NO_PLATFORM=1 tsv "${RES}/churn-b.tsv" "KUBE_VERSIONS=ctx-a=v1.34.2,ctx-b=unreachable" "${plat[@]}" <<-EOF
 	$(crow 2 99 N/A 10 N/A OK)
 	EOF
-	# The sweep's drift check (platform_drift_check) found istiod on ctx-a on another build.
-	printf '%s\n' '# DRIFT_READ_AT=2026-01-01T00:00:00Z' '# ISTIOD_IMAGE_BY_CONTEXT=ctx-a=pilot:1.30.6' > "${RES}/platform-drift.txt"
 	warned_in_body \
-		"ISTIOD_IMAGE_BY_CONTEXT changed during the sweep (platform-drift.txt in res): ctx-a from pilot:1.30.5 to pilot:1.30.6; the TSVs record the value at the sweep's start, but rows measured after the change ran on other istiod builds, and the report cannot tell which rows those are; the usual cause is an Argo CD sync of a new revision or an operator upgrade; for publishable figures, run the sweep again on one build" \
-		"PROXY_IMAGE_BY_CONTEXT could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown), while other inputs have a value: the report cannot tell whether those runs had the same gateway proxy builds as the others" \
-		"input TSVs disagree on KUBE_VERSIONS for ctx-a (v1.34.1;v1.34.2): the report mixes runs on different Kubernetes versions; compare like with like" \
-		"KUBE_VERSIONS could not be read for ctx-b in 1 of 2 input TSV(s) (recorded unknown or unreachable), while other inputs have a value: the report cannot tell whether those runs had the same Kubernetes versions as the others"
+		"input TSVs disagree on ISTIOD_IMAGE_BY_CONTEXT for ctx-a (pilot:1.30.5 or pilot:1.30.6): the report mixes runs with different values of it; compare like with like" \
+		"PROXY_IMAGE_BY_CONTEXT is unknown in some input TSVs (not read for ctx-b), while others have a value: the report cannot tell whether those runs had the same one" \
+		"input TSVs disagree on KUBE_VERSIONS for ctx-a (v1.34.1 or v1.34.2): the report mixes runs with different values of it; compare like with like" \
+		"KUBE_VERSIONS is unknown in some input TSVs (not read for ctx-b), while others have a value: the report cannot tell whether those runs had the same one"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
 	assert_line 'istiod_image_by_context: "ctx-a=mixed:pilot:1.30.5;pilot:1.30.6,ctx-b=pilot:1.30.5"'
 	assert_line 'proxy_image_by_context: "ctx-a=proxyv2:1.30.5,ctx-b=mixed:proxyv2:1.30.5;unknown"'
@@ -212,13 +203,11 @@ warned_in_body() {
 	refute_output --partial "cloud-provider-kind"
 }
 
-@test "004 (H10): inputs that agree, an operator state aside, warn in no format" {
+@test "004 (H10): inputs that agree warn in no format" {
 	tsv "${RES}/churn-a.tsv" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" <<-EOF
 	$(crow 1 99 N/A 10 N/A OK)
 	EOF
-	local -a plat=()
-	mapfile -t plat < <(platform_fixture_lines | sed 's/^# //; s#/Available#/Unavailable#g')
-	NO_PLATFORM=1 tsv "${RES}/churn-b.tsv" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" "${plat[@]}" <<-EOF
+	tsv "${RES}/churn-b.tsv" "KUBE_VERSIONS=ctx-a=v1.34.1,ctx-b=v1.34.1" <<-EOF
 	$(crow 2 99 N/A 10 N/A OK)
 	EOF
 	local fmt
@@ -231,7 +220,7 @@ warned_in_body() {
 		[ -z "$stderr" ] || { echo "$stderr"; false; }
 	done
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
-	assert_line 'mesh_operator_by_context: "ctx-a=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable,ctx-b=sail-operator:1.31.1/Available;sail-operator:1.31.1/Unavailable"'
+	assert_line 'mesh_operator_by_context: "ctx-a=sail-operator:1.31.1,ctx-b=sail-operator:1.31.1"'
 }
 
 @test "004: an OK row an older 002 wrote with no number in a measured column is re-derived, in every format" {

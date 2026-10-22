@@ -240,8 +240,8 @@ reach_body_line() {
 # preamble and header, and only when the file does not exist yet (PL36). REACH_SCHEMA,
 # the REACH_* knobs, the run config (RUN_CONFIG, RUN_CONFIG_SHA256: config.sh) and the
 # platform record (platform.sh) are always written: of the members in --contexts (a
-# file the whole sweep appends to: every member it covers), else of the members the
-# run read (platform_probed_contexts). Callers add RUN_ID, HARNESS_SHA, SUITE,
+# file the whole sweep appends to: every member it covers), else of every member the
+# record holds (platform_recorded_contexts). Callers add RUN_ID, HARNESS_SHA, SUITE,
 # NAMESPACE and ON_UNREACHABLE.
 # Returns 1 (the caller reports the check as not run) when config.sh or platform.sh
 # is not sourced.
@@ -267,7 +267,7 @@ reach_write_header() {
 		echo "# REACH_SCHEMA=${REACH_SCHEMA}"
 		for kv in "$@"; do echo "# ${kv}"; done
 		config_preamble_lines
-		platform_preamble_lines "${_rw_ctxs:-$(platform_probed_contexts)}"
+		platform_preamble_lines "${_rw_ctxs:-$(platform_recorded_contexts)}"
 		echo "# REACH_REQUESTS=${REACH_REQUESTS:-10}"
 		echo "# REACH_QPS=${REACH_QPS:-10}"
 		echo "# REACH_HTTP_TIMEOUT_SEC=${REACH_HTTP_TIMEOUT_SEC:-3}"

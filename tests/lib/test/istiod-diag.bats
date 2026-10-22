@@ -752,7 +752,7 @@ _dp_run() {
 	assert_success
 	assert_output --partial "## istiod restart diagnostics"
 	assert_output --partial "oom_killed=1"
-	# stdout only: the stub reads no platform record, so the report warns on stderr (H5).
+	# stdout only: the report's warnings (the stub reads no platform record) go to stderr (H5).
 	run --separate-stderr "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$RES" --format json
 	[ "$(jq -c '.istiod_diag.by_cause' <<<"$output")" = '{"oom_killed":1}' ]
 	# No comment line in CSV output: the section is in text, md and json only.

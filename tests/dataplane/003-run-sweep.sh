@@ -112,7 +112,8 @@ Environment:
   DATAPLANE_WAIT_TIMEOUT_SEC (read by 001), DATAPLANE_NS_DELETE_TIMEOUT_SEC (read by 005).
   The sweep checks every numeric one of them, and the flags that set them, before the
   first setup, --dry-run included.
-$(platform_help_lines all)
+  TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}) and
+  PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}): the platform record's reads (config/options.env).
   SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's processes
   before SIGKILL. Environment only (config/options.env).
 
@@ -126,7 +127,8 @@ Exit codes:
   4  the sweep finished and wrote its reports, but N cells failed (setup or probe
      exited non-zero; stderr ends with "N of M cells failed" by reason), or the Istio
      version, the active revision or the generation of the Istio CR or its active
-     IstioRevision changed during the sweep (read again at its end), or the harness
+     IstioRevision changed during the sweep (read again at its end), or a member's
+     platform record (a build, istiod's env: read again at its end), or the harness
      (a file under tests/, config/, charts/ or terraform/) changed during the sweep
      (HARNESS_SHA read at its start and its end); the outcome is also in
      sweep-outcome.txt and every report
@@ -522,8 +524,9 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete."
 	exit 0
 fi
-# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
-platform_drift_check "$OUTPUT_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
+# The platform record again: a build or istiod setting that changed during the sweep is a
+# problem of its outcome (tests/lib/platform.sh).
+platform_drift_check "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "  Sweep finished"

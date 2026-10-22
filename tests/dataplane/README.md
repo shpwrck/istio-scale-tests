@@ -377,17 +377,15 @@ the row with a folder; the other rows count as repeats. json has the section as
 `PLATFORM_BY_CONTEXT`, `MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`,
 `PROXY_IMAGE_BY_CONTEXT` (the ingress and east-west gateways' build; the test pods' sidecars get
 the injector's, normally istiod's release), `NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`
-(a digest of istiod's discovery container env without `CLUSTER_ID`: its settings),
-`TUNING_OBJECTS_BY_CONTEXT` (a tuning profile's objects, `none` outside a tuning run)) names the
+(a digest of istiod's discovery container env without `CLUSTER_ID`: its settings)) names the
 platform and the mesh builds the run measured, read before the first window (a sweep reads it
 once and hands it to its combos in `platform-record.txt` in the sweep dir, and reads it again
-after its last combo: a build, istiod setting, tuning lever, tuning profile object or Kubernetes
-version that changed in between is written to `platform-drift.txt` there, as is what that read
-could not compare). An image carries the digest its pods run (`@unknown` when none has started: not
-read, never another build); `none` means no such pod. `004` prints it in every format, with a
-warning in the report itself (the top-level `warnings` array in json, empty without one) when its
-inputs differ, a value could not be read in some of them, the sweep's record changed or a tuning
-profile's objects were in place (an operator that differs only in its state is not a difference). On
+after its last combo: a value that changed in between is a problem of the sweep's outcome, which
+`004` prints, and a member it cannot read again a note there; the sweep also warns as it starts,
+and notes it, when a member holds a tuning profile's objects). An image carries the digest its pods
+run (`@unknown` when none has started: not read, never another build); `none` means no such pod.
+`004` prints it in every format, with a warning in the report itself (the top-level `warnings` array
+in json, empty without one) when its inputs differ or a value could not be read in some of them. On
 kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be read, every
 format also warns that the cross-cluster path runs (or may run) through cloud-provider-kind's
 userspace Envoy (the east-west gateway's LoadBalancer) on the host the kind clusters share, so

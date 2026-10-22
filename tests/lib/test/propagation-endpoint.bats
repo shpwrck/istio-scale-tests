@@ -252,7 +252,7 @@ prow23() {
 			# 3: clean.
 			prow23 3 b OK 0 0 OK 5 OK 5 | cut -f1-"$w"
 		} > "${RES}/endpoint-r1.tsv"
-		# (They predate the platform record too: a warning on stderr.)
+		# (They predate the platform record too: its keys read unknown.)
 		run --separate-stderr "${PR}/005-report-results.sh" --results-dir "$RES" --format json
 		assert_success
 		# P2/P3: row 1 (overflow only) and row 3 count, row 2 (RESTART) does not.
