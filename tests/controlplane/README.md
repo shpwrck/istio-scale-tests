@@ -6,6 +6,45 @@ a VirtualService and DestinationRule per service). Growth mode measures how thou
 namespaces with a few services each drive istiod, proxy and gateway cost
 ([Namespace scaling](#namespace-scaling-growth-mode)).
 
+## At a glance
+
+**Question:** how much CPU, memory and configuration-push work does istiod need as the mesh
+grows (more services, replicas, namespaces or members), and how big does each proxy's
+configuration get, with and without `Sidecar` scoping?
+
+**What it deploys**, in namespace `controlplane-test` on every member it uses (or
+`controlplane-test-0` ... `-N` when a cell spreads services over several namespaces): N small
+Deployments with a Service each (10 services × 3 replicas by default), optionally a `Sidecar`
+resource that scopes what each proxy sees, and optionally a VirtualService and DestinationRule
+per service. Each cell deploys its own set and deletes it afterwards.
+
+**What a run does:** for each cell of the matrix (mesh size × services × replicas × namespaces ×
+scoping × traffic config): read istiod's metrics, deploy the workloads, let them settle (60 s by
+default), read istiod's metrics again, sample a few proxies' configuration, then delete the
+workloads. The report is computed from the difference between the two reads. Rough time: about 5
+minutes per cell; the default matrix has 2 cells, while a real campaign has dozens and runs for
+hours (`--dry-run` prints the matrix and a capacity check).
+
+**Reading the results:** the sweep writes `sweep-<RUN_ID>.md` (one row per cell) and
+`scale-envelope-<RUN_ID>.md` (a one-line verdict first). The columns to start with:
+
+| Column | Meaning |
+| --- | --- |
+| `cpu_peak (m)`, `rss_peak (Mi)` | istiod's busiest CPU (millicores) and memory during the window, per replica |
+| `xDS pushes` | configuration updates istiod sent to proxies during the window |
+| `conv_p99 (ms)` | the 99th percentile time for a change to reach the proxies (a histogram bucket range) |
+| `cfg_dump_avg (MiB)` | how much configuration each sampled proxy holds; `Sidecar` scoping should shrink it |
+| verdict (`PASS` / `CAUTION` / `FAIL`) | istiod CPU or memory under 75% of its limit / 75 to 90% / over 90% or a restart |
+
+Compare cells along one axis at a time: the question is how a number grows as one setting grows.
+For scale, the June 2026 ten-cluster ROSA run measured per-proxy configuration of 3.9 MiB without
+scoping and 0.5 MiB with it ([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)).
+A cell whose istiod restarted is counted in `n_total` but not averaged; [Outputs](#outputs) has
+every column and status, and [Reading results](../../docs/reading-results.md) the checks that
+apply to every suite.
+
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#controlplane).
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see
@@ -174,8 +213,8 @@ every member's rows of the cell were already written (the sweep ended in its dia
 cleanup): that cell is done.
 
 The sweep keeps its outcome in `sweep-outcome.txt` from its start (after its preflights, before
-the first cell), as every sweep does ([How a sweep ends](../../README.md#how-a-sweep-ends)), and
-its TSVs record what [every result records](../../README.md#what-every-result-records). A record
+the first cell), as every sweep does ([How a sweep ends](../../docs/reference.md#how-a-sweep-ends)), and
+its TSVs record what [every result records](../../docs/reference.md#what-every-result-records). A record
 that still says `running` is from a sweep that died (or still runs): clean up and run it again, as
 above. Before its first cell a run in legacy mode counts the `controlplane-test` namespaces on the
 members and on the other mesh members their Istio remote secrets name (those with a kube context of
@@ -192,11 +231,11 @@ preamble records the counts (`LEFTOVER_TEST_NAMESPACES`) and the outcome says so
 Exit codes: `0` every cell ran; `1` the sweep stopped (a bad flag or precondition, such as test
 namespaces left on a mesh member that `--contexts` does not name; an unexpected error; or
 `RETIRE_FAILED`, after its reports); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM,
-SIGHUP; [How a sweep ends](../../README.md#how-a-sweep-ends)); `4` it finished and
+SIGHUP; [How a sweep ends](../../docs/reference.md#how-a-sweep-ends)); `4` it finished and
 wrote its reports, but some cells failed (a status row instead of a measurement: `SETUP_FAILED`,
 `PROBE_FAILED`, `GROW_FAILED`, `SWITCH_FAILED`, `INTERRUPTED`; `INCOMPLETE`: rows for fewer members
 than the mesh size, or a member with fewer rows than its window wrote; or `NOT_RUN`: planned, but no
-row), or it recorded a problem (those of [every sweep](../../README.md#how-a-sweep-ends), or the
+row), or it recorded a problem (those of [every sweep](../../docs/reference.md#how-a-sweep-ends), or the
 cells could not be counted: `TOTAL=unknown`; the rows are intact, but the cells without a row
 (`NOT_RUN`) are then not counted). An
 `INCOMPLETE` cell, and a sweep outcome that is not `finished`, names a failed cell (`NOT_RUN`
@@ -226,7 +265,7 @@ scoping bring their own `Sidecar`s, so they need no change.
 Every script (`001`-`005`) takes `--config FILE`, a file of `KEY=value` lines, so one file
 describes a whole run: setup, collection, sweep, report and cleanup. The rules shared by every
 suite (syntax, precedence, environment-only keys, provenance) are in
-[Run config](../../README.md#run-config---config-file).
+[Run config](../../docs/reference.md#run-config---config-file).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (5 services × 2 replicas, mesh
 sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 
@@ -266,7 +305,7 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
 - **No key (flags only):** `--dry-run`, `--force-large-matrix`, `--format`,
   `--allow-multi-run` (`004`), `--phase`, `--state-dir`, `--run-id`, `--watch`, `--interval`
   and `--mesh-size`.
-- **Provenance:** as in every suite ([Run config](../../README.md#run-config---config-file)): the
+- **Provenance:** as in every suite ([Run config](../../docs/reference.md#run-config---config-file)): the
   TSV preamble records `RUN_CONFIG` and `RUN_CONFIG_SHA256`, a sweep copies the file to
   `sweep-<RUN_ID>/run-config-<RUN_ID>.env`, and a results dir with more than one run stops `004`
   unless `--allow-multi-run` pools them on purpose (the calibration below; legacy cells pool
@@ -276,7 +315,7 @@ sizes 1 and 2, scoping `none` and `namespace`, a 20 s window):
   `run_id` reads `multiple`. Inputs from different Istio versions or harnesses print a `WARNING`
   (every format, and stderr for the formats other than text) and read `mixed:<a>,<b>`; different
   Istio versions also turn a `PASS` verdict into `CAUTION`.
-- **Platform record:** the [record](../../README.md#the-platform-record) is read before the first
+- **Platform record:** the [record](../../docs/reference.md#the-platform-record) is read before the first
   window (a standalone `002` reads it in each phase); the growth mode's `ns-lifecycle-<RUN_ID>.tsv`
   and `mem-guard-<RUN_ID>.tsv` carry it too (a standalone `001` or `005` reads it when it creates
   the lifecycle file). `004` prints it in every format, with a warning in the report itself

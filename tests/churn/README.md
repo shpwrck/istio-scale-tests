@@ -5,6 +5,38 @@ churn-target deployments on one **source** cluster and times when the source see
 the new pods and when each **remote** cluster sees them. Remote clusters stay at
 base replicas, so the remote numbers are cross-cluster propagation only.
 
+## At a glance
+
+**Question:** when Deployments scale up on one cluster, how long until the proxies on that
+cluster, and on every other cluster, can reach the new pods?
+
+**What it deploys**, in namespace `churn-test` on every member it uses: 5 small Deployments (the
+churn targets, 1 replica each) and one watcher pod whose proxy the probe reads. The sweep removes
+them when it ends.
+
+**What a run does:** for each mesh size and churn intensity (the number of Deployments scaled),
+set up, then repeat 5 times: scale every churn target on the source member from 1 to 5 replicas
+at once, time how long the local and remote proxies take to see the new pods, scale back and
+settle. Then clean up and write the report. Rough time with two members at the defaults: 10 to
+15 minutes.
+
+**Reading the results:** the sweep's `sweep-<RUN_ID>.md` averages, per mesh size and intensity:
+
+| Column | What it times, from the scale-up |
+| --- | --- |
+| `convergence_local_ms` | until the source member's proxies see the new pods and istiod reports every proxy in sync (includes pod start-up) |
+| `convergence_remote_eds_ms` | until the remote istiod pushes the change (control plane only) |
+| `remote_endpoint_reachable_ms` | until a remote proxy has the new pods as healthy endpoints: the end-to-end number |
+
+Smaller is better; watch how the remote numbers grow with mesh size and intensity. For scale, the
+June 2026 ten-cluster ROSA run measured local convergence of 2.4 to 3.7 s and remote reach of 7.8
+to 12 s ([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)). Rows with a status
+other than `OK` are counted in `n_total` but not averaged; [What gets measured](#what-gets-measured)
+lists them, and [Reading results](../../docs/reading-results.md) the checks that apply to every
+suite.
+
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#churn).
+
 ## Architecture
 
 > Diagram conventions are shared across suites — see
@@ -86,7 +118,7 @@ not averaged: the report shows the worst bucket range a valid row hit (e.g. `500
 or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
 `worst_bucket` and `n_overflow` columns).
 
-The TSV preamble records [what every result records](../../README.md#what-every-result-records),
+The TSV preamble records [what every result records](../../docs/reference.md#what-every-result-records),
 read before the first churn event (a sweep reads the platform record once for all its combos).
 `004` prints it in every format (text, csv, md, charts; it has no json), per member as
 `<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ (`KUBE_VERSIONS`:
@@ -145,7 +177,7 @@ A failed setup or probe becomes a placeholder row and the sweep moves on.
 Exit codes: `0` every cell (mesh size x intensity) ran; `1` the sweep stopped (a bad flag or
 precondition, or an unexpected error); `130`, `143` or `129` it was interrupted; `4` it finished
 and wrote its reports, but some cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it
-recorded a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
+recorded a problem ([How a sweep ends](../../docs/reference.md#how-a-sweep-ends) has those, and the
 `sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
 reason. When a sweep did not finish and no sweep runs any more, run `005-cleanup.sh --contexts <the
 sweep's members>`, then run the sweep again into a new dir; the rows already in the dir cover only
@@ -156,7 +188,7 @@ Rows a probe wrote with a non-OK status (`TIMEOUT_*`, `MISSING_VALUE`,
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 2 and 4 Deployments scaled 1 to 2, 2 iterations):
 

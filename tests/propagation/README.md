@@ -3,6 +3,40 @@
 Measures how long a new endpoint takes to reach istiod and sidecars on the source cluster
 and on every remote cluster in a multi-primary mesh.
 
+## At a glance
+
+**Question:** when a pod becomes a ready endpoint on one cluster, how long until the control
+planes and the proxies on every cluster know about it?
+
+**What it deploys**, in namespace `propagation-test` on every member it uses: watcher pods
+(sidecar-injected pods whose proxies receive the new endpoint; 1 by default, 30 gives enough
+proxies for a p99) and one backer pod, the pod that becomes the endpoint. The sweep removes them
+when it ends.
+
+**What a run does:** for each mesh size (1 member, then 2, ...), set up, then repeat 10 times:
+add the backer to the `propagation-canary` Service with one label change on the source member,
+time the three phases below, remove it again and wait for it to drain. Then clean up and write
+the report. Rough time with two members at the defaults: 10 to 20 minutes.
+
+**Reading the results:** the sweep's `sweep-summary.md` has one table per phase, each with min,
+average, p50, p95, p99 and max per mesh size:
+
+| Phase | What it times, from the label change |
+| --- | --- |
+| `P1_local_wall` | until the source's istiod has pushed the change to every connected proxy |
+| `P2_discovery` | until each remote member's istiod pushes the new endpoint to its proxies |
+| `P3_dataplane` | until a proxy on each remote member reports the endpoint healthy: the end-to-end number |
+
+Smaller is better. Look at how they change with mesh size: P2 and P3 growing with the number of
+members means cross-cluster propagation is the bottleneck. For scale, the June 2026 ten-cluster
+ROSA run measured P1 and P2 flat at about 2 seconds from 1 to 10 members
+([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)). Rows with a status other than
+`OK` (a timeout, an istiod restart, a failed scrape) are counted in `n_total` but not averaged;
+[Outputs](#outputs) has the full list and [Reading results](../../docs/reading-results.md) the
+checks that apply to every suite.
+
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#propagation).
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see
@@ -102,7 +136,7 @@ Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precon
 unexpected error); `4` it finished and wrote its reports, but some mesh sizes failed (setup or probe
 exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder row), or it recorded a problem;
 `130`, `143` or `129` it was interrupted. What each records in `sweep-outcome.txt`, and the problems
-every sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not
+every sweep checks: [How a sweep ends](../../docs/reference.md#how-a-sweep-ends). When a sweep did not
 finish and no sweep runs any more, run `007-cleanup.sh --contexts <the sweep's members>`, then run
 the sweep again into a new dir.
 Rows a probe wrote with a non-OK status are measurements, not failures: the report counts them in
@@ -114,7 +148,7 @@ size that measured fewer iterations or rows than that warns in every format and 
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 3 iterations each):
 
@@ -166,7 +200,7 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   p1_conv_p50_ms p1_conv_p99_ms p1_sample_count p1_proxy_count p1_overflow restarted p2_dirty
   window_ms scrape_skew_ms p1_status p1_scrape_skew_ms remote_status remote_scrape_skew_ms`.
   Older TSVs have 18, 19 or 21; `006`'s `SETUP_FAILED` / `PROBE_FAILED` rows use all 23.
-- The preamble's [platform record](../../README.md#the-platform-record), read before the first
+- The preamble's [platform record](../../docs/reference.md#the-platform-record), read before the first
   iteration (a sweep reads it once for all its steps, and again after the last one). `005` prints
   it in every format, as `mixed` with a warning in the report itself (the top-level `warnings`
   array in json, empty without one) when its inputs differ or a value could not be read in some

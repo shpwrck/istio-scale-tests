@@ -3,6 +3,37 @@
 Measures request latency and throughput between sidecars, in-cluster and through the
 east-west gateways, using fortio.
 
+## At a glance
+
+**Question:** how much latency does a request add when it crosses to another cluster through the
+east-west gateways, compared with the same request inside one cluster?
+
+**What it deploys**, in namespace `dataplane-test`: on every member it uses, 2 fortio server
+pods (an HTTP load-test server) and one Service per member that selects only that member's
+servers; on the source member, also a fortio client pod that generates the load. The sweep
+removes them when it ends.
+
+**What a run does:** for each mesh size, set up, check that every remote member answers, then
+send load from the client at 10, 100, 500 and 1000 requests per second for 30 s each, to the
+source member's own servers (the local baseline) and to each remote member's servers (the
+cross-cluster path). Then clean up and write the report. Rough time with two members at the
+defaults: about 15 minutes.
+
+**Reading the results:** the sweep's `sweep-<RUN_ID>.md` has a row per mesh size, request rate
+and target class (`local` or `remote`), with p50, p90, p99 and max latency in milliseconds, the
+achieved request rate and the share of HTTP 200 answers. The answer to the question is the
+difference between `remote` and `local` at the same rate. The report first states whether the
+local baseline is usable (`Local baseline: OK`); when it is not, there is nothing to compare
+against. A row is left out of the averages when the client could not reach the requested rate
+(`QPS_SHORTFALL`: the server was saturated) or fewer than 99% of requests succeeded. For scale,
+the June 2026 ten-cluster ROSA run measured the cross-cluster hop at about 1 ms at p50 (2.4 to
+2.8 ms local, 2.8 to 3.6 ms remote; [record](../../docs/campaigns/2026-06-04-clean-pass-results.md)).
+On kind the cross-cluster path runs through a local proxy on the same machine, so remote numbers
+there mean nothing. [Outputs](#outputs) has every column and status, and
+[Reading results](../../docs/reading-results.md) the checks that apply to every suite.
+
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#dataplane).
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see
@@ -122,7 +153,7 @@ Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precon
 unexpected error); `130`, `143` or `129` it was interrupted; `3` the reachability gate stopped it
 (`--on-unreachable fail`, see below; the reports are written); `4` it finished and wrote its
 reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it recorded
-a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
+a problem ([How a sweep ends](../../docs/reference.md#how-a-sweep-ends) has those, and the
 `sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
 reason; `3` wins over `4`. When a sweep did not finish and no sweep runs any more, run
 `005-cleanup.sh --contexts <the sweep's members>`, then run the sweep again into a new dir; the rows
@@ -131,7 +162,7 @@ already in the dir cover only the mesh sizes it finished.
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 QPS 10 and 100, 10 s per level):
 
@@ -365,7 +396,7 @@ the row with a folder; the other rows count as repeats. json has the section as
 ## Outputs
 
 `latency-<RUN_ID>.tsv` has a `# KEY=value` preamble
-([what every result records](../../README.md#what-every-result-records), `FORTIO_IMAGE`, ...),
+([what every result records](../../docs/reference.md#what-every-result-records), `FORTIO_IMAGE`, ...),
 read before the first window, and these columns. `004` prints the preamble in every format, with a
 warning in the report itself (the top-level `warnings` array in json, empty without one) when its
 inputs differ or a value could not be read in some of them. On kind nodes

@@ -5,6 +5,35 @@ Fortio (client and server) and churn-target deployments share one namespace. Eac
 runs a **baseline** window (steady load, no churn) and a **churn** window (same load
 plus deployment scale events) and reports `Δp99_ms = churn p99 − baseline p99`.
 
+## At a glance
+
+**Question:** does request latency get worse while the mesh is busy with endpoint churn
+(Deployments scaling up and down)?
+
+**What it deploys**, in namespace `churn-dataplane-test`: on every member it uses, fortio
+servers and 5 churn-target Deployments; on the source member, also the fortio client that sends
+the load. The load never goes to the churn targets, so any effect comes from the control plane
+and the nodes being busy, not from the requests themselves. The sweep removes it all when it
+ends.
+
+**What a run does:** for each mesh size and churn rate (1, 5 and 10 scale operations per second
+by default), send steady load at 200 requests per second for 60 s with nothing else happening
+(the baseline window), then for another 60 s while the churn targets scale up and down at that
+rate (the churn window). Then clean up and write the report. Rough time with two members at the
+defaults: about 20 minutes.
+
+**Reading the results:** the sweep's `sweep-summary-<run-id>.md` gives, per mesh size and churn
+rate, the mean and spread of `Δp99_ms`: the p99 latency in the churn window minus the p99 in the
+baseline window, in milliseconds. Close to 0 means churn does not affect requests; it usually
+grows with the churn rate. The table also has p50, p99 and the request rate of both windows, and
+istiod's pushes during them, to explain a change. A window counts only when its load reached
+99% HTTP 200 answers, istiod did not restart, and at least 90% of the requested scale operations
+succeeded (`CHURN_RATE_NOT_MET` otherwise); `valid_runs` against `total_runs` says how many did.
+[Results](#results) has every status, and [Reading results](../../docs/reading-results.md) the
+checks that apply to every suite.
+
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#churn-dataplane).
+
 ## Architecture
 
 > Diagram conventions are shared across suites — see
@@ -124,7 +153,7 @@ unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`
 are written); `4` it finished and wrote its reports, but some combinations failed (`SETUP_FAILED`,
 `RESET_FAILED` or `PROBE_FAILED` rows), or it recorded a problem; `130`, `143` or `129` it was
 interrupted. `3` wins over `4`. What each records in `sweep-outcome.txt`, and the problems every
-sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not finish and
+sweep checks: [How a sweep ends](../../docs/reference.md#how-a-sweep-ends). When a sweep did not finish and
 no sweep runs any more, run `006-cleanup.sh --contexts <the sweep's members> --wait-deletion`, then
 run the sweep again into a new dir; the rows already in the dir cover only the cells it finished.
 
@@ -217,7 +246,7 @@ validity stricter. To compare against those sweeps without the stricter rule, se
 `COEXEC_MIN_PCT_200=0`. Their TSVs have no `MIN_PCT_200` line and no reach file, so the
 report shows `unknown` and "no reachability data".
 
-Every TSV preamble also carries the [platform record](../../README.md#the-platform-record),
+Every TSV preamble also carries the [platform record](../../docs/reference.md#the-platform-record),
 read before the baseline window (a sweep reads it once for all its combos, and again after the last
 one). `005` prints it in every format, with a warning in the report itself (the top-level `warnings`
 array in json, empty without one) when its inputs differ or a value could not be read in some of
@@ -232,7 +261,7 @@ reads their values as `unknown`.
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 

@@ -157,9 +157,13 @@ done
 `root=` must read the same on both members; `replicas=1` is the lab's one istiod replica; `members=`
 lists both members, which each gate checks by name.
 
-Then run the end to end echo check in [Verify](../../../README.md#verify) with `kind-hub` as
-`<hub-ctx>` and `kind-mesh-1` as `<mesh-a-ctx>`: answers come from both members. The ingress
-address is on the kind Docker network, which a Linux host reaches directly.
+Then run the preflight ([Check the mesh](../../../README.md#2-check-the-mesh)) with the end to end
+echo check; answers come from both members. The ingress address is on the kind Docker network,
+which a Linux host reaches directly.
+
+```bash
+tests/preflight/001-check-mesh.sh --contexts kind-mesh-1,kind-mesh-2 --hub-context kind-hub --echo
+```
 
 ## 6. Smoke-run a suite
 
