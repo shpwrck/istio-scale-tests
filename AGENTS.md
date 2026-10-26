@@ -117,8 +117,8 @@ which wins over the upstream docs there when they disagree.
 | --- | --- |
 | `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC`, `SWEEP_STOP_GRACE_SEC` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
-| `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
-| `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check) |
+| `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs), `scripts/002-plan-leftover-check.sh` (objects a saved plan creates that exist on the hub) |
+| `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check; `olm-subscription-wait.sh`: an OLM operator install, naming what blocks it) |
 | `charts/gitops-hub-app-of-apps/` | Root Application `hub-gitops-root` (Helm source on `charts/gitops-hub-apps`) |
 | `charts/gitops-hub-apps/` | Child Applications (repo URL/branch templated; `apps.<name>.enabled/values`) |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable ApplicationSet + presets `values-*.yaml` + platform overlays `platform-*.yaml` (cluster-Secret label or ACM Placement) |

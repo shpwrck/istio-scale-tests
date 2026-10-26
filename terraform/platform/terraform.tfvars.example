@@ -40,6 +40,7 @@ spoke_cluster_contexts = ["<mesh-a-ctx>", "<mesh-b-ctx>"]
 # gitops_install_operator              = false           # Argo CD (kubernetes) or OpenShift GitOps
 # cert-manager already installed: keep the "hub-cert-manager-operator" key in the map below.
 # openshift only:
+# gitops_operator_namespace            = "openshift-operators" # GitOps from an apply before 2026-10-26
 # acm_install_operator                 = false
 # acm_local_cluster_name               = "local-cluster" # keep the existing MultiClusterHub value
 # acm_keep_managed_clusters_on_destroy = true            # spokes were ACM-managed before Terraform

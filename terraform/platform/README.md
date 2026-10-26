@@ -34,8 +34,15 @@ cp terraform.tfvars.example terraform.tfvars   # platform, repo URL/branch, clus
 ./scripts/001-openapi-preflight.sh --contexts <hub-ctx>   # existing OpenShift hubs only
 terraform init
 terraform plan -out=platform.tfplan
+./scripts/002-plan-leftover-check.sh platform.tfplan   # objects already on the hub
 terraform apply platform.tfplan
 ```
+
+`002-plan-leftover-check.sh` lists every object the plan creates that exists on the hub already,
+with the `terraform import` command that adopts it. Such objects are left when a Terraform state
+is lost (a rebuild from scratch), or were made by hand, and an apply would stop partway on
+`Cannot create resource that already exists`. Import each one, or delete the ones nothing needs,
+then plan again. The check is read-only and exits 0 when there is none.
 
 Then watch the rollout until every Application is Synced/Healthy (about 15–20 minutes):
 `kubectl --context <hub-ctx> get applications.argoproj.io -n argocd` (`terraform output
@@ -145,6 +152,7 @@ which replica owns which cluster (every replica logs the whole map):
 | cert-manager | `gitops_app_overrides = { "hub-cert-manager-operator" = { enabled = false } }` |
 | ACM (`openshift`) | `acm_install_operator = false`, `acm_local_cluster_name = "local-cluster"` |
 | OpenShift GitOps (`openshift`) | `gitops_install_operator = false` |
+| OpenShift GitOps from an apply of this repo before 2026-10-26 | `gitops_operator_namespace = "openshift-operators"` |
 
 An existing Argo CD must run with the release name `argocd` (its controllers' ServiceAccounts are
 `argocd-application-controller` and `argocd-applicationset-controller`, which the charts' RBAC
@@ -152,6 +160,16 @@ expects) and carry the settings `platform_gitops.tf` gives the chart (`argocd_up
 the Sail health checks, the resource exclusions, round-robin sharding and git submodules off. With
 `gitops_install_operator = false` nothing applies `argocd_helm_values`, so the plan warns when it
 is set.
+
+On OpenShift, Terraform subscribes the GitOps operator in `gitops_operator_namespace`
+(`openshift-gitops-operator`, with its own OperatorGroup, as Red Hat installs it). In a
+namespace shared with other operators, a single Subscription there with Manual approval makes the
+GitOps InstallPlan Manual too, and the install waits for someone to approve it. The default was
+`openshift-operators` until 2026-10-26: a deployment applied before then keeps its operator there
+with `gitops_operator_namespace = "openshift-operators"`, and in kubeconfig mode its plan fails
+until that is set. While the apply waits for an operator (GitOps or ACM), it prints an InstallPlan
+that needs approval, with the command that approves it, and any catalog or resolution error, as
+soon as it sees one.
 
 If the spokes are already ACM-managed (OpenShift), import their namespaces once before the first
 apply: `terraform import 'kubernetes_manifest.spoke_namespace["<ctx>"]' "apiVersion=v1,kind=Namespace,name=<ctx>"`.
@@ -161,7 +179,13 @@ apply: `terraform import 'kubernetes_manifest.spoke_namespace["<ctx>"]' "apiVers
 The chart defaults are sized for the 20-cluster campaign: about 12.2 CPU / 49 GiB of requests per
 member (istiod's 3 replicas of 4 CPU / 16 GiB) and, on the hub, Argo CD's 3 CPU / 6 GiB plus 2 CPU /
 4 GiB per controller replica, ceil((spokes + 1) / `argocd_clusters_per_shard`): 5 CPU / 10 GiB
-for 2 members, 17 CPU / 34 GiB for 20. Override them per environment without forking:
+for 2 members, 17 CPU / 34 GiB for 20. These are requests, what the scheduler sets aside: pods
+that request less CPU than they use still load a small node. Pod slots count too, 110 per node by
+default on Kubernetes and 250 on OpenShift: on an OpenShift hub ACM 2.17 starts about 81 pods, and
+OpenShift GitOps and the hub charts about 20. A kubeconfig-mode plan warns when no MultiClusterHub
+exists yet and fewer than 100 slots are free; a pod left without one stays Pending with
+`Too many pods`, and the reshard step names it. Override the sizing per environment without
+forking:
 
 - `gitops_app_overrides`: per child app `enabled` and `values` (for example a smaller istiod, a
   MetalLB pool for the gateways, or a chart mirror). See `terraform.tfvars.example`.
