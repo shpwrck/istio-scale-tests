@@ -191,8 +191,8 @@ variable "argocd_helm_values" {
 
 variable "gitops_operator_namespace" {
   type        = string
-  default     = "openshift-operators"
-  description = "platform openshift: namespace for the OpenShift GitOps operator OLM Subscription."
+  default     = "openshift-gitops-operator"
+  description = "platform openshift: namespace for the OpenShift GitOps operator OLM Subscription. Terraform creates it with an OperatorGroup, unless it is openshift-operators: the default until 2026-10-26, where a deployment applied before then keeps its operator (set it to openshift-operators). In a shared namespace any Manual Subscription makes the GitOps InstallPlan Manual too."
 }
 
 variable "gitops_operator_channel" {

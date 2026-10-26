@@ -115,7 +115,11 @@ it ends (the namespace and what it holds are in each suite's README):
   17 CPU / 34 GiB with 20. Smaller clusters need the overrides in
   [terraform.tfvars.example](terraform/platform/terraform.tfvars.example) (`gitops_app_overrides`
   for istiod, `argocd_helm_values` for Argo CD), as the
-  [kind lab](docs/runbooks/kind-lab/README.md) sets them.
+  [kind lab](docs/runbooks/kind-lab/README.md) sets them. These are requests, what the scheduler
+  sets aside: pods that request less CPU than they use still load a small node. Pod slots count
+  too: a node takes 110 pods by default on Kubernetes and 250 on OpenShift, where the hub's ACM
+  adds about 81 and OpenShift GitOps with the hub charts about 20
+  ([terraform/platform/README.md](terraform/platform/README.md#per-environment-values)).
 - The CNI plugin and its config where the Sail `default` profile puts them (`/opt/cni/bin`,
   `/etc/cni/net.d`). k3s, MicroK8s and other distributions that keep them elsewhere need
   `istioCni.values` in `charts/spoke-ossm` (e.g. `global.platform: k3s`) through
@@ -286,6 +290,7 @@ kubectl --context <mesh-ctx> -n istio-system delete secret istio-remote-secret-<
 | No `cacerts` or remote secrets on members | Check the ESO pods on the hub (`kubectl get pods -n external-secrets-operator`); on a small hub lower the Argo CD requests with `argocd_helm_values` (`argocd_config_values` on OpenShift). |
 | Pods stay `Pending` with `Insufficient cpu` or `Insufficient memory` (`kubectl describe pod`) | The chart defaults need the capacity in [What you need](#what-you-need). Lower istiod with `gitops_app_overrides` (`spoke-ossm-appset`) and Argo CD with `argocd_helm_values`, as in `terraform/platform/terraform.tfvars.example`. |
 | The apply fails on `helm_release.argocd` after 900 s (`context deadline exceeded`) | Usually the same: the Argo CD pods cannot schedule on the hub (`kubectl -n argocd get pods`, then `describe` a Pending one). Lower the requests with `argocd_helm_values` and apply again. |
+| Pods stay `Pending` with `Too many pods` | The node has no pod slot left (110 per node by default on Kubernetes, 250 on OpenShift). Remove workloads the cluster does not need, add a node, or raise the kubelet's `maxPods` (a KubeletConfig on OpenShift), then apply again. |
 | The apply fails: `Argo CD on the hub cannot load state from these clusters` | The member's registered URL is not reachable from the hub's pods (a kubeconfig that points at `127.0.0.1`, a private endpoint). Set `cluster_api_url_overrides` to an address that the hub and every member reach, and apply again. `Unauthorized` or `Forbidden` in the quoted message is the member's token instead ([terraform/platform/README.md](terraform/platform/README.md#rotating-a-members-token)). |
 | Gate says `no remote secret here for mesh member(s) <member>` | The hub has not pushed that member's remote secret to this one. On the hub, `kubectl -n external-secrets-operator describe pushsecret push-remote-secret-<member>` shows the stores it reached and its last error (`Unauthorized` for this member's store: [rotate this member's token](terraform/platform/README.md#rotating-a-members-token)). Right after a member joins, wait: the push takes up to about 10 minutes. |
 | Gate says `remote secret(s) of no mesh member` | A member left, and External Secrets leaves what it pushed: run the `kubectl ... delete secret` the gate prints, on this member ([Grow the mesh](#grow-the-mesh)). Check first that the name is not a member being added: its secret can arrive a moment before this gate restarts with the new list. |
