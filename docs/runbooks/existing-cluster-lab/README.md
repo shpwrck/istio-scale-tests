@@ -21,7 +21,7 @@ below are owned here.
 
 - **Running since the rebuild of 2026-10-26.** The platform and mesh were torn down on
   2026-10-21 after another lab, and that Terraform state was lost. The rebuild ran from the
-  head of shpwrck/istio-scale-tests#110 (charts from `main`), then that PR's smoke run.
+  head of PR #110 (charts from `main`), then that PR's smoke run.
   - The lab was clean after the smoke: no test namespaces, no sync windows, no on-demand checks
     deployed, istiod at 1 replica, all 30 Applications Synced/Healthy, both mesh-wiring gates
     `Ready ... ca=shared`, and `terraform plan` reported no changes.
@@ -38,7 +38,8 @@ below are owned here.
   gitignored) of the checkout that ran the 2026-10-26 rebuild on the operator workstation. It is
   the only state of this lab, so keep it. Inputs are in `terraform/platform/terraform.tfvars`
   there (gitignored), which Terraform reads without a flag.
-- Argo CD syncs from the public GitHub repo at `gitops_app_repo_revision`.
+- Argo CD syncs from the public GitHub repo (`gitops_app_repo_url` in the tfvars) at
+  `gitops_app_repo_revision`. After the repo moves, set the new URL there and re-apply.
 - Installed at the rebuild: Terraform installed ACM 2.17 with its MultiClusterHub (the hub's own
   ManagedCluster takes the hub's context name, the default `acm_local_cluster_name`) and
   OpenShift GitOps 1.22 on the hub. Argo CD installs External Secrets on the hub and OSSM 3.4 on

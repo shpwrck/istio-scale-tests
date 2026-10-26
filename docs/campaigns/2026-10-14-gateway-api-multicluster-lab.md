@@ -21,7 +21,7 @@ This is a functional check, not a scale run.
 - Gateway API CRDs v1.3.0 (standard channel, installed by OpenShift). GatewayClass `istio`
   (`istio.io/gateway-controller`) was Accepted on both members, and istiod had also created
   `istio-remote`.
-- Harness and chart at `415b361` (main after shpwrck/istio-scale-tests#102): scenario set `v3`,
+- Harness and chart at `415b361` (main after PR #102): scenario set `v3`,
   report schema 5. The Application was pinned to that commit, and the run recorded the chart
   revision as `same`. istioctl 1.30.5.
 - The Gateway API Gateway bound to the existing `istio-ingressgateway` by manual deployment, so
