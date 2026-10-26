@@ -308,13 +308,21 @@ kubectl --context <mesh-ctx> -n istio-system delete secret istio-remote-secret-<
 
 ## Moving or forking the repo
 
-Nothing in the code names the repo's home, so a move is settings, not code:
+Nothing in the code names the repo's home, so a move is settings, not code.
+
+A GitHub transfer (Settings, Transfer) keeps issues, pull requests, Actions secrets, branch
+protection and the required checks, and redirects the old URLs, including `git fetch`. The
+redirect ends for good if anyone creates a repo or fork at the old name, so still do step 1 and
+repoint local clones (`git remote set-url origin <new-url>`). Before the transfer, check that
+the new org's Actions policy allows `azure/setup-helm` and `hashicorp/setup-terraform`, and
+that the repo stays public; a private repo needs repo credentials in step 1. After a transfer,
+step 2 is a check that the rule came across; after a fork, it is a rebuild.
 
 1. Point the platform at the new repo: set `gitops_app_repo_url` and `gitops_app_repo_revision` in
    your tfvars (plus `gitops_app_repo_password` or `gitops_app_repo_ssh_private_key` for a private
    repo) and re-apply `terraform/platform`. The on-demand checks (the preflight's `--echo` and the
    Gateway API check) read both from the hub when they deploy, so they follow.
-2. Recreate CI: enable Actions, then protect `main` with a rule that requires a pull request and the
+2. CI: enable Actions, then protect `main` with a rule that requires a pull request and the
    checks `validate (ubuntu-latest)` and `validate (macos-latest)`
    ([portability.yml](.github/workflows/portability.yml); keep those job names). CI also runs on
    every push to `main`, weekly, and on demand (Actions, "Run workflow"), so drift shows up
