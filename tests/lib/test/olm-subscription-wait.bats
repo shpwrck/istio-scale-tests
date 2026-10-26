@@ -1,8 +1,10 @@
 #!/usr/bin/env bats
 # terraform/scripts/olm-subscription-wait.sh against a stub kubectl: it waits for the
 # Subscription to be AtLatestKnown with its CSV Succeeded, and names what blocks the install
-# (a Manual InstallPlan, a blocking condition) once, when first seen. A failing case runs with
-# a 0 s timeout: it fails after its first poll.
+# (a Manual InstallPlan, a blocking condition) once, when first seen; an installed operator
+# whose upgrade waits for an approval passes. The stub's answers end each case, never the
+# clock: a passing case ends at its last answer, well inside its 60 s timeout, and a failing
+# one runs with a 0 s timeout, so it fails after its first poll.
 
 load test_helper
 
@@ -42,10 +44,10 @@ EOF
 	chmod +x "${STUB_DIR}/bin/kubectl"
 	export PATH="${STUB_DIR}/bin:${PATH}"
 	export KUBECONFIG_PATH=/dev/null KUBE_CONTEXT=acm-hub SUB_NAMESPACE=openshift-operators SUB_NAME=openshift-gitops-operator
-	export POLL_SEC=0 TIMEOUT_SEC=5
+	export POLL_SEC=0 TIMEOUT_SEC=60
 }
 
-@test "waits until the Subscription is AtLatestKnown and its CSV Succeeded" {
+@test "waits until the Subscription is AtLatestKnown and its CSV Succeeded; an installed CSV whose upgrade waits for a manual approval passes" {
 	sub_json UpgradePending - install-1 >"${STUB_DIR}/sub.1.json"
 	sub_json AtLatestKnown gitops.v1 install-1 >"${STUB_DIR}/sub.2.json"
 	echo '{"spec":{"approval":"Automatic","approved":true},"status":{"phase":"Complete"}}' >"${STUB_DIR}/ip.json"
@@ -55,21 +57,39 @@ EOF
 	assert_output --partial "openshift-operators/openshift-gitops-operator: state=UpgradePending csv=- phase=- installPlan=install-1"
 	assert_output --partial "openshift-operators/openshift-gitops-operator: gitops.v1 Succeeded"
 	refute_output --partial "manual approval"
+	rm -f "${STUB_DIR}"/sub.*
+	sub_json UpgradePending gitops.v1 install-2 >"${STUB_DIR}/sub.1.json"
+	echo '{"spec":{"approval":"Manual","approved":false,"clusterServiceVersionNames":["gitops.v2"]},"status":{"phase":"RequiresApproval"}}' >"${STUB_DIR}/ip.json"
+	echo '{"items":[{"metadata":{"name":"servicemeshoperator3"},"spec":{"installPlanApproval":"Manual"}}]}' >"${STUB_DIR}/subs.json"
+	run bash "$SCRIPT"
+	assert_success
+	assert_output --partial "InstallPlan install-2 waits for a manual approval (it installs gitops.v2): "
+	assert_output --partial "(servicemeshoperator3). The apply goes on with gitops.v1, installed; to upgrade, approve it: kubectl --context acm-hub -n openshift-operators patch installplan install-2 "
+	assert_output --partial "openshift-operators/openshift-gitops-operator: gitops.v1 Succeeded"
 }
 
-@test "a Manual InstallPlan is named once, with the Manual Subscription, the CSVs and the approve command; the wait fails at its deadline" {
-	export TIMEOUT_SEC=1
+@test "a Manual InstallPlan is named once, with the Manual Subscription, the CSVs and the approve command; its approval lets the wait go on, else it fails at its deadline" {
 	sub_json UpgradePending - install-abc >"${STUB_DIR}/sub.1.json"
+	sub_json UpgradePending - install-abc >"${STUB_DIR}/sub.2.json"
+	sub_json AtLatestKnown gitops.v1 install-abc >"${STUB_DIR}/sub.3.json"
+	printf Succeeded >"${STUB_DIR}/csv.phase"
 	echo '{"spec":{"approval":"Manual","approved":false,"clusterServiceVersionNames":["gitops.v1","ossm.v3"]},"status":{"phase":"RequiresApproval"}}' >"${STUB_DIR}/ip.json"
 	echo '{"items":[{"metadata":{"name":"openshift-gitops-operator"},"spec":{"installPlanApproval":"Automatic"}},{"metadata":{"name":"servicemeshoperator3"},"spec":{"installPlanApproval":"Manual"}}]}' >"${STUB_DIR}/subs.json"
 	run bash "$SCRIPT"
-	assert_failure
+	assert_success
 	assert_output --partial "InstallPlan install-abc waits for a manual approval (it installs gitops.v1, ossm.v3): OLM makes every InstallPlan in openshift-operators Manual while a Subscription there asks for Manual approval (servicemeshoperator3)."
-	assert_output --partial "kubectl --context acm-hub -n openshift-operators patch installplan install-abc --type merge -p '{\"spec\":{\"approved\":true}}'"
-	assert_output --partial "error: openshift-operators/openshift-gitops-operator did not install its operator within 1s (state=UpgradePending csv=- phase=- installPlan=install-abc)"
-	# Once when first seen, once more under the error, however many polls ran.
+	assert_output --partial "Approve it, and this wait goes on: kubectl --context acm-hub -n openshift-operators patch installplan install-abc --type merge -p '{\"spec\":{\"approved\":true}}'"
+	assert_output --partial "openshift-operators/openshift-gitops-operator: gitops.v1 Succeeded"
+	# Once in three polls.
+	[ "$(grep -c 'waits for a manual approval' <<<"$output")" -eq 1 ]
+	[ "$(grep -c ' get subscriptions.operators.coreos.com openshift-gitops-operator ' "$STUB_LOG")" -eq 3 ]
+	rm -f "${STUB_DIR}"/sub.*
+	sub_json UpgradePending - install-abc >"${STUB_DIR}/sub.1.json"
+	TIMEOUT_SEC=0 run bash "$SCRIPT"
+	assert_failure
+	assert_output --partial "error: openshift-operators/openshift-gitops-operator did not install its operator within 0s (state=UpgradePending csv=- phase=- installPlan=install-abc)"
+	# Once when first seen, once more under the error.
 	[ "$(grep -c 'waits for a manual approval' <<<"$output")" -eq 2 ]
-	[ "$(grep -c ' get subscriptions.operators.coreos.com openshift-gitops-operator ' "$STUB_LOG")" -ge 2 ]
 }
 
 @test "a blocking condition and a failed InstallPlan are named; missing auth and a bad timeout are refused" {

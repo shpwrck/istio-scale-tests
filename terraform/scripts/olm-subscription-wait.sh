@@ -9,7 +9,8 @@ set -euo pipefail
 #   - an InstallPlan that waits for a manual approval. OLM makes every InstallPlan in a
 #     namespace Manual while any Subscription there asks for Manual approval: the message names
 #     those Subscriptions, the CSVs the plan installs and the approve command, and an approval
-#     lets this wait go on;
+#     lets this wait go on. An installed operator (its CSV Succeeded) whose upgrade waits for
+#     an approval passes: the operator works, and the upgrade is not this apply's to approve;
 #   - a Subscription condition that blocks the install (ResolutionFailed,
 #     CatalogSourcesUnhealthy, InstallPlanFailed, InstallPlanMissing), and a failed InstallPlan.
 # Fails after TIMEOUT_SEC with the last state, repeating those messages.
@@ -52,16 +53,20 @@ note() {
   echo "  $1"
 }
 
-# check_plan <installplan>: note a plan that waits for a manual approval, or one that failed.
+# check_plan <installplan> [installed CSV]: note a plan that waits for a manual approval (and
+# set WAITS_APPROVAL), or one that failed.
 check_plan() {
-  local ip approval approved phase csvs manual
+  local ip approval approved phase csvs manual next
   ip="$("${KC[@]}" -n "$SUB_NAMESPACE" get installplans.operators.coreos.com "$1" -o json 2>/dev/null)" || return 0
   read -r approval approved phase < <(jq -r '"\(.spec.approval // "-") \(.spec.approved // false) \(.status.phase // "-")"' <<<"$ip")
   if [[ "$approval" == Manual && "$approved" == false ]]; then
+    WAITS_APPROVAL=1
+    next="Approve it, and this wait goes on"
+    if [[ -n "${2:-}" ]]; then next="The apply goes on with ${2}, installed; to upgrade, approve it"; fi
     csvs="$(jq -r '.spec.clusterServiceVersionNames // [] | join(", ")' <<<"$ip")"
     manual="$("${KC[@]}" -n "$SUB_NAMESPACE" get subscriptions.operators.coreos.com -o json 2>/dev/null \
       | jq -r '[.items[] | select(.spec.installPlanApproval == "Manual") | .metadata.name] | join(", ")')" || manual=""
-    note "InstallPlan $1 waits for a manual approval (it installs ${csvs:-?}): OLM makes every InstallPlan in ${SUB_NAMESPACE} Manual while a Subscription there asks for Manual approval (${manual:-none found}). Approve it, and this wait goes on: kubectl ${CTX_FLAG}-n ${SUB_NAMESPACE} patch installplan $1 --type merge -p '{\"spec\":{\"approved\":true}}'"
+    note "InstallPlan $1 waits for a manual approval (it installs ${csvs:-?}): OLM makes every InstallPlan in ${SUB_NAMESPACE} Manual while a Subscription there asks for Manual approval (${manual:-none found}). ${next}: kubectl ${CTX_FLAG}-n ${SUB_NAMESPACE} patch installplan $1 --type merge -p '{\"spec\":{\"approved\":true}}'"
   fi
   if [[ "$phase" == Failed ]]; then
     note "InstallPlan $1 failed: $(jq -r '[.status.conditions[]? | .message // .reason // empty] | last // "no message" | gsub("[\t\n\r]+"; " ")' <<<"$ip")"
@@ -72,7 +77,7 @@ echo "=== Waiting for ${SUB} to install its operator (up to ${TIMEOUT_SEC}s) ===
 deadline=$((SECONDS + TIMEOUT_SEC))
 last=""
 while :; do
-  state="-" csv="-" plan="-" phase="-"
+  state="-" csv="-" plan="-" phase="-" WAITS_APPROVAL=0
   if sub="$("${KC[@]}" -n "$SUB_NAMESPACE" get subscriptions.operators.coreos.com "$SUB_NAME" -o json 2>/dev/null)"; then
     read -r state csv plan < <(jq -r '"\(.status.state // "-") \(.status.installedCSV // "-") \(.status.installPlanRef.name // .status.installplan.name // "-")"' <<<"$sub")
     while IFS= read -r line; do
@@ -90,7 +95,13 @@ while :; do
         exit 0
       fi
     fi
-    if [[ "$plan" != - ]]; then check_plan "$plan"; fi
+    installed=""
+    if [[ "$phase" == Succeeded ]]; then installed="$csv"; fi
+    if [[ "$plan" != - ]]; then check_plan "$plan" "$installed"; fi
+    if ((WAITS_APPROVAL)) && [[ -n "$installed" ]]; then
+      echo "  ${SUB}: ${csv} Succeeded"
+      exit 0
+    fi
   else
     state="unreadable"
   fi

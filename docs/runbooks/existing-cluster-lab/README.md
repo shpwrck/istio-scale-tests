@@ -215,7 +215,9 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
   `terraform_data.gitops_subscription_ready` waits (up to 15 min): the owner's Manual OSSM
   Subscription holds it (Decisions). Check that the CSVs it lists are only the GitOps one, then
   approve it with the owner's consent, using the command it prints; the apply goes on. After the
-  wait has timed out, plan (it replaces the failed wait) and apply.
+  wait has timed out, plan (it replaces the failed wait) and apply. When GitOps is installed
+  already and only its upgrade waits, the apply names the InstallPlan and goes on with the
+  installed version.
 - The plan warns `free pod slots` while no MultiClusterHub exists yet, or the reshard step names
   Argo CD pods `Pending (Unschedulable: ... Too many pods)`: the hub is at its 250-pod limit.
   Free pod slots (2026-10-26: the owner's unrelated workloads were removed), or raise `maxPods`

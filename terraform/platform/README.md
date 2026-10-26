@@ -169,7 +169,8 @@ GitOps InstallPlan Manual too, and the install waits for someone to approve it. 
 with `gitops_operator_namespace = "openshift-operators"`, and in kubeconfig mode its plan fails
 until that is set. While the apply waits for an operator (GitOps or ACM), it prints an InstallPlan
 that needs approval, with the command that approves it, and any catalog or resolution error, as
-soon as it sees one.
+soon as it sees one. An operator that is installed already does not wait for its upgrade's
+approval: the apply goes on with the installed version.
 
 If the spokes are already ACM-managed (OpenShift), import their namespaces once before the first
 apply: `terraform import 'kubernetes_manifest.spoke_namespace["<ctx>"]' "apiVersion=v1,kind=Namespace,name=<ctx>"`.
