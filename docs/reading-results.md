@@ -2,7 +2,8 @@
 
 What a finished run leaves behind, how to tell whether you can trust it, and what the words in
 the reports mean. Each suite's README starts with "At a glance", which explains its own numbers;
-this page covers what they share. The exact rules are in [Reference](reference.md).
+this page covers what they share. [Result examples](result-examples.md) shows good and bad
+results for every suite, and the exact rules are in [Reference](reference.md).
 
 ## Where results go
 

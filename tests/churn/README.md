@@ -35,6 +35,8 @@ other than `OK` are counted in `n_total` but not averaged; [What gets measured](
 lists them, and [Reading results](../../docs/reading-results.md) the checks that apply to every
 suite.
 
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#churn).
+
 ## Architecture
 
 > Diagram conventions are shared across suites — see

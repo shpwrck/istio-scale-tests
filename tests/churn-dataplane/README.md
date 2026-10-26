@@ -32,6 +32,8 @@ succeeded (`CHURN_RATE_NOT_MET` otherwise); `valid_runs` against `total_runs` sa
 [Results](#results) has every status, and [Reading results](../../docs/reading-results.md) the
 checks that apply to every suite.
 
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#churn-dataplane).
+
 ## Architecture
 
 > Diagram conventions are shared across suites — see

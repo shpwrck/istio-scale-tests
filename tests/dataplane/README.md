@@ -32,6 +32,8 @@ On kind the cross-cluster path runs through a local proxy on the same machine, s
 there mean nothing. [Outputs](#outputs) has every column and status, and
 [Reading results](../../docs/reading-results.md) the checks that apply to every suite.
 
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#dataplane).
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see

@@ -23,6 +23,8 @@ with the mean of each metric, the number of valid samples, its range, and the ch
 baseline in percent. A change smaller than the range of the baseline itself is noise. The
 `Pass status` row must read `ok` for every pass. [Results](#results) explains every row.
 
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#tuning).
+
 ## Prerequisites
 
 - bash 4+, `kubectl` or `oc`, `jq`, and `python3` with PyYAML.

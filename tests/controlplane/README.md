@@ -43,6 +43,8 @@ A cell whose istiod restarted is counted in `n_total` but not averaged; [Outputs
 every column and status, and [Reading results](../../docs/reading-results.md) the checks that
 apply to every suite.
 
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#controlplane).
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see

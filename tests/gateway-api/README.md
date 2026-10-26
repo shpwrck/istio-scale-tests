@@ -42,6 +42,8 @@ with its prediction. Rough time: about 5 minutes.
 predicted. A run where every row matches confirms the answer for your Istio version; any other
 row is listed with its prediction. [Read the report](#read-the-report) has the details.
 
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#gateway-api).
+
 ## Answer (Istio 1.30.5, OSSM 3.4.3 and upstream; predicted from the source, confirmed in the lab 2026-10-14 and on kind 2026-10-18)
 
 **For traffic, no. For the HTTPRoute status, yes.** An HTTPRoute attached to a Gateway routes to a

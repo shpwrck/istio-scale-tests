@@ -35,6 +35,8 @@ ROSA run measured P1 and P2 flat at about 2 seconds from 1 to 10 members
 [Outputs](#outputs) has the full list and [Reading results](../../docs/reading-results.md) the
 checks that apply to every suite.
 
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#propagation).
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see
