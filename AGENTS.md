@@ -120,8 +120,8 @@ which wins over the upstream docs there when they disagree.
 | --- | --- |
 | `config/versions.env`, `config/options.env` | Test image pins, `ISTIO_VERSION`, `SETUP_CONTEXTS`; suite defaults and the env-only keys `ISTIO_VERSION_CHECK`, `ISTIO_VERSION_READY_WAIT_SEC`, `SWEEP_STOP_GRACE_SEC` |
 | `terraform/rosa-hcp/` | ROSA clusters; `scripts/001-preflight.sh` (account checks), `scripts/002-pre-destroy-vpc-cleanup.sh` |
-| `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs) |
-| `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check) |
+| `terraform/platform/` | Argo CD (ACM and OpenShift GitOps on OpenShift), spoke registration, app-of-apps, mesh-wiring gate; `scripts/001-openapi-preflight.sh` (OpenShift hubs), `scripts/002-plan-leftover-check.sh` (objects a saved plan creates that exist on the hub) |
+| `terraform/scripts/` | `local-exec` helpers (OAuth token, Argo cluster secrets, CSV and app cleanup on destroy; `argocd-controller-reshard.sh`: the OpenShift controller restart and the apply's Application status check; `olm-subscription-wait.sh`: an OLM operator install, naming what blocks it) |
 | `charts/gitops-hub-app-of-apps/` | Root Application `hub-gitops-root` (Helm source on `charts/gitops-hub-apps`) |
 | `charts/gitops-hub-apps/` | Child Applications (repo URL/branch templated; `apps.<name>.enabled/values`) |
 | `charts/gitops-hub-ocm-placement-appset/` | Reusable ApplicationSet + presets `values-*.yaml` + platform overlays `platform-*.yaml` (cluster-Secret label or ACM Placement) |
@@ -142,7 +142,7 @@ which wins over the upstream docs there when they disagree.
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
 | `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.2 or 5.3 host); bats tests in `test/` |
 | `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
-| `docs/scale-test-team/` | The `/scale-test-review` cycle and the process-learnings (PL) catalog |
+| `docs/scale-test-team/` | The six review lenses for harness changes and the process-learnings (PL) catalog that code comments cite |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments; `kind-lab/` builds a hub and two members on one machine |
 
 ## Testing and verification
@@ -173,8 +173,8 @@ in `tests/lib/common.sh`), GNU `parallel` (`tests/lib/verify.sh --jobs` and CI; 
 matching `ISTIO_VERSION`, `python3` + PyYAML (tuning suite, and the frontmatter bats, which skip
 without it), `aws` + `rosa` (ROSA only).
 
-## Scale-test improvement cycle
+## Reviewing harness changes
 
-For non-trivial changes under `tests/`, run `/scale-test-review <proposal or branch>`: one
-implementer plus six lens reviewers, iterated to consensus. See
-[docs/scale-test-team/](docs/scale-test-team/README.md); agents are in `.claude/agents/`.
+Review non-trivial changes under `tests/` against the six lenses and the substantive rule in
+[docs/scale-test-team/](docs/scale-test-team/README.md), and check the process learnings (PLs)
+there that apply.

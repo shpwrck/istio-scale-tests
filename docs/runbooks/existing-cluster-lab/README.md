@@ -50,6 +50,9 @@ below are owned here.
   - `platform = "openshift"`: kubeconfig mode defaults to `kubernetes`, and without this line the
     plan stops at its hub platform check (terraform/platform/README.md);
   - `hub_cluster_context` and `spoke_cluster_contexts`: the three contexts;
+  - `gitops_operator_namespace = "openshift-operators"`: the rebuild installed GitOps there, the
+    default until 2026-10-26, and without this line the plan stops at its check for a GitOps
+    Subscription in another namespace;
   - `gitops_app_overrides`: the cert-manager app disabled; istiod 1 replica at 1-2 CPU / 3Gi;
     gateway Services pinned to the MetalLB pool `gw-ingress` with `metallb.io/address-pool`;
   - `argocd_config_values`: small Argo CD requests, 6Gi controller limit.
@@ -91,15 +94,16 @@ terraform init
 terraform workspace select default   # the rosa workspace is the other scope
 terraform import 'kubernetes_manifest.spoke_namespace["<mesh-a-ctx>"]' "apiVersion=v1,kind=Namespace,name=<mesh-a-ctx>"   # once per member, only if already ACM-managed
 terraform plan -out=plan.tfplan
+./scripts/002-plan-leftover-check.sh plan.tfplan   # objects already on the hub
 terraform apply plan.tfplan
 ```
 
 The apply is convergent. Edited chart files roll out because each release carries its chart's
 checksum. A follow-up `terraform plan -detailed-exitcode` returns 0 when there is no drift.
 
-A rebuild on a fresh state met three stops on 2026-10-26, each named in "Verify and recover":
-an earlier deploy's object on the hub, the GitOps InstallPlan waiting for approval, and the hub's
-pod limit.
+A rebuild on a fresh state met three stops on 2026-10-26: an earlier deploy's object on the hub,
+the GitOps InstallPlan waiting for approval, and the hub's pod limit. The leftover check, the
+apply's operator wait and the plan's pod-slot warning now name each of them ("Verify and recover").
 
 Gateway API multicluster check, on demand. It is read-only apart from the Application. Use
 istioctl at the mesh's version.
@@ -160,8 +164,11 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
 - `kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh`:
   `Ready: secrets=2 istiod_managed=2 ... members=<mesh-a-ctx>,<mesh-b-ctx> ca=shared` on each member.
 - Data plane:
-  1. Apply `charts/mesh-verify-appset.yaml` with the `fill` recipe in the repo README's "Verify"
+  1. Apply `charts/mesh-verify-appset.yaml` with the `fill` recipe in
+     [docs/reference.md](../../reference.md#the-end-to-end-echo-check-by-hand)
      (`NS=openshift-gitops PLATFORM=openshift`); it deploys the revision the hub syncs.
+     `tests/preflight/001-check-mesh.sh --hub-context <acm-hub-ctx> --echo` does the whole echo
+     check in one command.
   2. Curl each member's ingress (`.status.loadBalancer.ingress[0].ip`) with
      `Host: mesh-verify.local`. Answers alternate between both clusters.
   3. Remove it with the same `fill`, piped to `kubectl --context <acm-hub-ctx> delete -f -`; the
@@ -199,23 +206,23 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
   mid-operation.
 - Namespaces stuck Terminating behind a deleted CSI driver: run the driver's DaemonSet in a scratch
   namespace until the kubelet unmounts, then delete it.
-- A fresh state stops on "Cannot create resource that already exists": an earlier deploy's object
-  is still on the cluster (2026-10-26: ClusterRole and ClusterRoleBinding
-  `openshift-gitops-applicationset-controller` on the hub, from a lost state). Save it with
-  `-o yaml`, delete it with the owner's consent, then plan and apply again.
-- The apply waits 15 min on `kubernetes_manifest.gitops_subscription` and fails with "timed out
-  waiting on field matchers": the Subscription's InstallPlan waits for approval (Decisions).
-  1. `oc --context <acm-hub-ctx> -n openshift-operators get installplan`: find the unapproved plan
-     whose `spec.clusterServiceVersionNames` holds only the GitOps CSV.
-  2. With the owner's consent, approve it:
-     `oc -n openshift-operators patch installplan <name> --type merge -p '{"spec":{"approved":true}}'`.
-  3. Once the Subscription reads `AtLatestKnown`, untaint it
-     (`terraform untaint 'kubernetes_manifest.gitops_subscription[0]'`), then plan (adds only)
-     and apply.
-- Argo CD pods Pending with "Too many pods", and the apply's reshard step fails with "did not
-  settle within 600s": the hub is at its 250-pod limit. Free pod slots (2026-10-26: the owner's
-  unrelated workloads were removed), or raise `maxPods` with a KubeletConfig, which reboots the
-  single node. Then plan (it replaces the tainted reshard step) and apply.
+- `002-plan-leftover-check.sh` lists an object the plan creates that is still on the cluster
+  (2026-10-26: ClusterRole and ClusterRoleBinding `openshift-gitops-applicationset-controller` on
+  the hub, from a lost state; the apply stopped on "Cannot create resource that already exists").
+  Import it with the command the check prints, or save it with `-o yaml` and delete it with the
+  owner's consent; then plan again.
+- The apply prints `InstallPlan <name> waits for a manual approval` while
+  `terraform_data.gitops_subscription_ready` waits (up to 15 min): the owner's Manual OSSM
+  Subscription holds it (Decisions). Check that the CSVs it lists are only the GitOps one, then
+  approve it with the owner's consent, using the command it prints; the apply goes on. After the
+  wait has timed out, plan (it replaces the failed wait) and apply. When GitOps is installed
+  already and only its upgrade waits, the apply names the InstallPlan and goes on with the
+  installed version.
+- The plan warns `free pod slots` while no MultiClusterHub exists yet, or the reshard step names
+  Argo CD pods `Pending (Unschedulable: ... Too many pods)`: the hub is at its 250-pod limit.
+  Free pod slots (2026-10-26: the owner's unrelated workloads were removed), or raise `maxPods`
+  with a KubeletConfig, which reboots the single node. Then plan (it replaces the failed step) and
+  apply.
 
 ## Decision log
 
@@ -236,6 +243,9 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
   - At the 2026-10-26 rebuild Terraform installed GitOps, and its InstallPlan was approved by
     hand once, with owner consent ("Verify and recover"). The Manual setting stays, so a GitOps
     upgrade needs the same.
+  - The repo now installs GitOps in a namespace of its own (`openshift-gitops-operator`), out of
+    reach of that setting. This lab keeps `openshift-operators` (`gitops_operator_namespace`):
+    moving an installed operator means reinstalling it, which nobody has tried here.
 - 2026-10-26, owner decision: the unrelated workloads were removed from all three clusters, after
   ACM and Argo CD together hit the hub's 250-pod limit. Raising `maxPods` (one reboot of the hub)
   was the alternative.

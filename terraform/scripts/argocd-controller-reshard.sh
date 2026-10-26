@@ -9,7 +9,9 @@ set -euo pipefail
 #   "has no assigned shard" for a cluster and never pick it up (its Applications keep
 #   an empty sync/health status). Wait until the operator's own reconcile has settled
 #   (StatefulSet at its replica count, rollout complete, STABLE_POLLS polls in a row),
-#   then delete the controller pods once and wait until every replacement is Ready.
+#   then delete the controller pods once and wait until every replacement is Ready. A pod that
+#   is not Ready is named with why when first seen and again in a timeout error: a Pending pod
+#   that the scheduler cannot place ("Too many pods") or a container that waits (CrashLoopBackOff).
 # MODE=app-status: wait until Argo CD has rendered and compared everything the apply
 #   deployed, else fail after APP_STATUS_TIMEOUT_SEC naming what is missing and the fix:
 #   - every Application has a sync and health status (no controller shard owns the
@@ -97,6 +99,38 @@ pod_lines() {
   ' || true
 }
 
+# pod_problems: "<pod>: <phase> (<reason>: <message>)" for each controller pod that is not
+# Ready, with why it is not scheduled ("0/1 nodes are available: 1 Too many pods": the hub has
+# no pod slot left, homelab 2026-10-26) or why a container waits (CrashLoopBackOff).
+pod_problems() {
+  "${KC[@]}" -n "$GITOPS_NS" get pods -l "$SELECTOR" -o json 2>/dev/null | jq -r '
+    .items[]
+    | select(([.status.conditions[]? | select(.type == "Ready") | .status] | first) != "True")
+    | ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False")]
+       + [.status.containerStatuses[]?.state.waiting // empty] | first) as $why
+    | "\(.metadata.name): \(.status.phase // "?")"
+      + (if $why then " (\($why.reason // "?"): \($why.message // "" | gsub("[\t\n\r]+"; " ")))" else "" end)
+  ' || true
+}
+
+# note_pods: print each pod_problems line the first time it shows, except the reasons every
+# start passes through; the timeout errors list them all.
+POD_NOTES=""
+note_pods() {
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != *"(ContainerCreating:"* && "$line" != *"(PodInitializing:"* ]] || continue
+    grep -qxF -- "$line" <<<"$POD_NOTES" && continue
+    POD_NOTES+="${line}"$'\n'
+    echo "  not Ready: ${line}"
+  done < <(pod_problems)
+}
+
+# pods_not_ready: every pod_problems line, for a timeout error.
+pods_not_ready() {
+  pod_problems | sed 's/^/  not Ready: /' >&2
+}
+
 wait_settled() {
   local deadline=$((SECONDS + ROLLOUT_TIMEOUT_SEC)) streak=0 prev="" settled want rev key
   while :; do
@@ -112,9 +146,11 @@ wait_settled() {
     else
       streak=0
       prev=""
+      note_pods
     fi
     if ((SECONDS >= deadline)); then
       echo "error: ${STS} did not settle within ${ROLLOUT_TIMEOUT_SEC}s (last state: settled=${settled} replicas=${want} revision=${rev})" >&2
+      pods_not_ready
       return 1
     fi
     sleep "$POLL_SEC"
@@ -151,8 +187,10 @@ reshard() {
       echo "  ${STS}: ${n_ready}/${want} replacement pod(s) Ready"
       return 0
     fi
+    note_pods
     if ((SECONDS >= deadline)); then
       echo "error: ${STS}: replacement pods not Ready within ${ROLLOUT_TIMEOUT_SEC}s (${n_ready}/${want} Ready, old pods left: ${stale})" >&2
+      pods_not_ready
       exit 1
     fi
     sleep "$POLL_SEC"
