@@ -65,6 +65,6 @@ Skip a child Application with `apps.<name>.enabled=false` (see `gitops-hub-apps/
 (`kubectl apply -f -` / `kubectl delete -f -`). Both keep `<repo-url>`, `<revision>`, `<platform>`
 and `<gitops-namespace>` placeholders in git: fill them in with `sed` on the way to the hub, from
 the hub's `hub-gitops-root` Application, so the check deploys the same repo and revision as the mesh
-([Verify](../README.md#verify)). The second also needs the workload member's cluster name
+([Verify](../README.md#2-check-the-mesh)). The second also needs the workload member's cluster name
 (`workloadCluster`) in its `<workload-cluster>` placeholder, so the name stays out of git
 ([tests/gateway-api](../tests/gateway-api/README.md#deploy)).

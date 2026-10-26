@@ -156,7 +156,7 @@ which wins over the upstream docs there when they disagree.
 - CI (`.github/workflows/portability.yml`) runs all of the above on Linux, plus portability checks
   on macOS. The job names are required checks; don't rename them.
 - Live: deploy, then check that every hub Application is Synced/Healthy, the `mesh-wiring-verify`
-  gate is Ready (`ca=shared`), and mesh-verify answers from every member (README "Verify").
+  gate is Ready (`ca=shared`), and mesh-verify answers from every member (`tests/preflight/001-check-mesh.sh --hub-context <hub> --echo`; README "Check the mesh").
 
 ## Tools
 

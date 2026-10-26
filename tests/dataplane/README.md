@@ -122,7 +122,7 @@ Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precon
 unexpected error); `130`, `143` or `129` it was interrupted; `3` the reachability gate stopped it
 (`--on-unreachable fail`, see below; the reports are written); `4` it finished and wrote its
 reports, but some mesh sizes failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it recorded
-a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
+a problem ([How a sweep ends](../../docs/reference.md#how-a-sweep-ends) has those, and the
 `sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
 reason; `3` wins over `4`. When a sweep did not finish and no sweep runs any more, run
 `005-cleanup.sh --contexts <the sweep's members>`, then run the sweep again into a new dir; the rows
@@ -131,7 +131,7 @@ already in the dir cover only the mesh sizes it finished.
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 QPS 10 and 100, 10 s per level):
 
@@ -365,7 +365,7 @@ the row with a folder; the other rows count as repeats. json has the section as
 ## Outputs
 
 `latency-<RUN_ID>.tsv` has a `# KEY=value` preamble
-([what every result records](../../README.md#what-every-result-records), `FORTIO_IMAGE`, ...),
+([what every result records](../../docs/reference.md#what-every-result-records), `FORTIO_IMAGE`, ...),
 read before the first window, and these columns. `004` prints the preamble in every format, with a
 warning in the report itself (the top-level `warnings` array in json, empty without one) when its
 inputs differ or a value could not be read in some of them. On kind nodes

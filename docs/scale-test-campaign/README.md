@@ -15,7 +15,7 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
 ## Prerequisites
 
 1. **A healthy multi-primary mesh** across your spoke clusters. The hub is not a mesh member.
-   Verify per [README → Verify](../../README.md#verify).
+   Verify per [README → Verify](../../README.md#2-check-the-mesh).
 2. **istiod pinned to a fixed replica count** (HPA off) on every spoke: `charts/spoke-ossm`
    `pilot.autoscaleEnabled: false`, `pilot.replicaCount: <K>` (default 3). An autoscaling istiod
    changes topology mid-sweep and corrupts the xDS deltas.
@@ -39,7 +39,7 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    a tuning sweep, whose profiles move them on purpose, checks them around each pass and at its
    end only when no profile was applied), when a member's platform record changed, and when its
    harness (`HARNESS_SHA`: a file under `tests/`, `config/`, `charts/` or `terraform/`) changed
-   during it ([How a sweep ends](../../README.md#how-a-sweep-ends)). Every sweep ends by writing
+   during it ([How a sweep ends](../reference.md#how-a-sweep-ends)). Every sweep ends by writing
    `sweep-outcome.txt` to its results dir (exit code, failed cells, the version recheck), and its
    reports repeat those errors and warnings. Until then the file says `STATUS=running`; a sweep
    that stops on an error records `STATUS=stopped` with its reason, one interrupted

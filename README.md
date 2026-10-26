@@ -1,16 +1,33 @@
 # istio-scale-tests
 
-Deploy a multi-primary, multi-network Istio mesh (the Sail operator) across several Kubernetes
-clusters, then measure how it scales. One cluster is the hub (Argo CD, cert-manager, External
-Secrets); every other cluster runs its own istiod and joins the mesh through east-west gateways,
-with a shared root CA.
+Measure how a multi-cluster Istio mesh behaves as it grows. This repo deploys a mesh across
+several Kubernetes clusters, then runs test suites that answer questions such as "how long does
+a new endpoint take to reach the other clusters?", "how much CPU and memory does istiod need for
+N services?" and "how much latency does the cross-cluster hop add?". Every suite writes its raw
+data and a markdown report that says how far each number can be trusted.
 
-Vanilla Kubernetes is the default (`platform = "kubernetes"`), with upstream Argo CD and the
-upstream Sail operator. It is tested on kind; other conformant clusters (kubeadm, EKS, ...) need
-what [What you need](#what-you-need) lists, its capacity included. OpenShift is an optional profile
-(`platform = "openshift"`): Red Hat OpenShift Service Mesh 3, OpenShift GitOps and ACM, on existing
-clusters or new ROSA ones. It is kept for teams that run OpenShift but is untested: its last end to
-end run (ROSA, October 2026) predates the switch to Kubernetes by default.
+The mesh is Istio's multi-primary, multi-network model: every member cluster runs its own istiod,
+the members reach each other through east-west gateways, and they share one root certificate
+authority. One more cluster, the hub, deploys and wires the mesh but is never part of it.
+
+Vanilla Kubernetes is the default and is tested on [kind](docs/runbooks/kind-lab/README.md).
+OpenShift (`platform = "openshift"`: OpenShift Service Mesh 3, OpenShift GitOps and ACM, on
+existing clusters or new ROSA ones) is an optional profile, kept for teams that run OpenShift.
+
+## How it works
+
+1. **Deploy** the hub and the mesh with Terraform ([Deploy](#1-deploy)). Terraform installs
+   Argo CD on the hub and registers the member clusters; Argo CD then installs everything else
+   from the charts in this repo.
+2. **Check the mesh** is wired before you measure anything ([Check the mesh](#2-check-the-mesh)).
+3. **Run a suite** against the members ([Run a suite](#3-run-a-suite)). Each suite deploys its own
+   test workloads into its own namespace, measures, and removes them again.
+4. **Read the report** ([Read the results](#4-read-the-results)).
+
+To try all of it on one Linux machine first, follow the [kind lab](docs/runbooks/kind-lab/README.md).
+It builds a hub and two members with kind, then walks through the same four steps.
+
+## What gets set up
 
 ```mermaid
 flowchart TB
@@ -40,8 +57,46 @@ flowchart TB
     ewB <--> ew
 ```
 
+**On the hub** (installed once, by `terraform/platform` and then Argo CD):
+
+| Namespace | What runs there | Why |
+| --- | --- | --- |
+| `argocd` (`openshift-gitops` on OpenShift) | Argo CD | Deploys every chart below to the hub and to each member, and keeps them in sync with this repo |
+| `cert-manager` | cert-manager, the mesh's root CA and one intermediate CA per member | Every member's istiod signs with its own intermediate of one shared root, so the members trust each other |
+| `external-secrets-operator` | External Secrets | Copies each member's CA (`cacerts`) to it, and gives every member the credentials (remote secrets) to read the other members' Services |
+| `open-cluster-management` (OpenShift only) | ACM | Picks the member clusters on OpenShift |
+
+**On each mesh member** (installed by Argo CD; you never apply these by hand):
+
+| Namespace | What runs there | Why |
+| --- | --- | --- |
+| `sail-operator` (`openshift-operators` on OpenShift) | The Sail operator (OpenShift Service Mesh 3 on OpenShift) | Installs and upgrades Istio from an `Istio` resource |
+| `istio-system` | istiod (3 replicas), the ingress gateway, the east-west gateway | The member's control plane; the ingress for test traffic; the cross-cluster entry point (a `LoadBalancer` Service on port 15443) |
+| `istio-cni` | The Istio CNI node agent | Sets up each pod's traffic redirection |
+| `mesh-wiring-verify` | One small pod, the wiring gate | Ready only when this member can see every other member ([Check the mesh](#2-check-the-mesh)) |
+
+The Istio version is pinned (`ISTIO_VERSION` in `config/versions.env`, `istioVersion` in
+`charts/spoke-ossm/values.yaml`). The mesh starts with a tuning baseline that scopes each proxy's
+configuration and trims telemetry (`tuningBaseline` in that file); the tuning suite measures
+changes on top of it. The sync order and every chart are in [charts/README.md](charts/README.md).
+
+**During a test run**, each suite adds one namespace on the members it uses and removes it when
+it ends (the namespace and what it holds are in each suite's README):
+
+| Suite | Namespace on the members |
+| --- | --- |
+| propagation | `propagation-test` |
+| controlplane | `controlplane-test` (or `controlplane-test-0` ... `-N` with several namespaces) |
+| dataplane | `dataplane-test` |
+| churn | `churn-test` |
+| churn-dataplane | `churn-dataplane-test` |
+| tuning | none of its own: it runs another suite, and patches istiod's settings during each pass |
+| gateway-api | `mesh-verify-gwapi`, deployed from the hub on demand, not by the check itself |
+
 ## What you need
 
+- A hub cluster and at least two member clusters (one member is enough to try the harness, but
+  every cross-cluster measurement needs two), with a kube context for each.
 - `kubectl` (`oc` also works), `terraform` >= 1.14.8, `helm` (3 or 4), `jq`, `curl`, bash 4.3+ (macOS ships 3.2: `brew install bash`)
 - GNU coreutils `timeout` for live controlplane runs (macOS has none: `brew install coreutils`, which adds `gtimeout`)
 - `istioctl` matching `ISTIO_VERSION` in `config/versions.env` (for diagnostics)
@@ -73,41 +128,57 @@ flowchart TB
   [runbook](docs/runbooks/kind-lab/README.md#6-smoke-run-a-suite), which also lists the figures a
   kind lab cannot give.
 
-## Deploy
 
-**Kubernetes (default):** use `terraform/platform` in kubeconfig mode. Name the hub context and
-the member contexts (DNS labels: they become the cluster names). The apply installs Argo CD on the
-hub with its Helm chart and registers every member as an Argo CD cluster (a cluster-admin
-ServiceAccount token per member). See [terraform/platform/README.md](terraform/platform/README.md).
-To try it on one machine, [docs/runbooks/kind-lab](docs/runbooks/kind-lab/README.md) builds a hub
-and two members with kind.
+## 1. Deploy
 
-**OpenShift (optional profile):** set `platform = "openshift"`. On existing clusters use kubeconfig
-mode, with the brownfield switches for anything already installed. For new ROSA clusters, create
-them with [terraform/rosa-hcp](terraform/rosa-hcp/README.md) (it covers the one-time AWS and Red Hat
-account setup and a preflight check), then apply `terraform/platform` with
-`cluster_provider = "rosa"`. The apply installs ACM and OpenShift GitOps unless already present.
-Unverified there: the wiring gate counts istiod's `closed` sync state (a remote secret changed and
-the new connection synced) only when istiod's `istio_build` tag reads 1.30 or a later 1.x. If OSSM's
-istiod reports another tag, the gate fails closed, never open: after a remote secret changes it reads
-NotReady, advising an istiod restart.
+**Kubernetes (default):** apply `terraform/platform` in kubeconfig mode. Name the hub context
+and the member contexts (DNS labels: they become the cluster names). The apply installs Argo CD
+on the hub with its Helm chart and registers every member with Argo CD. Steps and every input:
+[terraform/platform/README.md](terraform/platform/README.md). On one machine:
+[docs/runbooks/kind-lab](docs/runbooks/kind-lab/README.md).
 
-Either way the apply starts the app-of-apps, and Argo CD rolls out the mesh in sync waves
-([charts/README.md](charts/README.md)). It's done when every Application on the hub is
-Synced/Healthy (`terraform output gitops_namespace` names the namespace: `argocd`, or
-`openshift-gitops` on OpenShift):
+**OpenShift (optional profile):** set `platform = "openshift"`. On existing clusters use
+kubeconfig mode, with the brownfield switches for anything already installed. For new ROSA
+clusters, create them with [terraform/rosa-hcp](terraform/rosa-hcp/README.md) (it covers the
+one-time AWS and Red Hat account setup and a preflight check), then apply `terraform/platform`
+with `cluster_provider = "rosa"`. The apply installs ACM and OpenShift GitOps unless already
+present. Unverified there: the wiring gate counts istiod's `closed` sync state (a remote secret
+changed and the new connection synced) only when istiod's `istio_build` tag reads 1.30 or a
+later 1.x. If OSSM's istiod reports another tag, the gate fails closed, never open: after a
+remote secret changes it reads NotReady, advising an istiod restart.
+
+Either way the apply starts the app-of-apps, and Argo CD rolls out the mesh in order
+([charts/README.md](charts/README.md)). On kind that took about 10 minutes. It's done when every
+Application on the hub is Synced/Healthy:
 
 ```bash
-kubectl --context <hub-ctx> get applications.argoproj.io -n argocd
+kubectl --context <hub-ctx> get applications.argoproj.io -n argocd   # openshift-gitops on OpenShift
 ```
 
-## Verify
+## 2. Check the mesh
+
+Run the preflight against the members before every test session. It is read-only, and it stops
+with a fix for each problem it finds:
+
+```bash
+export SETUP_CONTEXTS=<mesh-a-ctx>,<mesh-b-ctx>   # your members, never the hub
+tests/preflight/001-check-mesh.sh
+```
+
+It checks the tools on your machine, that every context answers and is a mesh member (not the
+hub), that each member's wiring gate is Ready with the shared root CA, and that the members run
+the pinned Istio version. Add `--hub-context <hub-ctx> --echo` to also send traffic end to end:
+it deploys a small echo app on every member from the hub, calls it through one member's ingress
+gateway until every member has answered, and removes it again
+([by hand](docs/reference.md#the-end-to-end-echo-check-by-hand)).
+
+### The wiring gate
 
 Every member runs `mesh-wiring-verify`, a gate that is Ready only when the member holds the remote
 secret of every other member, every Ready istiod replica has synced each of them, no remote secret
 or cluster of anything else is left (a removed member's stays behind), istiod signs with the shared
 root, and the east-west gateway has an address. Otherwise its Argo Application goes Degraded, and
-the gate's output says why, naming each member, secret and replica.
+the gate's output says why, naming each member, secret and replica. To read it by hand:
 
 ```bash
 kubectl --context <mesh-a-ctx> exec -n mesh-wiring-verify deploy/mesh-wiring-verify -- sh /opt/check/readiness.sh
@@ -124,189 +195,69 @@ Argo CD cluster name, which is also its Istio cluster ID and the suffix of its r
 `istio-remote-secret-<member>`. A gate installed without them counts instead (`members=unchecked`),
 and a count cannot tell a removed member's leftover secret from a member's.
 
-End to end: deploy the echo app and call it through any member's ingress gateway. Answers should come
-from every member. The manifest keeps placeholders for the repo, the revision, the platform and the
-Argo CD namespace; fill them in on the way to the hub from what the hub already syncs, so the check
-runs the same charts as the mesh.
+The gateway-api suite checks a different path: whether an HTTPRoute reaches a workload that runs
+in another member ([tests/gateway-api](tests/gateway-api/README.md)).
+
+## 3. Run a suite
+
+Each suite answers one question. Pick the one that matches yours, and start with its sweep: the
+sweep runs the suite's setup, measurement and cleanup for every mesh size (1 member, then 2, and
+so on) and writes the report at the end. The times are rough estimates for two members at the
+defaults; `--dry-run` prints the exact plan without touching a cluster.
+
+| Suite | The question it answers | Start with | Time (2 members) |
+| --- | --- | --- | --- |
+| [propagation](tests/propagation/README.md) | When a pod becomes ready on one cluster, how long until istiod and the proxies on every cluster know about it? | `tests/propagation/006-run-sweep.sh` | ~10-20 min |
+| [controlplane](tests/controlplane/README.md) | How much CPU, memory and push work does istiod need as services, replicas, namespaces and clusters grow, and how big is each proxy's configuration? | `tests/controlplane/003-run-sweep.sh` | ~10 min (default matrix; real campaigns run hours) |
+| [dataplane](tests/dataplane/README.md) | How much latency does the cross-cluster hop through the east-west gateways add, compared with a call inside one cluster? | `tests/dataplane/003-run-sweep.sh` | ~15 min |
+| [churn](tests/churn/README.md) | When Deployments scale up on one cluster, how long until the local and remote proxies can reach the new pods? | `tests/churn/003-run-sweep.sh` | ~10-15 min |
+| [churn-dataplane](tests/churn-dataplane/README.md) | Does request latency get worse while the mesh is busy with endpoint churn? | `tests/churn-dataplane/004-run-sweep.sh` | ~20 min |
+| [tuning](tests/tuning/README.md) | Does an istiod or proxy tuning change make one of the suites above better or worse? | `tests/tuning/003-run-tuning-sweep.sh` | one suite run per profile, plus the baseline |
+| [gateway-api](tests/gateway-api/README.md) | Does an HTTPRoute need its backend Service (or its namespace) on every member, or only where the workload runs? | `tests/gateway-api/001-run-ingress-check.sh` | ~5 min |
+
+A first run, end to end:
 
 ```bash
-NS=argocd PLATFORM=kubernetes   # OpenShift: NS=openshift-gitops PLATFORM=openshift
-read -r REPO REV < <(kubectl --context <hub-ctx> -n "$NS" \
-  get applications.argoproj.io hub-gitops-root \
-  -o jsonpath='{.spec.source.repoURL} {.spec.source.targetRevision}')
-fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
-  -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" charts/mesh-verify-appset.yaml; }
-fill | kubectl --context <hub-ctx> apply -f -
-# Wait for the echo workload on every member (Argo CD creates it within a few minutes).
-for ctx in <mesh-a-ctx> <mesh-b-ctx>; do
-  for i in $(seq 60); do kubectl --context "$ctx" -n mesh-verify get deploy mesh-verify-echo >/dev/null 2>&1 && break; sleep 5; done
-  kubectl --context "$ctx" -n mesh-verify rollout status deploy/mesh-verify-echo --timeout=300s
-done
-INGRESS=$(kubectl --context <mesh-a-ctx> get svc istio-ingressgateway -n istio-system \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{.status.loadBalancer.ingress[0].ip}')
-: "${INGRESS:?the ingress gateway Service has no address yet (see Troubleshooting)}"
-for i in $(seq 10); do curl -sS -H 'Host: mesh-verify.local' "http://$INGRESS/"; done
-fill | kubectl --context <hub-ctx> delete -f -
+export SETUP_CONTEXTS=<mesh-a-ctx>,<mesh-b-ctx>
+tests/preflight/001-check-mesh.sh                    # is the mesh ready?
+tests/propagation/006-run-sweep.sh --dry-run         # what would run?
+tests/propagation/006-run-sweep.sh                   # run it; the last lines name the report
 ```
 
-Gateway API: [`tests/gateway-api`](tests/gateway-api/README.md) checks whether an HTTPRoute reaches a
-workload that runs in another member, with or without a Service, or the Service's namespace, in the
-ingress member (`charts/mesh-verify-gateway-api-appset.yaml` deploys it the same way, with one more
-placeholder for the member that runs the workload).
+Things every suite has in common:
 
-## Run tests
+- **Contexts.** Pass the mesh members only, never the hub: `--contexts <a>,<b>` or
+  `SETUP_CONTEXTS`. The first one is the source (where changes and load start); the others are
+  the remotes.
+- **Help.** Every script has `--help`: each flag with its default, the settings it reads, its
+  exit codes.
+- **Settings.** Defaults are in [config/options.env](config/options.env), one comment per key;
+  the version pins in [config/versions.env](config/versions.env). To describe a whole run in one
+  file, copy a suite's `configs/smoke.env` to `configs/<name>.local.env` (ignored by git), edit
+  it and pass `--config <file>` to every script of that run
+  ([Run config](docs/reference.md#run-config---config-file)).
+- **Stopping.** Ctrl-C stops a sweep cleanly: it stops the running step, records
+  `STATUS=interrupted` and prints the cleanup command. Run that command, then start again into a
+  new folder. A run that was killed outright may leave its namespace behind: run the suite's
+  cleanup script (its README names it) with the same `--contexts`.
+- **Istio version.** Before changing anything, every suite checks that the members run the pinned
+  Istio version and stops if not ([details](docs/reference.md#the-istio-version-check)).
 
-Point the suites at the **mesh members only** (`--contexts <mesh-a-ctx>,<mesh-b-ctx>`, or
-`SETUP_CONTEXTS`), never the hub, each member once: a list that names one twice, or a
-`--remote-contexts` that names the source, stops before any cluster call. Each suite writes TSV data
-plus a markdown summary under its `results/` directory; a sweep writes its TSVs and reports into its
-own `results/sweep-<RUN_ID>/`. Every script has `--help` (each flag with its default, the keys it
-reads, its exit codes), and scripts that change a cluster also accept `--dry-run`. The defaults live
-in `config/options.env` (a comment on each key), the image and Istio pins in `config/versions.env`.
+## 4. Read the results
 
-| Suite | Measures | Start with |
-| --- | --- | --- |
-| [propagation](tests/propagation/README.md) | How fast an endpoint change reaches the other clusters | `tests/propagation/006-run-sweep.sh` |
-| [controlplane](tests/controlplane/README.md) | istiod CPU/memory, xDS pushes and per-proxy config size vs mesh size and Sidecar scoping | `tests/controlplane/003-run-sweep.sh` |
-| [dataplane](tests/dataplane/README.md) | Same-cluster vs cross-cluster latency through the east-west gateways | `tests/dataplane/003-run-sweep.sh` |
-| [churn](tests/churn/README.md) | Convergence time when Deployments scale on one cluster | `tests/churn/003-run-sweep.sh` |
-| [churn-dataplane](tests/churn-dataplane/README.md) | p99 latency change while endpoint churn runs | `tests/churn-dataplane/004-run-sweep.sh` |
-| [tuning](tests/tuning/README.md) | Any suite above, with and without an istiod/proxy tuning profile | `tests/tuning/003-run-tuning-sweep.sh` |
-| [gateway-api](tests/gateway-api/README.md) | Whether an HTTPRoute needs its backend Service, or its namespace, in every member (read-only check; deploy `charts/mesh-verify-gateway-api-appset.yaml` first) | `tests/gateway-api/001-run-ingress-check.sh` |
+Each sweep writes a folder, `tests/<suite>/results/sweep-<RUN_ID>/`, and its last lines name it.
+Open the markdown report (`*.md`) in it. Before you quote a number, check that the sweep finished
+(`STATUS=finished` in `sweep-outcome.txt`, exit `0`), that `n_valid` is close to `n_total`, and
+that the report prints no warnings.
 
-```bash
-tests/propagation/006-run-sweep.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> --mesh-sizes 1,2 --iterations 5 --dry-run
-```
-
-### What every result records
-
-Every TSV preamble has these keys, and each suite's report repeats them, merged over its inputs
-(tuning 004 compares them pass by pass):
-
-| Key | What it means | Where it comes from |
-| --- | --- | --- |
-| `HARNESS_SHA` | The harness that wrote the result: `git describe --always --abbrev=7`, plus `-dirty.<8hex>` when git lists a changed tracked file, or an untracked file it does not ignore, under `tests/`, `config/`, `charts/` or `terraform/` (a run's own results never count; `tests/<suite>/configs/*.local.env` is ignored); the hex hashes the diff against `HEAD` and those untracked files' names and contents, so two different edits read as two harnesses | `harness_sha`, [tests/lib/common.sh](tests/lib/common.sh) |
-| `RUN_CONFIG`, `RUN_CONFIG_SHA256` | The `--config` file (its path from the repo root, or only its name outside the repo) and its SHA-256; `none` without one | `config_preamble_lines`, [tests/lib/config.sh](tests/lib/config.sh) |
-| `ISTIO_VERSION`, `ISTIO_VERSION_PIN`, `ISTIO_VERSION_SOURCE` | The version the members run ([below](#the-istio-version-check)), the pin (`ISTIO_VERSION` in `config/versions.env`), and `live`, or `pin` in a `--dry-run`, which reads nothing | `istio_version_kv`, [tests/lib/preamble.sh](tests/lib/preamble.sh) |
-| `ISTIO_VERSION_BY_CONTEXT`, `ISTIO_ACTIVE_REVISIONS`, `ISTIO_GENERATIONS` | Per member: its version, its active IstioRevision, and its Istio CR and IstioRevision generations (`<ctx>=<cr>/<revision>`); `unchecked` when not read live | `istio_version_kv` |
-| `KUBE_VERSIONS` | Each member's Kubernetes server version (`unreachable` when it did not answer); the placeholder a propagation or dataplane sweep writes for a failed mesh size leaves it out | `probe_kube_versions`, `tests/lib/preamble.sh` |
-| `TUNING_BASELINE`, `SIDECAR_EGRESS_HOSTS` | The baseline's tuning levers on the source member (`sidecar`, `discoverySelectors`, `telemetryFiltering`, `accessLogFiltering`, each `on` or `off`) and the root Sidecar's egress hosts (`none` without one); gateway-api records them per member (`TUNING_BASELINE[<ctx>]`) | `tuning_baseline_state`, `tests/lib/preamble.sh` |
-| `PLATFORM`, `TEST_PLATFORM`, `PLATFORM_BY_CONTEXT` | `kubernetes` or `openshift` over the members (`mixed` when they run both); the override as set (`auto`, `kubernetes` or `openshift`); what each member serves, asked even with an override | `platform_preamble_lines`, [tests/lib/platform.sh](tests/lib/platform.sh) |
-| `MESH_OPERATOR_BY_CONTEXT` | `sail-operator:<tag>@<digest>` (the digest its pods run) or, on OpenShift, `servicemeshoperator3:<version>` (its CSV); `absent` when the member runs none | `platform_preamble_lines` |
-| `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT` | The image and digest that istiod's `discovery` container, and the ingress and east-west gateways' `istio-proxy`, ran; `none` without such a pod. The test pods' sidecars get the injector's build, which can be newer than a gateway not restarted since an upgrade | `platform_preamble_lines` |
-| `ISTIOD_ENV_BY_CONTEXT` | A 12-hex digest of istiod's `discovery` env without `CLUSTER_ID`, the one variable that differs by member: a tuning profile's `spec.values.pilot.env` or a hand edit changes it | `platform_preamble_lines` |
-| `NODE_PROVIDER_BY_CONTEXT` | The nodes' `spec.providerID` scheme (`kind`, `aws`, ...; nodes without one beside a provider's count as that provider's); `none`: no node has one; `no-nodes`; `unrecognized`: not `<scheme>://` | `platform_preamble_lines` |
-
-`unknown` means not read (a failed read, which warns; a file from before the key), never none or
-off; an image whose pods have not started (Pending, an operator scaled to 0) reads
-`<image>@unknown`, not read either; several values on one member are `+`-joined (a rollout; a pod
-already terminating counts only when no other ran). Where a report's inputs disagree, a key reads
-`mixed:<a>,<b>` (per member `<ctx>=mixed:<a>;<b>`; `mixed:unknown,...` when only some inputs carry
-it), with a warning in the report's body. An older harness wrote `MESH_OPERATOR_BY_CONTEXT` with a
-readiness suffix (such as `/Available`) and `NODE_PROVIDER_BY_CONTEXT` as `aws+none` where some node
-had no provider ID: its TSVs, pooled with newer ones, read `mixed` on those keys, with that warning.
-
-### How a sweep ends
-
-From its start a sweep's `sweep-outcome.txt` says `STATUS=running`. At its end, before its reports,
-it records `STATUS=finished` and exits `0`, or
-`4` when some cells failed (`N of M cells failed`, by reason) or it recorded a problem (the Istio
-version, revision or generations, a member's platform record or `HARNESS_SHA` changed during the
-sweep; each suite README lists its own). One that stops exits `1` (a bad flag or precondition, a
-failed check, an error), or `3` when dataplane's or churn-dataplane's `--on-unreachable fail`
-stopped it, and once started records `STATUS=stopped` with its reason; a stop wins over `4`. On
-Ctrl-C, SIGTERM or SIGHUP it sends SIGTERM to the running step's process group (the step and every
-process it started), SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` (30) seconds later, records
-`STATUS=interrupted` with the signal and exits 128+n (130, 143, 129). One that ends early prints its
-dir and the suite's cleanup command; only one killed outright (SIGKILL, out of memory, a lost host)
-keeps `STATUS=running`. Every report of the dir repeats the outcome; a `sweep-outcome.txt` an older
-harness wrote has no `STATUS` line: the reports read it as `UNKNOWN` and flag it (the csv format
-copies the record's lines as they are). A sweep that did not finish (killed outright, or its
-terminal closed, so its `clean up with:` line went to a dead terminal) may leave its test workloads
-on the members: run the suite's cleanup script (each suite README names it) with `--contexts <the
-sweep's members>` (and `--wait-deletion` where the script has it), then run the sweep again into a
-new dir.
-
-### The Istio version check
-
-Before its first change, every suite reads the version each member runs: the exact `.spec.version`
-of the IstioRevision its `istios.sailoperator.io default` CR names as active. A member is ready when
-its CR is Healthy and reconciled, no more than one revision is in use (two or more: a migration) and
-istiod is rolled out with no pod terminating (Kubernetes reports those from 1.35 on); the members
-that are not are read again, together, every 5 s until they are, up to
-`ISTIO_VERSION_READY_WAIT_SEC` (60 s) in all, unless their first read leaves the version unknown
-(not read, or not exact). With `ISTIO_VERSION_CHECK=fail` (the default) a version unknown at the
-first read (at once, with no wait for the others) or at the end of the wait, members on different
-versions, a version other than the pin `ISTIO_VERSION` (keep it equal to `istioVersion` in
-`charts/spoke-ossm/values.yaml`) or a member still not ready stops the suite before it changes
-anything; `warn` goes on and records what the mesh runs: a sweep notes each finding in its outcome,
-while a probe run on its own and gateway-api (read-only, it only warns) print it on stderr only. A
-sweep reads every member again at its end: another version or active revision, or generations that
-moved (an edit of the Istio CR, or Sail rendering it again), is a problem; a member not ready or not
-read then, a note.
-
-### The platform record
-
-The platform keys are read outside every measurement window, each read bounded by
-`PLATFORM_READ_TIMEOUT` (20s; raise it for members with many nodes), `PLATFORM_READ_PARALLEL` (20;
-lower it on a runner short of memory) members at a time. The Kubernetes and Istio version reads
-share only `PLATFORM_READ_PARALLEL`: each of their reads has a fixed 5 s timeout. A sweep reads
-the platform keys once, hands them to its steps in `platform-record.txt` and reads them
-again after its last step: a value that changed is a problem. `TEST_PLATFORM` picks each suite
-chart's OpenShift overlay (`auto` asks each member); the record asks each member anyway, and warns
-when one differs. Compare results within one platform and mesh build: a report warns when its inputs
-differ. On kind every node reports the whole host, so the controlplane report flags its capacity
-figures and its SLA verdict leaves the node figures out (`CAUTION`), as for a member whose node
-provider was not read; k3d (`k3s://`) and minikube clusters that share one host are not detected, so
-read their node figures the same way. On kind the cross-cluster path runs through
-cloud-provider-kind's userspace Envoy on the shared host, so the dataplane and churn-dataplane
-reports flag their remote latency. A member that holds a tuning profile's objects makes tuning 001
-and 003 refuse to start and the other sweeps warn (`tests/tuning/005-cleanup.sh` removes them).
-
-### Run config (`--config FILE`)
-
-Every numbered script of propagation, controlplane, dataplane, churn, churn-dataplane and
-gateway-api takes `--config FILE`: one file of `KEY=value` lines (`SETUP_CONTEXTS` and the suite's
-keys in `config/options.env`, the ones its README lists; not every key there, see "Environment
-only" below) that describes a whole run, so setup, sweep, report and cleanup read
-the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`,
-and a "Run config" section in its README that lists its keys. Tuning does not take one yet.
-
-- **Precedence:** flag > `--config` > environment > default. The file loads before
-  `options.env`, so the defaults derived there follow it. Each key is logged on stderr, with the
-  environment value it overrides. `KEY=` (empty) means the built-in default.
-- **Syntax:** the file is parsed, never sourced, so it cannot run code:
-  `[export ]KEY=value [# comment]`, where the value is unquoted from `[A-Za-z0-9_.,:/@%+=-]`,
-  `'...'`, or `"..."` without `"`, `$`, `` ` `` and `\`. No spaces around `=`, each key once. A
-  bad line or a key outside the suite's list rejects the whole file before anything runs, with
-  `file:line` and the reason.
-- **Environment only:** `*_TEST_NAMESPACE` (cleanup deletes that namespace), `*_MAX_MATRIX` (the
-  `--force-large-matrix` acknowledgment stays per run), `ISTIO_VERSION_CHECK` and
-  `ISTIO_VERSION_READY_WAIT_SEC` (the version check above), `SWEEP_STOP_GRACE_SEC` (every sweep,
-  above) and the version pins in `config/versions.env`.
-- **Flags only:** run switches such as `--dry-run`, `--force-large-matrix` and `--format`, and
-  what a sweep passes to each step (`--source-context`, `--remote-contexts`, `--mesh-size`, ...).
-  A standalone step still takes those on the command line.
-- **Sweeps:** the steps a sweep runs inherit the file's values; the flags it passes them still
-  win. Before the first step a sweep checks its numeric knobs: the ones it passes its steps as
-  flags (durations, QPS, connections, settle times, ...) and the ones only its steps read (setup
-  and cleanup timeouts, poll intervals, ...). A value such as `5m` fails `--dry-run` instead of
-  every setup, every cleanup, or the probe window (fortio would read `5m` seconds as 5 ms).
-- **Context names:** keep real ones out of git. Copy an example to
-  `tests/<suite>/configs/<name>.local.env` (gitignored) and set `SETUP_CONTEXTS` there.
-- **Provenance:** every TSV preamble records `RUN_CONFIG` (the file's path from the repo root, or
-  only its name outside the repo; `none` without `--config`) and `RUN_CONFIG_SHA256`, and every
-  report format repeats them: `unknown` for files written before these keys existed, and
-  `mixed:<a>,<b>` with a warning when the inputs disagree. A sweep copies the file to
-  `sweep-<RUN_ID>/run-config-<RUN_ID>.env`, and every probe's per-run markdown summary has a
-  `Run config` row.
-- **One run per report:** a report reads every TSV under its results dir. When that dir holds
-  more than one run (each `sweep-*` directory is one run; outside one, each `RUN_ID`), it stops,
-  lists the runs and prints the `--results-dir <dir>/sweep-<RUN_ID>` that reports each alone.
-  `--allow-multi-run` pools them on purpose, and every format then says it pools N runs and
-  lists their `HARNESS_SHA` and `ISTIO_VERSION` values. A key that differs across the inputs reads
-  `mixed:<a>,<b>`, never one file's value. A report repeats the `sweep-outcome.txt` of each sweep
-  dir its inputs come from.
+- [docs/reading-results.md](docs/reading-results.md): the five trust checks, every row status,
+  and the words the reports use.
+- Each suite README, "Reading the results": that suite's headline numbers and what good and bad
+  look like.
+- [docs/reference.md](docs/reference.md): what every result records (`HARNESS_SHA`, the Istio
+  version, the platform), how a sweep ends and its exit codes, the version check, and the run
+  config file format.
+- [docs/campaigns](docs/campaigns/README.md): results recorded so far, as examples.
 
 ## Grow the mesh
 
@@ -351,8 +302,8 @@ Nothing in the code names the repo's home, so a move is settings, not code:
 
 1. Point the platform at the new repo: set `gitops_app_repo_url` and `gitops_app_repo_revision` in
    your tfvars (plus `gitops_app_repo_password` or `gitops_app_repo_ssh_private_key` for a private
-   repo) and re-apply `terraform/platform`. The on-demand checks read both from the hub when you
-   apply them ([Verify](#verify)), so they follow.
+   repo) and re-apply `terraform/platform`. The on-demand checks (the preflight's `--echo` and the
+   gateway-api check) read both from the hub when they deploy, so they follow.
 2. Recreate CI: enable Actions, then protect `main` with a rule that requires a pull request and the
    checks `validate (ubuntu-latest)` and `validate (macos-latest)`
    ([portability.yml](.github/workflows/portability.yml); keep those job names). CI also runs on
@@ -366,10 +317,21 @@ Nothing in the code names the repo's home, so a move is settings, not code:
 
 ## More
 
-- [AGENTS.md](AGENTS.md): repo conventions for contributors and coding agents
-- [docs/scale-test-campaign](docs/scale-test-campaign/README.md): end-to-end campaign runbook; [docs/campaigns](docs/campaigns/README.md): recorded results
-  (paste from a copy that `tests/lib/redact-results.sh --out <dir> <results-dir>` redacted)
-- [docs/runbooks](docs/runbooks): a kind lab on one machine, operating a deployed lab, or a ROSA validation run
+For running tests:
+
+- [docs/runbooks/kind-lab](docs/runbooks/kind-lab/README.md): the whole thing on one machine.
+- [docs/scale-test-campaign](docs/scale-test-campaign/README.md): a full campaign across many
+  clusters, stage by stage.
+- [docs/campaigns](docs/campaigns/README.md): recorded results.
+- [docs/runbooks](docs/runbooks): operating a deployed lab, and a ROSA validation run.
+
+For changing the harness (not needed to run it):
+
+- [AGENTS.md](AGENTS.md): repo conventions; [tests/lib/verify.sh](tests/lib/verify.sh) runs every
+  offline check CI runs.
+- [BACKLOG.md](BACKLOG.md), [STRATEGY.md](STRATEGY.md): open work and the reasoning behind the
+  suites.
+- [docs/scale-test-team](docs/scale-test-team/README.md): how harness changes are reviewed.
 
 ## License
 

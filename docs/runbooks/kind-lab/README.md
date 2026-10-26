@@ -157,7 +157,7 @@ done
 `root=` must read the same on both members; `replicas=1` is the lab's one istiod replica; `members=`
 lists both members, which each gate checks by name.
 
-Then run the end to end echo check in [Verify](../../../README.md#verify) with `kind-hub` as
+Then run the end to end echo check in [Verify](../../../README.md#2-check-the-mesh) with `kind-hub` as
 `<hub-ctx>` and `kind-mesh-1` as `<mesh-a-ctx>`: answers come from both members. The ingress
 address is on the kind Docker network, which a Linux host reaches directly.
 

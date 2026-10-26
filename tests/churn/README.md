@@ -86,7 +86,7 @@ not averaged: the report shows the worst bucket range a valid row hit (e.g. `500
 or `overflow (N rows)` when N valid rows had their p99 in the `+Inf` bucket (csv: the
 `worst_bucket` and `n_overflow` columns).
 
-The TSV preamble records [what every result records](../../README.md#what-every-result-records),
+The TSV preamble records [what every result records](../../docs/reference.md#what-every-result-records),
 read before the first churn event (a sweep reads the platform record once for all its combos).
 `004` prints it in every format (text, csv, md, charts; it has no json), per member as
 `<ctx>=mixed:a;b` with a warning in the report itself when the inputs differ (`KUBE_VERSIONS`:
@@ -145,7 +145,7 @@ A failed setup or probe becomes a placeholder row and the sweep moves on.
 Exit codes: `0` every cell (mesh size x intensity) ran; `1` the sweep stopped (a bad flag or
 precondition, or an unexpected error); `130`, `143` or `129` it was interrupted; `4` it finished
 and wrote its reports, but some cells failed (a `SETUP_FAILED` / `PROBE_FAILED` placeholder) or it
-recorded a problem ([How a sweep ends](../../README.md#how-a-sweep-ends) has those, and the
+recorded a problem ([How a sweep ends](../../docs/reference.md#how-a-sweep-ends) has those, and the
 `sweep-outcome.txt` record every report repeats). The last line on stderr says how many, by
 reason. When a sweep did not finish and no sweep runs any more, run `005-cleanup.sh --contexts <the
 sweep's members>`, then run the sweep again into a new dir; the rows already in the dir cover only
@@ -156,7 +156,7 @@ Rows a probe wrote with a non-OK status (`TIMEOUT_*`, `MISSING_VALUE`,
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 2 and 4 Deployments scaled 1 to 2, 2 iterations):
 

@@ -83,7 +83,7 @@ Exit codes: `0` every pass ran its probe; `1` the sweep stopped (a bad flag or p
 failed suite setup, a failed revert, or an unexpected error); `4` it finished, reverted every
 profile and wrote `sweep-comparison.md`, but some passes failed (`SETUP_FAILED`: the profile did
 not apply; `PROBE_FAILED`: the probe exited non-zero, including a reachability stop), or it
-recorded a problem (those of [every sweep](../../README.md#how-a-sweep-ends); the Istio CR or a
+recorded a problem (those of [every sweep](../../docs/reference.md#how-a-sweep-ends); the Istio CR or a
 member's platform record changed during a pass, above and below; or the last revert left the
 Istio CR's spec unlike the start); `130` / `143` / `129`: interrupted (Ctrl-C, SIGTERM, SIGHUP),
 after reverting the active profile. `sweep-comparison.md` repeats `sweep-outcome.txt`. When a
@@ -186,7 +186,7 @@ settings (`(partly unknown)` after it when some were not read), `unknown` when n
 `mixed` when the members, the TSVs or a member's istiod pods differ (a rollout caught midway), and
 `-` for a pass without data. 001 verifies that its apply reached istiod.
 
-`TEST_PLATFORM` ([the platform record](../../README.md#the-platform-record)) also sets, with
+`TEST_PLATFORM` ([the platform record](../../docs/reference.md#the-platform-record)) also sets, with
 `TUNING_GITOPS_NAMESPACE` empty, the platform of the hub whose Argo CD namespace 006 pauses in;
 `TUNING_GITOPS_NAMESPACE` overrides that namespace. 001 and 003 read every member for a profile's
 objects or marker before they change anything, and 003 reads every member's record twice per pass

@@ -124,7 +124,7 @@ unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`
 are written); `4` it finished and wrote its reports, but some combinations failed (`SETUP_FAILED`,
 `RESET_FAILED` or `PROBE_FAILED` rows), or it recorded a problem; `130`, `143` or `129` it was
 interrupted. `3` wins over `4`. What each records in `sweep-outcome.txt`, and the problems every
-sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not finish and
+sweep checks: [How a sweep ends](../../docs/reference.md#how-a-sweep-ends). When a sweep did not finish and
 no sweep runs any more, run `006-cleanup.sh --contexts <the sweep's members> --wait-deletion`, then
 run the sweep again into a new dir; the rows already in the dir cover only the cells it finished.
 
@@ -217,7 +217,7 @@ validity stricter. To compare against those sweeps without the stricter rule, se
 `COEXEC_MIN_PCT_200=0`. Their TSVs have no `MIN_PCT_200` line and no reach file, so the
 report shows `unknown` and "no reachability data".
 
-Every TSV preamble also carries the [platform record](../../README.md#the-platform-record),
+Every TSV preamble also carries the [platform record](../../docs/reference.md#the-platform-record),
 read before the baseline window (a sweep reads it once for all its combos, and again after the last
 one). `005` prints it in every format, with a warning in the report itself (the top-level `warnings`
 array in json, empty without one) when its inputs differ or a value could not be read in some of
@@ -232,7 +232,7 @@ reads their values as `unknown`.
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 churn rates 1 and 2 over 3 Deployments, 20 s windows at 50 QPS):
 

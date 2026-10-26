@@ -102,7 +102,7 @@ Exit codes: `0` every mesh size ran; `1` the sweep stopped (a bad flag or precon
 unexpected error); `4` it finished and wrote its reports, but some mesh sizes failed (setup or probe
 exited non-zero, a `SETUP_FAILED` / `PROBE_FAILED` placeholder row), or it recorded a problem;
 `130`, `143` or `129` it was interrupted. What each records in `sweep-outcome.txt`, and the problems
-every sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not
+every sweep checks: [How a sweep ends](../../docs/reference.md#how-a-sweep-ends). When a sweep did not
 finish and no sweep runs any more, run `007-cleanup.sh --contexts <the sweep's members>`, then run
 the sweep again into a new dir.
 Rows a probe wrote with a non-OK status are measurements, not failures: the report counts them in
@@ -114,7 +114,7 @@ size that measured fewer iterations or rows than that warns in every format and 
 ## Run config (`--config FILE`)
 
 Every script takes `--config FILE`, one file of `KEY=value` lines for a whole run (shared
-rules: [Run config](../../README.md#run-config---config-file)).
+rules: [Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (mesh sizes 1 and 2,
 3 iterations each):
 
@@ -166,7 +166,7 @@ Results go to `tests/propagation/results/` (a sweep uses `results/sweep-<RUN_ID>
   p1_conv_p50_ms p1_conv_p99_ms p1_sample_count p1_proxy_count p1_overflow restarted p2_dirty
   window_ms scrape_skew_ms p1_status p1_scrape_skew_ms remote_status remote_scrape_skew_ms`.
   Older TSVs have 18, 19 or 21; `006`'s `SETUP_FAILED` / `PROBE_FAILED` rows use all 23.
-- The preamble's [platform record](../../README.md#the-platform-record), read before the first
+- The preamble's [platform record](../../docs/reference.md#the-platform-record), read before the first
   iteration (a sweep reads it once for all its steps, and again after the last one). `005` prints
   it in every format, as `mixed` with a warning in the report itself (the top-level `warnings`
   array in json, empty without one) when its inputs differ or a value could not be read in some

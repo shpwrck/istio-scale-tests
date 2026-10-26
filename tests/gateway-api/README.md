@@ -252,11 +252,11 @@ results will go, and:
      found none); the Istio CR's requested version (`ISTIO_CR_VERSION[ctx]`, which can be an alias
      such as `v1.30-latest`); the Istio version keys every suite records (`ISTIO_VERSION`, what the
      members run, and the keys beside it: [what every result
-     records](../../README.md#what-every-result-records)), read and waited for as every suite
-     does ([the Istio version check](../../README.md#the-istio-version-check)), except that this
+     records](../../docs/reference.md#what-every-result-records)), read and waited for as every suite
+     does ([the Istio version check](../../docs/reference.md#the-istio-version-check)), except that this
      read-only check only warns about a version that is unknown, mixed or not the pin, or a member
      still not ready, and never stops on it; and the tuning baseline;
-   - the [platform record](../../README.md#the-platform-record) every suite writes: `PLATFORM`,
+   - the [platform record](../../docs/reference.md#the-platform-record) every suite writes: `PLATFORM`,
      `TEST_PLATFORM` and the per-member `*_BY_CONTEXT` keys. `TEST_PLATFORM` (`config/options.env`,
      default `auto`) also picks the hub's platform for its Argo CD namespace: `auto` asks the hub,
      `kubernetes` or `openshift` is taken as given (a member that serves the other platform gets a
@@ -603,7 +603,7 @@ member, namespace `mesh-verify-gwapi-remote`. By hand, on each member: delete na
 ## Run config (`--config FILE`)
 
 The script takes `--config FILE`, one file of `KEY=value` lines (shared rules:
-[Run config](../../README.md#run-config---config-file)).
+[Run config](../../docs/reference.md#run-config---config-file)).
 [`configs/smoke.env`](configs/smoke.env) is a worked example (5 requests per cell, a 120 s bound
 on the wait and the gate, no istioctl evidence):
 
