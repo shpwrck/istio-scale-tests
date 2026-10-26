@@ -1,5 +1,5 @@
 # Preset: Gateway API multicluster ingress check on every mesh member, echo workload on one
-# (charts/mesh-verify-gateway-api-appset.yaml; tests/gateway-api/README.md).
+# (charts/mesh-verify-gateway-api-appset.yaml; misc_tests/gateway-api/README.md).
 identity:
   component: mesh-verify-gateway-api
 

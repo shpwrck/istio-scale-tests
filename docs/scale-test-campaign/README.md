@@ -26,10 +26,10 @@ writes a markdown summary and TSVs under `tests/<suite>/results/sweep-<RUN_ID>/`
    credentials must stay valid for the whole multi-hour run.
 5. **Tools:** `kubectl`/`oc`, `helm`, `jq`, `curl`, `awk`, and GNU `timeout` (macOS: `brew install
    coreutils` for `gtimeout`; the controlplane suite stops at startup without one).
-6. **The `ISTIO_VERSION` pin matches the mesh.** Every suite but gateway-api reads the version
+6. **The `ISTIO_VERSION` pin matches the mesh.** Every suite reads the version
    each member runs (its active IstioRevision) before its first change and stops when it differs
    from `ISTIO_VERSION` (`config/versions.env`), when members differ, or when one cannot be read;
-   gateway-api, a read-only check, records it and goes on. Fix the pin (or the mesh);
+   (the one-off Gateway API check, read-only, records it and goes on). Fix the pin (or the mesh);
    `ISTIO_VERSION_CHECK=warn` runs anyway and records what the mesh runs. A member that is not
    ready (its Istio CR not Healthy or not reconciled, a revision migration, an istiod rollout) is
    read again every 5 s, up to `ISTIO_VERSION_READY_WAIT_SEC` (60 s), and stops the run too when it

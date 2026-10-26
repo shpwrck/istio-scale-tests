@@ -58,7 +58,7 @@ Skip a child Application with `apps.<name>.enabled=false` (see `gitops-hub-apps/
 | `spoke-east-west-gateway/` | app-of-apps | East-west gateway + cross-network Gateway |
 | `mesh-wiring-verify/` | Terraform (`values-mesh-wiring-verify.yaml`) | Per-member health gate for remote secrets and istiod sync, each member by name |
 | `mesh-verify/` | `mesh-verify-appset.yaml` | Cross-cluster echo workload |
-| `mesh-verify-gateway-api/` | `mesh-verify-gateway-api-appset.yaml` | Gateway API ingress check: HTTPRoutes on every member, echo on one ([tests/gateway-api](../tests/gateway-api/README.md)) |
+| `mesh-verify-gateway-api/` | `mesh-verify-gateway-api-appset.yaml` | Gateway API ingress check: HTTPRoutes on every member, echo on one ([misc_tests/gateway-api](../misc_tests/gateway-api/README.md)) |
 | `istiod-monitor/` | manual `helm install` | ServiceMonitor + PrometheusRule for istiod |
 
 `mesh-verify-appset.yaml` and `mesh-verify-gateway-api-appset.yaml` are standalone Applications
@@ -67,4 +67,4 @@ and `<gitops-namespace>` placeholders in git: fill them in with `sed` on the way
 the hub's `hub-gitops-root` Application, so the check deploys the same repo and revision as the mesh
 ([Verify](../README.md#2-check-the-mesh)). The second also needs the workload member's cluster name
 (`workloadCluster`) in its `<workload-cluster>` placeholder, so the name stays out of git
-([tests/gateway-api](../tests/gateway-api/README.md#deploy)).
+([misc_tests/gateway-api](../misc_tests/gateway-api/README.md#deploy)).

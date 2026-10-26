@@ -117,7 +117,7 @@ fill() { sed -e "s|<repo-url>|${REPO:?}|g" -e "s|<revision>|${REV:?}|g" \
   -e "s|<platform>|${PLATFORM}|g" -e "s|<gitops-namespace>|${NS}|g" \
   -e "s|<workload-cluster>|${WORKLOAD:?}|g" charts/mesh-verify-gateway-api-appset.yaml; }
 fill | kubectl --context <acm-hub-ctx> apply -f -
-tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+misc_tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
   --workload-context <mesh-b-ctx> --hub-context <acm-hub-ctx>
 fill | kubectl --context <acm-hub-ctx> delete -f -
 ```

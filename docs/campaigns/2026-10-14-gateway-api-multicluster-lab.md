@@ -1,6 +1,6 @@
 # 2026-10-14 lab run of the Gateway API multicluster ingress check
 
-The first live run of [`tests/gateway-api/`](../../tests/gateway-api/README.md) (backlog task 8). It
+The first live run of [`tests/gateway-api/`](../../misc_tests/gateway-api/README.md) (now `misc_tests/gateway-api/`) (backlog task 8). It
 asks whether Gateway API (HTTPRoute) needs the backend Service, or its namespace, on every mesh
 member so that a request entering any member's ingress reaches a workload that runs on one member.
 This is a functional check, not a scale run.

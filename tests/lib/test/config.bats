@@ -87,7 +87,7 @@ file_keys() {
 	awk '{ printf "%s%s", (NR > 1 ? "\r\n" : ""), $0 }' "$GOOD" > "$crlf"
 	grep -q $'\r' "$crlf"
 	[ "$(loaded "$crlf" "${GOOD_KEYS[@]}")" = "$output" ]
-	for f in "$ROOT"/tests/*/configs/*.env; do
+	for f in "$ROOT"/tests/*/configs/*.env "$ROOT"/misc_tests/*/configs/*.env; do
 		s="${f%/configs/*}"
 		s="${s##*/}"
 		mapfile -t keys < <(file_keys "$f")

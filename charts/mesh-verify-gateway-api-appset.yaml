@@ -1,6 +1,6 @@
 # Standalone Argo CD Application (not part of the app-of-apps): deploys the Gateway API
 # multicluster ingress check (charts/mesh-verify-gateway-api) on every mesh member, with the echo
-# workload on ONE member. What it answers and how to run it: tests/gateway-api/README.md.
+# workload on ONE member. What it answers and how to run it: misc_tests/gateway-api/README.md.
 # Five placeholders stay in git and are filled in on the way to the hub (Apply):
 #   - <repo-url> and <revision>: the repo and revision the hub's root Application syncs (set
 #     by terraform/platform), so the check deploys the same charts as the mesh. Applied as the

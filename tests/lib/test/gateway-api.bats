@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# tests/gateway-api/001-run-ingress-check.sh (Gateway API multicluster ingress check) through
+# misc_tests/gateway-api/001-run-ingress-check.sh (Gateway API multicluster ingress check) through
 # its real entrypoint (PL33): the dry run and the argument errors, the chart <-> prediction-table
 # contract (scenario set and render pin included), the stops before anything is written, and
 # whole runs against stub kubectl/curl/istioctl. One test per rule of the answers (YES, NO,
@@ -17,7 +17,7 @@
 bats_require_minimum_version 1.5.0
 load test_helper
 
-GW="${ROOT}/tests/gateway-api/001-run-ingress-check.sh"
+GW="${ROOT}/misc_tests/gateway-api/001-run-ingress-check.sh"
 CHART="${ROOT}/charts/mesh-verify-gateway-api"
 
 # The chart render that the script's SCENARIO_SET describes: "<set> <sha256 of render_sha>".
@@ -439,7 +439,7 @@ setup_file() {
 	# S2's re-probe leaves no record; S7 answers on its re-probe; S8 fails; read through smoke.env
 	# and --ingress with a port.
 	gw_start reprobe-gone STUB_S2_OTHER=500 STUB_S2_REPROBE=kill STUB_S7B_OTHER=500 STUB_S7_REPROBE=200 STUB_S8_OTHER=500 -- \
-		--config "${ROOT}/tests/gateway-api/configs/smoke.env" --ingress ctx-a=192.0.2.1:8080
+		--config "${ROOT}/misc_tests/gateway-api/configs/smoke.env" --ingress ctx-a=192.0.2.1:8080
 	# Routes without status: S2 and S5 when the wait ended, S4, S7 and S8 throughout; S2 and S8 fail.
 	gw_start no-status STUB_NOSTATUS_ONCE=s2,s5 STUB_NOSTATUS=s4,s7,s8 STUB_S2_OTHER=500 STUB_S7B_OTHER=500 \
 		STUB_S8_OTHER=500 -- --wait-timeout 0
@@ -544,7 +544,7 @@ preamble_keys() {
 	local args
 	args="$(sed -n 's/^# ci-dry-run://p' "$GW")"
 	# shellcheck disable=SC2086  # the annotation's words
-	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$GW" --dry-run --config "${ROOT}/tests/gateway-api/configs/smoke.env" $args \
+	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$GW" --dry-run --config "${ROOT}/misc_tests/gateway-api/configs/smoke.env" $args \
 		--results-dir "$OUT"
 	assert_success
 	assert_output --partial "Dry-run complete"
@@ -797,7 +797,7 @@ render_sha() {
 	# No Gateway API CRDs (Kubernetes does not ship them): the stop says where to get them.
 	STUB_NO_CRD=ctx-a gw_run
 	assert_failure
-	assert_output --partial "ctx-a: no Gateway API CRDs (httproutes.gateway.networking.k8s.io): install the standard channel (tests/gateway-api/README.md, Deploy)"
+	assert_output --partial "ctx-a: no Gateway API CRDs (httproutes.gateway.networking.k8s.io): install the standard channel (misc_tests/gateway-api/README.md, Deploy)"
 	[ ! -e "$OUT" ]
 	# The echo Deployment on another member than --workload-context.
 	PATH="${BIN}:${PATH}" KUBECONFIG="$EK" run bash "$GW" --contexts ctx-a,ctx-b --workload-context ctx-a --results-dir "$OUT"
@@ -1373,7 +1373,7 @@ if got.get("SCENARIO_SET[ctx-a]") != "v0: \"q\" #1 \\b":
 	use reprobe-gone
 	assert_success
 	grep -qx '# INGRESS_ADDRESS_SOURCE\[ctx-a\]=override:port=8080' "$(tsv)"
-	grep -qx '# RUN_CONFIG=tests/gateway-api/configs/smoke.env' "$(tsv)"
+	grep -qx '# RUN_CONFIG=misc_tests/gateway-api/configs/smoke.env' "$(tsv)"
 	ls "$OUT"/run-*/run-config-*.env
 	grep -q 'run-config-' "$(summary)"
 	no_addresses
