@@ -5,6 +5,36 @@ churn-target deployments on one **source** cluster and times when the source see
 the new pods and when each **remote** cluster sees them. Remote clusters stay at
 base replicas, so the remote numbers are cross-cluster propagation only.
 
+## At a glance
+
+**Question:** when Deployments scale up on one cluster, how long until the proxies on that
+cluster, and on every other cluster, can reach the new pods?
+
+**What it deploys**, in namespace `churn-test` on every member it uses: 5 small Deployments (the
+churn targets, 1 replica each) and one watcher pod whose proxy the probe reads. The sweep removes
+them when it ends.
+
+**What a run does:** for each mesh size and churn intensity (the number of Deployments scaled),
+set up, then repeat 5 times: scale every churn target on the source member from 1 to 5 replicas
+at once, time how long the local and remote proxies take to see the new pods, scale back and
+settle. Then clean up and write the report. Rough time with two members at the defaults: 10 to
+15 minutes.
+
+**Reading the results:** the sweep's `sweep-<RUN_ID>.md` averages, per mesh size and intensity:
+
+| Column | What it times, from the scale-up |
+| --- | --- |
+| `convergence_local_ms` | until the source member's proxies see the new pods and istiod reports every proxy in sync (includes pod start-up) |
+| `convergence_remote_eds_ms` | until the remote istiod pushes the change (control plane only) |
+| `remote_endpoint_reachable_ms` | until a remote proxy has the new pods as healthy endpoints: the end-to-end number |
+
+Smaller is better; watch how the remote numbers grow with mesh size and intensity. For scale, the
+June 2026 ten-cluster ROSA run measured local convergence of 2.4 to 3.7 s and remote reach of 7.8
+to 12 s ([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)). Rows with a status
+other than `OK` are counted in `n_total` but not averaged; [What gets measured](#what-gets-measured)
+lists them, and [Reading results](../../docs/reading-results.md) the checks that apply to every
+suite.
+
 ## Architecture
 
 > Diagram conventions are shared across suites — see

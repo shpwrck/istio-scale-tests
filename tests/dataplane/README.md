@@ -3,6 +3,35 @@
 Measures request latency and throughput between sidecars, in-cluster and through the
 east-west gateways, using fortio.
 
+## At a glance
+
+**Question:** how much latency does a request add when it crosses to another cluster through the
+east-west gateways, compared with the same request inside one cluster?
+
+**What it deploys**, in namespace `dataplane-test`: on every member it uses, 2 fortio server
+pods (an HTTP load-test server) and one Service per member that selects only that member's
+servers; on the source member, also a fortio client pod that generates the load. The sweep
+removes them when it ends.
+
+**What a run does:** for each mesh size, set up, check that every remote member answers, then
+send load from the client at 10, 100, 500 and 1000 requests per second for 30 s each, to the
+source member's own servers (the local baseline) and to each remote member's servers (the
+cross-cluster path). Then clean up and write the report. Rough time with two members at the
+defaults: about 15 minutes.
+
+**Reading the results:** the sweep's `sweep-<RUN_ID>.md` has a row per mesh size, request rate
+and target class (`local` or `remote`), with p50, p90, p99 and max latency in milliseconds, the
+achieved request rate and the share of HTTP 200 answers. The answer to the question is the
+difference between `remote` and `local` at the same rate. The report first states whether the
+local baseline is usable (`Local baseline: OK`); when it is not, there is nothing to compare
+against. A row is left out of the averages when the client could not reach the requested rate
+(`QPS_SHORTFALL`: the server was saturated) or fewer than 99% of requests succeeded. For scale,
+the June 2026 ten-cluster ROSA run measured the cross-cluster hop at about 1 ms at p50 (2.4 to
+2.8 ms local, 2.8 to 3.6 ms remote; [record](../../docs/campaigns/2026-06-04-clean-pass-results.md)).
+On kind the cross-cluster path runs through a local proxy on the same machine, so remote numbers
+there mean nothing. [Outputs](#outputs) has every column and status, and
+[Reading results](../../docs/reading-results.md) the checks that apply to every suite.
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see

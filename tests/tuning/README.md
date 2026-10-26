@@ -4,6 +4,25 @@ Measure what an Istio tuning change does to a test suite. A sweep measures the
 GitOps baseline, then applies each profile, runs the suite's probe and reverts,
 and writes a comparison table.
 
+## At a glance
+
+**Question:** does a tuning change to istiod or the proxies (one of the profiles below) make
+one of the other suites' numbers better or worse?
+
+**What it deploys:** nothing of its own. It runs another suite's setup and probe, and between
+passes it patches each member's `Istio` resource (or adds a DestinationRule) with a profile, then
+reverts it. While it runs, it pauses Argo CD's auto-sync of the members' Istio Applications so
+Argo CD does not undo the profile, and resumes it at the end, also after Ctrl-C.
+
+**What a run does:** run the chosen suite's probe once on the mesh as deployed (the baseline),
+then once per profile: apply the profile, wait, run the probe, revert. Rough time: one probe run
+of that suite per profile, plus the baseline and a short settle each.
+
+**Reading the results:** `sweep-comparison.md` puts the baseline and each profile side by side,
+with the mean of each metric, the number of valid samples, its range, and the change against the
+baseline in percent. A change smaller than the range of the baseline itself is noise. The
+`Pass status` row must read `ok` for every pass. [Results](#results) explains every row.
+
 ## Prerequisites
 
 - bash 4+, `kubectl` or `oc`, `jq`, and `python3` with PyYAML.

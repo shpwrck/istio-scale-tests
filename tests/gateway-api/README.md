@@ -22,6 +22,26 @@ again on 2026-10-18 on kind ([kind lab](../../docs/runbooks/kind-lab/README.md):
 1.30.5 through the Sail operator 1.31.1, Gateway API v1.6.1 standard channel): 22 of 22 rows
 matched.
 
+## At a glance
+
+**Question:** does a Gateway API HTTPRoute need its backend Service (or the Service's namespace)
+on every member, or only on the member that runs the workload? The short answer, confirmed in
+two labs, is in [Answer](#answer-istio-1305-ossm-343-and-upstream-predicted-from-the-source-confirmed-in-the-lab-2026-10-14-and-on-kind-2026-10-18).
+
+**What it deploys:** nothing by itself; it only reads and sends requests. Before you run it, you
+deploy the check from the hub ([Deploy](#deploy)): HTTPRoutes on every member in namespace
+`mesh-verify-gwapi`, and an echo workload on one member. Remove it afterwards
+([Cleanup](#cleanup)).
+
+**What a run does:** reads how each member resolved each route, sends requests through every
+member's ingress gateway for each scenario, repeats any failure once, and compares each result
+with its prediction. Rough time: about 5 minutes.
+
+**Reading the results:** the summary starts with two answers, each `NO`, `YES` or
+`INCONCLUSIVE` with the reason. Below it, every scenario row reads `MATCH` when it behaved as
+predicted. A run where every row matches confirms the answer for your Istio version; any other
+row is listed with its prediction. [Read the report](#read-the-report) has the details.
+
 ## Answer (Istio 1.30.5, OSSM 3.4.3 and upstream; predicted from the source, confirmed in the lab 2026-10-14 and on kind 2026-10-18)
 
 **For traffic, no. For the HTTPRoute status, yes.** An HTTPRoute attached to a Gateway routes to a

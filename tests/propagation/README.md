@@ -3,6 +3,38 @@
 Measures how long a new endpoint takes to reach istiod and sidecars on the source cluster
 and on every remote cluster in a multi-primary mesh.
 
+## At a glance
+
+**Question:** when a pod becomes a ready endpoint on one cluster, how long until the control
+planes and the proxies on every cluster know about it?
+
+**What it deploys**, in namespace `propagation-test` on every member it uses: watcher pods
+(sidecar-injected pods whose proxies receive the new endpoint; 1 by default, 30 gives enough
+proxies for a p99) and one backer pod, the pod that becomes the endpoint. The sweep removes them
+when it ends.
+
+**What a run does:** for each mesh size (1 member, then 2, ...), set up, then repeat 10 times:
+add the backer to the `propagation-canary` Service with one label change on the source member,
+time the three phases below, remove it again and wait for it to drain. Then clean up and write
+the report. Rough time with two members at the defaults: 10 to 20 minutes.
+
+**Reading the results:** the sweep's `sweep-summary.md` has one table per phase, each with min,
+average, p50, p95, p99 and max per mesh size:
+
+| Phase | What it times, from the label change |
+| --- | --- |
+| `P1_local_wall` | until the source's istiod has pushed the change to every connected proxy |
+| `P2_discovery` | until each remote member's istiod pushes the new endpoint to its proxies |
+| `P3_dataplane` | until a proxy on each remote member reports the endpoint healthy: the end-to-end number |
+
+Smaller is better. Look at how they change with mesh size: P2 and P3 growing with the number of
+members means cross-cluster propagation is the bottleneck. For scale, the June 2026 ten-cluster
+ROSA run measured P1 and P2 flat at about 2 seconds from 1 to 10 members
+([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)). Rows with a status other than
+`OK` (a timeout, an istiod restart, a failed scrape) are counted in `n_total` but not averaged;
+[Outputs](#outputs) has the full list and [Reading results](../../docs/reading-results.md) the
+checks that apply to every suite.
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see

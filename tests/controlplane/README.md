@@ -6,6 +6,43 @@ a VirtualService and DestinationRule per service). Growth mode measures how thou
 namespaces with a few services each drive istiod, proxy and gateway cost
 ([Namespace scaling](#namespace-scaling-growth-mode)).
 
+## At a glance
+
+**Question:** how much CPU, memory and configuration-push work does istiod need as the mesh
+grows (more services, replicas, namespaces or members), and how big does each proxy's
+configuration get, with and without `Sidecar` scoping?
+
+**What it deploys**, in namespace `controlplane-test` on every member it uses (or
+`controlplane-test-0` ... `-N` when a cell spreads services over several namespaces): N small
+Deployments with a Service each (10 services × 3 replicas by default), optionally a `Sidecar`
+resource that scopes what each proxy sees, and optionally a VirtualService and DestinationRule
+per service. Each cell deploys its own set and deletes it afterwards.
+
+**What a run does:** for each cell of the matrix (mesh size × services × replicas × namespaces ×
+scoping × traffic config): read istiod's metrics, deploy the workloads, let them settle (60 s by
+default), read istiod's metrics again, sample a few proxies' configuration, then delete the
+workloads. The report is computed from the difference between the two reads. Rough time: about 5
+minutes per cell; the default matrix has 2 cells, while a real campaign has dozens and runs for
+hours (`--dry-run` prints the matrix and a capacity check).
+
+**Reading the results:** the sweep writes `sweep-<RUN_ID>.md` (one row per cell) and
+`scale-envelope-<RUN_ID>.md` (a one-line verdict first). The columns to start with:
+
+| Column | Meaning |
+| --- | --- |
+| `cpu_peak (m)`, `rss_peak (Mi)` | istiod's busiest CPU (millicores) and memory during the window, per replica |
+| `xDS pushes` | configuration updates istiod sent to proxies during the window |
+| `conv_p99 (ms)` | the 99th percentile time for a change to reach the proxies (a histogram bucket range) |
+| `cfg_dump_avg (MiB)` | how much configuration each sampled proxy holds; `Sidecar` scoping should shrink it |
+| verdict (`PASS` / `CAUTION` / `FAIL`) | istiod CPU or memory under 75% of its limit / 75 to 90% / over 90% or a restart |
+
+Compare cells along one axis at a time: the question is how a number grows as one setting grows.
+For scale, the June 2026 ten-cluster ROSA run measured per-proxy configuration of 3.9 MiB without
+scoping and 0.5 MiB with it ([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)).
+A cell whose istiod restarted is counted in `n_total` but not averaged; [Outputs](#outputs) has
+every column and status, and [Reading results](../../docs/reading-results.md) the checks that
+apply to every suite.
+
 ## Architecture
 
 > Diagram conventions (arrow styles, box colors) are shared across all suites — see

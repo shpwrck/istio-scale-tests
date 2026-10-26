@@ -5,6 +5,33 @@ Fortio (client and server) and churn-target deployments share one namespace. Eac
 runs a **baseline** window (steady load, no churn) and a **churn** window (same load
 plus deployment scale events) and reports `Δp99_ms = churn p99 − baseline p99`.
 
+## At a glance
+
+**Question:** does request latency get worse while the mesh is busy with endpoint churn
+(Deployments scaling up and down)?
+
+**What it deploys**, in namespace `churn-dataplane-test`: on every member it uses, fortio
+servers and 5 churn-target Deployments; on the source member, also the fortio client that sends
+the load. The load never goes to the churn targets, so any effect comes from the control plane
+and the nodes being busy, not from the requests themselves. The sweep removes it all when it
+ends.
+
+**What a run does:** for each mesh size and churn rate (1, 5 and 10 scale operations per second
+by default), send steady load at 200 requests per second for 60 s with nothing else happening
+(the baseline window), then for another 60 s while the churn targets scale up and down at that
+rate (the churn window). Then clean up and write the report. Rough time with two members at the
+defaults: about 20 minutes.
+
+**Reading the results:** the sweep's `sweep-summary-<run-id>.md` gives, per mesh size and churn
+rate, the mean and spread of `Δp99_ms`: the p99 latency in the churn window minus the p99 in the
+baseline window, in milliseconds. Close to 0 means churn does not affect requests; it usually
+grows with the churn rate. The table also has p50, p99 and the request rate of both windows, and
+istiod's pushes during them, to explain a change. A window counts only when its load reached
+99% HTTP 200 answers, istiod did not restart, and at least 90% of the requested scale operations
+succeeded (`CHURN_RATE_NOT_MET` otherwise); `valid_runs` against `total_runs` says how many did.
+[Results](#results) has every status, and [Reading results](../../docs/reading-results.md) the
+checks that apply to every suite.
+
 ## Architecture
 
 > Diagram conventions are shared across suites — see

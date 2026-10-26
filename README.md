@@ -252,7 +252,7 @@ that the report prints no warnings.
 
 - [docs/reading-results.md](docs/reading-results.md): the five trust checks, every row status,
   and the words the reports use.
-- Each suite README, "Reading the results": that suite's headline numbers and what good and bad
+- Each suite README, "At a glance": that suite's headline numbers, how to read them and
   look like.
 - [docs/reference.md](docs/reference.md): what every result records (`HARNESS_SHA`, the Istio
   version, the platform), how a sweep ends and its exit codes, the version check, and the run
