@@ -66,7 +66,7 @@ first read (at once, with no wait for the others) or at the end of the wait, mem
 versions, a version other than the pin `ISTIO_VERSION` (keep it equal to `istioVersion` in
 `charts/spoke-ossm/values.yaml`) or a member still not ready stops the suite before it changes
 anything; `warn` goes on and records what the mesh runs: a sweep notes each finding in its outcome,
-while a probe run on its own and gateway-api (read-only, it only warns) print it on stderr only. A
+while a probe run on its own and the one-off Gateway API check (read-only, it only warns) print it on stderr only. A
 sweep reads every member again at its end: another version or active revision, or generations that
 moved (an edit of the Istio CR, or Sail rendering it again), is a problem; a member not ready or not
 read then, a note.
@@ -91,8 +91,8 @@ and 003 refuse to start and the other sweeps warn (`tests/tuning/005-cleanup.sh`
 
 ## Run config (`--config FILE`)
 
-Every numbered script of propagation, controlplane, dataplane, churn, churn-dataplane and
-gateway-api takes `--config FILE`: one file of `KEY=value` lines (`SETUP_CONTEXTS` and the suite's
+Every numbered script of propagation, controlplane, dataplane, churn, churn-dataplane and the
+one-off Gateway API check (gateway-api) takes `--config FILE`: one file of `KEY=value` lines (`SETUP_CONTEXTS` and the suite's
 keys in `config/options.env`, the ones its README lists; not every key there, see "Environment
 only" below) that describes a whole run, so setup, sweep, report and cleanup read
 the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`,

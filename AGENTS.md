@@ -10,8 +10,10 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
    reuse installed operators.
 3. `charts/`: the multi-primary, multi-network mesh as Helm charts, synced by Argo CD
    ApplicationSets (members by cluster-Secret label on Kubernetes, by ACM Placement on OpenShift).
-4. `tests/`: seven bash test suites (propagation, controlplane, dataplane, churn, churn-dataplane,
-   tuning, and the read-only gateway-api check) plus a shared library in `tests/lib/`.
+4. `tests/`: six bash scale-test suites (propagation, controlplane, dataplane, churn,
+   churn-dataplane, tuning), the one-off read-only Gateway API check (`tests/gateway-api`, not
+   part of the scale suite: docs list it apart, under "One-off checks"), and a shared library in
+   `tests/lib/`.
 
 The default platform is vanilla Kubernetes (`platform = "kubernetes"`): upstream Argo CD (Helm),
 members registered as Argo CD cluster Secrets and selected by the label `istio-mesh-member=true`,

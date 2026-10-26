@@ -91,7 +91,6 @@ it ends (the namespace and what it holds are in each suite's README):
 | churn | `churn-test` |
 | churn-dataplane | `churn-dataplane-test` |
 | tuning | none of its own: it runs another suite, and patches istiod's settings during each pass |
-| gateway-api | `mesh-verify-gwapi`, deployed from the hub on demand, not by the check itself |
 
 ## What you need
 
@@ -120,8 +119,6 @@ it ends (the namespace and what it holds are in each suite's README):
   `/etc/cni/net.d`). k3s, MicroK8s and other distributions that keep them elsewhere need
   `istioCni.values` in `charts/spoke-ossm` (e.g. `global.platform: k3s`) through
   `gitops_app_overrides` for `spoke-ossm-appset`.
-- The Gateway API CRDs on every member for the gateway-api check (OpenShift installs them; on
-  Kubernetes use the pinned install in [tests/gateway-api](tests/gateway-api/README.md#deploy)).
 - The metrics API (metrics-server) on every member for the controlplane report's utilization-%
   columns (OpenShift ships it); without it `istiod_*_pct_of_limit` and `node_*_pct` read `N/A`
   and the memory guard reads the gateways from Envoy's stats. kind: see its
@@ -194,9 +191,6 @@ Argo CD cluster name, which is also its Istio cluster ID and the suffix of its r
 `istio-remote-secret-<member>`. A gate installed without them counts instead (`members=unchecked`),
 and a count cannot tell a removed member's leftover secret from a member's.
 
-The gateway-api suite checks a different path: whether an HTTPRoute reaches a workload that runs
-in another member ([tests/gateway-api](tests/gateway-api/README.md)).
-
 ## 3. Run a suite
 
 Each suite answers one question. Pick the one that matches yours, and start with its sweep: the
@@ -212,7 +206,6 @@ defaults; `--dry-run` prints the exact plan without touching a cluster.
 | [churn](tests/churn/README.md) | When Deployments scale up on one cluster, how long until the local and remote proxies can reach the new pods? | `tests/churn/003-run-sweep.sh` | ~10-15 min |
 | [churn-dataplane](tests/churn-dataplane/README.md) | Does request latency get worse while the mesh is busy with endpoint churn? | `tests/churn-dataplane/004-run-sweep.sh` | ~20 min |
 | [tuning](tests/tuning/README.md) | Does an istiod or proxy tuning change make one of the suites above better or worse? | `tests/tuning/003-run-tuning-sweep.sh` | one suite run per profile, plus the baseline |
-| [gateway-api](tests/gateway-api/README.md) | Does an HTTPRoute need its backend Service (or its namespace) on every member, or only where the workload runs? | `tests/gateway-api/001-run-ingress-check.sh` | ~5 min |
 
 A first run, end to end:
 
@@ -260,6 +253,17 @@ that the report prints no warnings.
   config file format.
 - [docs/campaigns](docs/campaigns/README.md): results recorded so far, as examples.
 
+## One-off checks
+
+These answer a single yes/no question about the mesh. They are not scale tests: they measure
+nothing as the mesh grows, and a scale campaign does not run them.
+
+- [Gateway API ingress check](tests/gateway-api/README.md): does an HTTPRoute need its backend
+  Service (or its namespace) on every member, or only where the workload runs? Answered and
+  recorded in two labs (22 of 22 predictions matched). Run it again only to re-check that answer
+  on another Istio version. It needs the Gateway API CRDs on every member (OpenShift installs
+  them; on Kubernetes use the pinned install in its [README](tests/gateway-api/README.md#deploy)).
+
 ## Grow the mesh
 
 `mesh_member_count` in `terraform/platform` sets how many spokes join, in sorted order (0 = all).
@@ -304,7 +308,7 @@ Nothing in the code names the repo's home, so a move is settings, not code:
 1. Point the platform at the new repo: set `gitops_app_repo_url` and `gitops_app_repo_revision` in
    your tfvars (plus `gitops_app_repo_password` or `gitops_app_repo_ssh_private_key` for a private
    repo) and re-apply `terraform/platform`. The on-demand checks (the preflight's `--echo` and the
-   gateway-api check) read both from the hub when they deploy, so they follow.
+   Gateway API check) read both from the hub when they deploy, so they follow.
 2. Recreate CI: enable Actions, then protect `main` with a rule that requires a pull request and the
    checks `validate (ubuntu-latest)` and `validate (macos-latest)`
    ([portability.yml](.github/workflows/portability.yml); keep those job names). CI also runs on

@@ -13,7 +13,7 @@ Last run end to end on 2026-10-18 with kind v0.33.0 (node image `kindest/node:v1
 cloud-provider-kind v0.12.0, Argo CD v3.5.3 and Istio v1.30.5 through the Sail operator 1.31.1:
 every Application Synced/Healthy, both wiring gates `Ready ... ca=shared`, mesh-verify answering
 from both members, the propagation and dataplane suites' setup, probe, report and cleanup, and the
-gateway-api check (all 22 predictions matched).
+one-off Gateway API check (all 22 predictions matched).
 
 ## What you need
 
@@ -178,7 +178,7 @@ tests/propagation/007-cleanup.sh --contexts kind-mesh-1,kind-mesh-2
 ```
 
 The other suites run the same way: the "Quick start" in each suite's README lists its steps
-(tuning: "Run a sweep"; gateway-api: "Deploy" and "Run"). Keep runs small: a sweep sized for the
+(tuning: "Run a sweep"; the one-off Gateway API check: "Deploy" and "Run"). Keep runs small: a sweep sized for the
 20-cluster campaign does not fit on one host.
 
 Expect kind warnings in the reports; they describe the lab, not a failed run. The controlplane

@@ -1,6 +1,8 @@
 # Gateway API Multicluster Ingress Check
 
-A read-only, on-demand check for one question about the multi-primary, multi-network mesh:
+A one-off check, not part of the scale suite: it measures nothing as the mesh grows, and a scale
+campaign does not run it. It is read-only and on demand, and answers one question about the
+multi-primary, multi-network mesh:
 
 > Does an HTTPRoute need its backend Service in **every** member, even a member that runs no
 > workload? Goal: a request that enters **any** member's ingress reaches the workload wherever
@@ -42,7 +44,7 @@ with its prediction. Rough time: about 5 minutes.
 predicted. A run where every row matches confirms the answer for your Istio version; any other
 row is listed with its prediction. [Read the report](#read-the-report) has the details.
 
-Examples of good and bad results: [Result examples](../../docs/result-examples.md#gateway-api).
+Examples of good and bad results: [Result examples](../../docs/result-examples.md#one-off-the-gateway-api-check).
 
 ## Answer (Istio 1.30.5, OSSM 3.4.3 and upstream; predicted from the source, confirmed in the lab 2026-10-14 and on kind 2026-10-18)
 
