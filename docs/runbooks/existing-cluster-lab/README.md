@@ -7,7 +7,8 @@ status: current
 # Existing-cluster lab leave-behind
 
 The repo's platform and mesh run on three existing single-node OpenShift 4.21 clusters (bare
-metal, MetalLB for LoadBalancer Services), deployed by `terraform/platform` in kubeconfig mode.
+metal, MetalLB for LoadBalancer Services), deployed by `terraform/platform` in kubeconfig mode
+(rebuilt from scratch on 2026-10-26).
 - `<acm-hub-ctx>` runs ACM and OpenShift GitOps. It is never a mesh member.
 - `<mesh-a-ctx>` and `<mesh-b-ctx>` are the two mesh members (OSSM 3.4 / Istio v1.30.5).
 
@@ -18,40 +19,46 @@ below are owned here.
 
 ### State and access
 
-- **Powered off since 2026-10-14, about 19:30 UTC.** All three clusters had a graceful node
-  shutdown, the ACM hub last, after the Gateway API check (backlog task 8). It was the second
-  power cycle in two days: off on 2026-10-13, on again for the check on 2026-10-14.
-  - Nothing was torn down; the mesh, platform and Terraform state are unchanged.
-  - The lab was clean before the halt: no test namespaces, no sync windows, no on-demand checks
-    deployed, istiod at 1 replica, all 30 Applications Synced/Healthy, every cluster operator
-    settled, and both mesh-wiring gates `Ready ... ca=shared`.
-  - Power-on steps and the restart deadline are in "Verify and recover".
+- **Running since the rebuild of 2026-10-26.** The platform and mesh were torn down on
+  2026-10-21 after another lab, and that Terraform state was lost. The rebuild ran from the
+  head of shpwrck/istio-scale-tests#110 (charts from `main`), then that PR's smoke run.
+  - The lab was clean after the smoke: no test namespaces, no sync windows, no on-demand checks
+    deployed, istiod at 1 replica, all 30 Applications Synced/Healthy, both mesh-wiring gates
+    `Ready ... ca=shared`, and `terraform plan` reported no changes.
+  - Capacity after the rebuild: the ACM hub runs about 210 of its 250 pods (ACM alone about 81)
+    and requests about 10 of 31.5 CPU; each member runs about 118 pods and requests 4.7 of 19.5
+    CPU.
+  - Power-off and power-on steps, and the restart deadline, are in "Verify and recover".
 - Cluster access: the operator's kubeconfig (default `~/.kube/config`) holds one context per
   cluster, each authenticated with that cluster's kube-admin client certificate. The API
   certificates are publicly trusted, so no CA data is needed. Credentials stay in that kubeconfig.
   - The ROSA validation scope uses its own kubeconfigs, not this file.
   - Always pass `--context` explicitly.
 - Terraform: local state in `terraform/platform/terraform.tfstate` (default workspace,
-  gitignored). Inputs are in `terraform/platform/lab.tfvars` (gitignored), always passed with
-  `-var-file=lab.tfvars`. The `rosa` workspace belongs to the separate `rosa-validation` scope.
+  gitignored) of the checkout that ran the 2026-10-26 rebuild on the operator workstation. It is
+  the only state of this lab, so keep it. Inputs are in `terraform/platform/terraform.tfvars`
+  there (gitignored), which Terraform reads without a flag.
 - Argo CD syncs from the public GitHub repo at `gitops_app_repo_revision`.
-- Adopted, not installed (owned by the cluster owner):
-  - ACM and its MultiClusterHub (`local-cluster`);
-  - the OpenShift GitOps operator;
-  - cert-manager on the hub;
-  - the OSSM operator Subscription on the members. Argo adopts it, so deleting the
-    `<member>-ossm-operator` Application uninstalls OSSM.
-- Lab overrides in `lab.tfvars`:
+- Installed at the rebuild: Terraform installed ACM 2.17 with its MultiClusterHub (the hub's own
+  ManagedCluster takes the hub's context name, the default `acm_local_cluster_name`) and
+  OpenShift GitOps 1.22 on the hub. Argo CD installs External Secrets on the hub and OSSM 3.4 on
+  the members, so deleting a `<member>-ossm-operator` Application uninstalls OSSM.
+- Used, not installed (owned by the cluster owner): cert-manager on the hub. Also the owner's and
+  untouched: the hub's OSSM operator, which serves that cluster's own Gateway API. Its Manual
+  Subscription is why GitOps installs and upgrades wait for approval (Decisions).
+- Lab inputs in `terraform.tfvars`:
   - `platform = "openshift"`: kubeconfig mode defaults to `kubernetes`, and without this line the
     plan stops at its hub platform check (terraform/platform/README.md);
-  - `acm_install_operator = false`;
-  - `acm_keep_managed_clusters_on_destroy = true` (destroy leaves the members registered in ACM);
-  - `gitops_install_operator = false`;
+  - `hub_cluster_context` and `spoke_cluster_contexts`: the three contexts;
   - `gitops_app_overrides`: the cert-manager app disabled; istiod 1 replica at 1-2 CPU / 3Gi;
     gateway Services pinned to the MetalLB pool `gw-ingress` with `metallb.io/address-pool`;
   - `argocd_config_values`: small Argo CD requests, 6Gi controller limit.
 - Removed earlier at the owner's request: a pre-existing, unrelated Istio mesh. Its backup is on
   the operator workstation under `~/backups/<prior-mesh>-<date>/` (mode 700).
+- Removed at the owner's request at the 2026-10-26 rebuild, to free pod slots and CPU: the
+  unrelated operators and demos on all three clusters (OpenShift AI, the NVIDIA GPU operator and
+  NFD, Connectivity Link, ACS, Trusted Artifact Signer with its Keycloak, Network Observability
+  with Loki, Compliance, a demo app and self-hosted CI runners). Their CRDs stay.
 - MetalLB: each member keeps one two-address pool (`gw-ingress`, autoAssign off). The ingress and
   east-west gateways use both addresses, so nothing that needs a new LoadBalancer IP can run here.
 - On-demand checks are not part of the app-of-apps: `mesh-verify` and the Gateway API check.
@@ -60,7 +67,7 @@ below are owned here.
 
 ### Template map
 
-terraform/platform/terraform.tfvars.example -> terraform/platform/lab.tfvars (per-lab inputs, gitignored)
+terraform/platform/terraform.tfvars.example -> terraform/platform/terraform.tfvars (per-lab inputs, gitignored)
 charts/gitops-hub-app-of-apps -> Application `hub-gitops-root` in `openshift-gitops` on `<acm-hub-ctx>`
 charts/gitops-hub-apps/templates/*.yaml -> child Applications in `openshift-gitops` (values from `gitops_app_overrides`)
 charts/gitops-hub-ocm-placement-appset/values-*.yaml -> ApplicationSets that render one Application per mesh member
@@ -82,14 +89,17 @@ imported:
 cd terraform/platform
 terraform init
 terraform workspace select default   # the rosa workspace is the other scope
-terraform import -var-file=lab.tfvars 'kubernetes_manifest.spoke_namespace["<mesh-a-ctx>"]' "apiVersion=v1,kind=Namespace,name=<mesh-a-ctx>"   # once per member, only if already ACM-managed
-terraform plan -var-file=lab.tfvars -out=plan.tfplan
+terraform import 'kubernetes_manifest.spoke_namespace["<mesh-a-ctx>"]' "apiVersion=v1,kind=Namespace,name=<mesh-a-ctx>"   # once per member, only if already ACM-managed
+terraform plan -out=plan.tfplan
 terraform apply plan.tfplan
 ```
 
 The apply is convergent. Edited chart files roll out because each release carries its chart's
-checksum. A follow-up `terraform plan -var-file=lab.tfvars -detailed-exitcode` returns 0 when
-there is no drift.
+checksum. A follow-up `terraform plan -detailed-exitcode` returns 0 when there is no drift.
+
+A rebuild on a fresh state met three stops on 2026-10-26, each named in "Verify and recover":
+an earlier deploy's object on the hub, the GitOps InstallPlan waiting for approval, and the hub's
+pod limit.
 
 Gateway API multicluster check, on demand. It is read-only apart from the Application. Use
 istioctl at the mesh's version.
@@ -157,8 +167,8 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
   3. Remove it with the same `fill`, piped to `kubectl --context <acm-hub-ctx> delete -f -`; the
      delete cascades.
 - Gateway API check:
-  - Expected result: `22 MATCH, 0 DEVIATION, 0 UNKNOWN` and the two answers recorded in
-    `docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`.
+  - Expected result, again on 2026-10-26: `22 MATCH, 0 DEVIATION, 0 UNKNOWN` and the two answers
+    recorded in `docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`.
   - While deployed, both member Applications read Degraded by design: C1's backend does not exist,
     and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded.
   - After `fill | kubectl --context <acm-hub-ctx> delete -f -`, the finalizers remove everything
@@ -189,23 +199,46 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
   mid-operation.
 - Namespaces stuck Terminating behind a deleted CSI driver: run the driver's DaemonSet in a scratch
   namespace until the kubelet unmounts, then delete it.
+- A fresh state stops on "Cannot create resource that already exists": an earlier deploy's object
+  is still on the cluster (2026-10-26: ClusterRole and ClusterRoleBinding
+  `openshift-gitops-applicationset-controller` on the hub, from a lost state). Save it with
+  `-o yaml`, delete it with the owner's consent, then plan and apply again.
+- The apply waits 15 min on `kubernetes_manifest.gitops_subscription` and fails with "timed out
+  waiting on field matchers": the Subscription's InstallPlan waits for approval (Decisions).
+  1. `oc --context <acm-hub-ctx> -n openshift-operators get installplan`: find the unapproved plan
+     whose `spec.clusterServiceVersionNames` holds only the GitOps CSV.
+  2. With the owner's consent, approve it:
+     `oc -n openshift-operators patch installplan <name> --type merge -p '{"spec":{"approved":true}}'`.
+  3. Once the Subscription reads `AtLatestKnown`, untaint it
+     (`terraform untaint 'kubernetes_manifest.gitops_subscription[0]'`), then plan (adds only)
+     and apply.
+- Argo CD pods Pending with "Too many pods", and the apply's reshard step fails with "did not
+  settle within 600s": the hub is at its 250-pod limit. Free pod slots (2026-10-26: the owner's
+  unrelated workloads were removed), or raise `maxPods` with a KubeletConfig, which reboots the
+  single node. Then plan (it replaces the tainted reshard step) and apply.
 
 ## Decision log
 
 ### Decisions
 
 - Prior mesh removed (owner decision): both meshes need the single cluster-wide `IstioCNI`.
-- Brownfield switches instead of importing ACM:
+- Until 2026-10-21, brownfield switches instead of importing ACM (superseded by the rebuild, where
+  Terraform installed ACM and GitOps, since neither was left on the hub):
   - Terraform's OperatorGroup and Subscription names differ from the console's, and a second one
     breaks OLM.
-  - `acm_local_cluster_name = "local-cluster"` keeps the MultiClusterHub unchanged.
+  - `acm_local_cluster_name = "local-cluster"` kept the MultiClusterHub unchanged.
 - cert-manager on the hub serves the cluster's own API and ingress certificates. The repo's
   cert-manager app is therefore disabled there, because its PreDelete hook would uninstall it.
-- On the hub, one Manual-approval Subscription in `openshift-operators` holds every upgrade in that
-  namespace.
-  - One pending InstallPlan was approved, with owner consent, to reach GitOps 1.22.
-  - The Manual setting stays, so `gitops_install_operator = false`; Terraform's AtLatestKnown wait
-    would otherwise time out.
+- On the hub, one Manual-approval Subscription in `openshift-operators` (the owner's OSSM) makes
+  OLM hold every install and upgrade in that namespace for approval, the GitOps operator's too.
+  - Before 2026-10-21, `gitops_install_operator = false` adopted an installed GitOps (one pending
+    InstallPlan was approved, with owner consent, to reach 1.22).
+  - At the 2026-10-26 rebuild Terraform installed GitOps, and its InstallPlan was approved by
+    hand once, with owner consent ("Verify and recover"). The Manual setting stays, so a GitOps
+    upgrade needs the same.
+- 2026-10-26, owner decision: the unrelated workloads were removed from all three clusters, after
+  ACM and Argo CD together hit the hub's 250-pod limit. Raising `maxPods` (one reboot of the hub)
+  was the alternative.
 - Per-environment chart values go through `gitops_app_overrides` / `argocd_config_values`, not
   forks. The chart defaults stay sized for the 20-cluster campaign.
 - Temporary experiments on mesh objects (more istiod replicas, a deleted `cacerts` or Istio CR, a
@@ -235,9 +268,8 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
 
 1. Power on if needed ("Verify and recover"), then run the health checks.
 2. Edit charts or Terraform on a branch, push, and set `gitops_app_repo_revision` to that branch in
-   `lab.tfvars`.
-3. Run `terraform plan -var-file=lab.tfvars`, check that only the intended resources change, then
-   apply.
+   `terraform.tfvars`.
+3. Run `terraform plan`, check that only the intended resources change, then apply.
 4. Watch `oc --context <acm-hub-ctx> get applications.argoproj.io -n openshift-gitops -w` until
    Synced/Healthy, then run Verify.
 5. Run suites against the members only: `--contexts <mesh-a-ctx>,<mesh-b-ctx>`.
