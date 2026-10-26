@@ -128,7 +128,6 @@ it ends (the namespace and what it holds are in each suite's README):
   [runbook](docs/runbooks/kind-lab/README.md#6-smoke-run-a-suite), which also lists the figures a
   kind lab cannot give.
 
-
 ## 1. Deploy
 
 **Kubernetes (default):** apply `terraform/platform` in kubeconfig mode. Name the hub context
