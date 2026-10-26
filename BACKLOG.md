@@ -888,7 +888,7 @@ Add basic, **representative** Istio traffic-management resources to the test wor
 
 #### Scope notes
 - Make density **and** complexity configurable so it doesn't bloat the default sweep but can be turned on for a 'configured production mesh' run.
-- Route the harness change through `/scale-test-review` per the contributing process.
+- Review the harness change against the lenses in `docs/scale-test-team/`.
 
 Filed from the campaign retrospective (Red Hat → <customer> 20c/10k validation).
 

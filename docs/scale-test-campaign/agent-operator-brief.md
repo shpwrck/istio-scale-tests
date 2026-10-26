@@ -47,7 +47,7 @@ provisioning, import, networking or credential work.
 
 Log noisy metrics, odd defaults or fidelity caveats in `CAMPAIGN_STATUS.md`. If one needs a fix,
 have a subagent draft a proposal instead of changing the harness mid-campaign; harness changes
-go through `/scale-test-review` ([`docs/scale-test-team/`](../scale-test-team/)).
+are reviewed against the lenses in [`docs/scale-test-team/`](../scale-test-team/).
 
 ## Commands
 
