@@ -88,9 +88,85 @@ check "argocd_values_unused" {
 }
 
 # --- openshift: GitOps operator (OLM Subscription) ---
+# In a namespace of its own (gitops_operator_namespace), as Red Hat installs it since GitOps
+# 1.10: OLM makes every InstallPlan in a namespace Manual while any Subscription there asks for
+# Manual approval, so in the shared openshift-operators one other operator's Subscription left
+# the install waiting for an approval (homelab 2026-10-26). openshift-operators has its
+# OperatorGroup already; any other namespace gets one for all namespaces.
+
+locals {
+  gitops_subscribe          = local.gitops_enabled && local.is_openshift && var.gitops_install_operator
+  gitops_operator_shared_ns = var.gitops_operator_namespace == "openshift-operators"
+
+  # data.external.gitops_subscriptions: {"namespaces": "<ns> ..."}, the namespaces of the
+  # hub's Subscriptions to the openshift-gitops-operator package. A failed read gives none:
+  # the plan's other reads of the hub then fail on their own.
+  gitops_subscriptions_script = <<-EOT
+    subs=$(kubectl --kubeconfig "$1" --context "$2" --request-timeout=20s get subscriptions.operators.coreos.com -A -o json 2>/dev/null) || subs='{"items":[]}'
+    jq -c '{namespaces: ([.items[] | select(.spec.name == "openshift-gitops-operator") | .metadata.namespace] | unique | join(" "))}' <<<"$subs"
+  EOT
+}
+
+# Kubeconfig mode: a Subscription to the operator in another namespace (an apply of this repo
+# from before 2026-10-26 used openshift-operators, or someone installed it by hand) fails the
+# plan. A second Subscription would never install (one copy of the operator per cluster), and
+# an older state would move the operator to the new namespace.
+data "external" "gitops_subscriptions" {
+  count = local.use_kubeconfig && local.gitops_subscribe ? 1 : 0
+
+  program = ["bash", "-c", local.gitops_subscriptions_script, "--", pathexpand(var.kubeconfig_path), var.hub_cluster_context]
+
+  lifecycle {
+    postcondition {
+      condition     = alltrue([for ns in compact(split(" ", self.result.namespaces)) : ns == var.gitops_operator_namespace])
+      error_message = "The hub (context ${var.hub_cluster_context}) has the OpenShift GitOps operator subscribed in namespace ${self.result.namespaces}, but gitops_operator_namespace is \"${var.gitops_operator_namespace}\". Subscribed by an earlier apply of this repo (openshift-operators until 2026-10-26): set gitops_operator_namespace to that namespace in your tfvars. Installed another way: set gitops_install_operator = false to use it as it is."
+    }
+  }
+}
+
+resource "kubernetes_manifest" "gitops_operator_namespace" {
+  count    = local.gitops_subscribe && !local.gitops_operator_shared_ns ? 1 : 0
+  provider = kubernetes.hub
+
+  manifest = {
+    apiVersion = "v1"
+    kind       = "Namespace"
+    metadata = {
+      name = var.gitops_operator_namespace
+    }
+  }
+
+  computed_fields = ["metadata.labels", "metadata.annotations"]
+
+  field_manager {
+    name            = "terraform"
+    force_conflicts = true
+  }
+
+  depends_on = [time_sleep.wait_acm_ocm_webhook]
+}
+
+resource "kubernetes_manifest" "gitops_operator_group" {
+  count    = local.gitops_subscribe && !local.gitops_operator_shared_ns ? 1 : 0
+  provider = kubernetes.hub
+
+  manifest = {
+    apiVersion = "operators.coreos.com/v1"
+    kind       = "OperatorGroup"
+    metadata = {
+      name      = "openshift-gitops-operator"
+      namespace = var.gitops_operator_namespace
+    }
+    spec = {
+      upgradeStrategy = "Default"
+    }
+  }
+
+  depends_on = [kubernetes_manifest.gitops_operator_namespace]
+}
 
 resource "kubernetes_manifest" "gitops_subscription" {
-  count    = local.gitops_enabled && local.is_openshift && var.gitops_install_operator ? 1 : 0
+  count    = local.gitops_subscribe ? 1 : 0
   provider = kubernetes.hub
 
   manifest = {
@@ -109,22 +185,44 @@ resource "kubernetes_manifest" "gitops_subscription" {
     }
   }
 
-  wait {
-    fields = {
-      "status.state" = "AtLatestKnown"
+  depends_on = [time_sleep.wait_acm_ocm_webhook, kubernetes_manifest.gitops_operator_group]
+}
+
+# Waits for the install (olm-subscription-wait.sh) and prints what blocks it as soon as it
+# shows, such as an InstallPlan that waits for a manual approval.
+resource "terraform_data" "gitops_subscription_ready" {
+  count = local.gitops_subscribe ? 1 : 0
+
+  triggers_replace = [var.gitops_operator_namespace, var.gitops_operator_channel]
+
+  input = {
+    token_script    = local.token_script
+    hub_api_url     = local.hub_api_url
+    hub_admin_pass  = local.hub_admin_pass
+    kubeconfig_path = local.kubeconfig
+    hub_context     = local.hub_cluster_key
+    sub_namespace   = var.gitops_operator_namespace
+    sub_name        = "openshift-gitops-operator"
+  }
+
+  provisioner "local-exec" {
+    command = "bash '${path.module}/../scripts/olm-subscription-wait.sh'"
+    environment = {
+      TOKEN_SCRIPT    = self.input.token_script
+      API_URL         = self.input.hub_api_url
+      ADMIN_PASS      = self.input.hub_admin_pass
+      KUBECONFIG_PATH = self.input.kubeconfig_path
+      KUBE_CONTEXT    = self.input.hub_context
+      SUB_NAMESPACE   = self.input.sub_namespace
+      SUB_NAME        = self.input.sub_name
     }
   }
 
-  timeouts {
-    create = "15m"
-    update = "15m"
-  }
-
-  depends_on = [time_sleep.wait_acm_ocm_webhook]
+  depends_on = [kubernetes_manifest.gitops_subscription]
 }
 
 resource "terraform_data" "gitops_csv_cleanup" {
-  count = local.gitops_enabled && local.is_openshift && var.gitops_install_operator ? 1 : 0
+  count = local.gitops_subscribe ? 1 : 0
 
   input = {
     token_script    = local.token_script
@@ -152,7 +250,7 @@ resource "terraform_data" "gitops_csv_cleanup" {
     }
   }
 
-  depends_on = [kubernetes_manifest.gitops_subscription]
+  depends_on = [terraform_data.gitops_subscription_ready]
 }
 
 resource "time_sleep" "wait_gitops_operator" {

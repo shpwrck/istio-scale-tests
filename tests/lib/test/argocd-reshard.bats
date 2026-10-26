@@ -116,6 +116,17 @@ reset_stub() {
 	assert_output --partial "(0/1 Ready, old pods left: 1)"
 }
 
+@test "reshard: a replacement the scheduler cannot place is named with why, when first seen and in the timeout error" {
+	export STABLE_POLLS=1 ROLLOUT_TIMEOUT_SEC=1
+	sts_json 1 1 1 r1 r1 >"${STUB_DIR}/sts.1.json"
+	pods_json a:1 >"${STUB_DIR}/pods.json"
+	echo '{"items":[{"metadata":{"uid":"b","name":"openshift-gitops-application-controller-0"},"status":{"phase":"Pending","conditions":[{"type":"PodScheduled","status":"False","reason":"Unschedulable","message":"0/1 nodes are available: 1 Too many pods.\npreemption: not helpful"}]}}]}' >"${STUB_DIR}/pods.after.json"
+	run bash "$SCRIPT"
+	assert_failure
+	assert_output --partial "replacement pods not Ready within 1s (0/1 Ready, old pods left: 0)"
+	[ "$(grep -cxF '  not Ready: openshift-gitops-application-controller-0: Pending (Unschedulable: 0/1 nodes are available: 1 Too many pods. preemption: not helpful)' <<<"$output")" -eq 2 ]
+}
+
 @test "an unknown MODE, missing auth and a missing StatefulSet are refused" {
 	MODE=bogus run bash "$SCRIPT"
 	assert_failure
