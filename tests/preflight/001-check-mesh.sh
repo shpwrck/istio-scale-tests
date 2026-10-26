@@ -301,7 +301,7 @@ if ((ECHO)); then
 		else
 			if [[ "$GITOPS_NS" == openshift-gitops ]]; then ECHO_PLATFORM=openshift; else ECHO_PLATFORM=kubernetes; fi
 			# Removed on every exit from here on, whatever happens.
-			trap 'echo_manifest | "${KUBECTL[@]}" --context "$HUB_CTX" delete --wait=false -f - >/dev/null 2>&1 || echo "warning: could not remove the echo app; on the hub: kubectl -n ${GITOPS_NS} delete application mesh-verify-appset" >&2' EXIT
+			trap 'echo_manifest | "${KUBECTL[@]}" --context "$HUB_CTX" delete --wait=false -f - >/dev/null 2>&1 || echo "warning: could not remove the echo app; on the hub: kubectl -n ${GITOPS_NS} delete applications.argoproj.io mesh-verify-appset" >&2' EXIT
 			if ! err="$(echo_manifest | "${KUBECTL[@]}" --context "$HUB_CTX" apply -f - 2>&1)"; then
 				fail "could not apply the echo app on ${HUB_CTX}: $(head -n 1 <<<"$err")"
 			else
