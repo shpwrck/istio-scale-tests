@@ -9,7 +9,7 @@
 # by GitOps through charts/mesh-verify-gateway-api-appset.yaml, puts the routes on every member and
 # the echo workload on one. This script reads what each member resolved, sends traffic through
 # every member's ingress, and writes one TSV plus a markdown summary that leads with the answers.
-# Scenarios, predictions and how to read the report: tests/gateway-api/README.md.
+# Scenarios, predictions and how to read the report: misc_tests/gateway-api/README.md.
 #
 # Steps: (1) preflight: live Gateway API state, builds and preconditions per member, into the TSV
 # preamble; stops when the check is not deployed or a member answers nothing. (2) A bounded wait
@@ -24,9 +24,9 @@
 # window, for a scenario that works through the workload member (README, "Read the report").
 #
 # Usage:
-#   ./tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+#   ./misc_tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
 #     --workload-context <mesh-b-ctx> [--hub-context <hub-ctx>] [--dry-run]
-#   ./tests/gateway-api/001-run-ingress-check.sh --config tests/gateway-api/configs/smoke.env \
+#   ./misc_tests/gateway-api/001-run-ingress-check.sh --config misc_tests/gateway-api/configs/smoke.env \
 #     --contexts <mesh-a-ctx>,<mesh-b-ctx> --workload-context <mesh-b-ctx>
 # ci-dry-run: --contexts ci-a,ci-b --workload-context ci-b
 set -euo pipefail
@@ -199,7 +199,7 @@ Writes run-<RUN_ID>/: gateway-api-<RUN_ID>.tsv, summary-<RUN_ID>.md, argocd-<RUN
 Exit status: 0 whenever the report is written, whatever the answers; 1 an argument error, a
 member that answers no preflight read, or a check that is not deployed (nothing is written).
 
-See tests/gateway-api/README.md.
+See misc_tests/gateway-api/README.md.
 EOF
 }
 
@@ -686,7 +686,7 @@ fi
 # Stop when the check is not deployed (a whole-run precondition: nothing is written).
 problems=()
 for ctx in "${CONTEXTS[@]}"; do
-	[[ "${PRE[$ctx|crd]}" != absent ]] || problems+=("${ctx}: no Gateway API CRDs (httproutes.gateway.networking.k8s.io): install the standard channel (tests/gateway-api/README.md, Deploy)")
+	[[ "${PRE[$ctx|crd]}" != absent ]] || problems+=("${ctx}: no Gateway API CRDs (httproutes.gateway.networking.k8s.io): install the standard channel (misc_tests/gateway-api/README.md, Deploy)")
 	[[ "${PRE[$ctx|namespace]}" != absent ]] || problems+=("${ctx}: namespace ${NS} is missing")
 	[[ "${PRE[$ctx|gateway]}" != absent ]] || problems+=("${ctx}: Gateway istio-system/${GW_NAME} is missing")
 	case "${PRE[$ctx|gatewayclass]}" in
@@ -723,7 +723,7 @@ for ctx in "${CONTEXTS[@]}"; do
 done
 if ((${#problems[@]})); then
 	for p in ${problems[@]+"${problems[@]}"}; do echo "error: ${p}" >&2; done
-	die "the check is not deployed as expected (above). Deploy it from the hub: fill in the placeholders of charts/mesh-verify-gateway-api-appset.yaml and apply it (tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
+	die "the check is not deployed as expected (above). Deploy it from the hub: fill in the placeholders of charts/mesh-verify-gateway-api-appset.yaml and apply it (misc_tests/gateway-api/README.md, \"Deploy\"). Nothing was written."
 fi
 
 # --- Step 2: bounded wait for the Gateway, the echo Deployments and every route's status (PL4),
@@ -1766,13 +1766,13 @@ for i in "${!CONTEXTS[@]}"; do GW_INDEX[${CONTEXTS[i]}]="$i"; done
 mkdir -p "$OUT_DIR"
 config_snapshot "$OUT_DIR" "$RUN_ID"
 {
-	emit_preamble "Gateway API multicluster ingress check (tests/gateway-api/001-run-ingress-check.sh)"
+	emit_preamble "Gateway API multicluster ingress check (misc_tests/gateway-api/001-run-ingress-check.sh)"
 	printf '%s\n' "$TSV_HEADER"
 	cat "$ROWS"
 } >"$TSV"
 if [[ -f "${WORK}/argo.rows" ]]; then
 	{
-		emit_preamble "Gateway API multicluster ingress check: Argo CD health (tests/gateway-api/001-run-ingress-check.sh)"
+		emit_preamble "Gateway API multicluster ingress check: Argo CD health (misc_tests/gateway-api/001-run-ingress-check.sh)"
 		printf 'run_id\tapplication\tdestination\trole\thealth\tsync\trevision\thttproute_health\n'
 		sed "s/^/${RUN_ID}"$'\t'"/" "${WORK}/argo.rows"
 	} >"$ARGO_TSV"

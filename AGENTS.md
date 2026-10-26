@@ -11,9 +11,10 @@ Conventions and rules for coding agents. For setup and commands, see [README.md]
 3. `charts/`: the multi-primary, multi-network mesh as Helm charts, synced by Argo CD
    ApplicationSets (members by cluster-Secret label on Kubernetes, by ACM Placement on OpenShift).
 4. `tests/`: six bash scale-test suites (propagation, controlplane, dataplane, churn,
-   churn-dataplane, tuning), the one-off read-only Gateway API check (`tests/gateway-api`, not
-   part of the scale suite: docs list it apart, under "One-off checks"), and a shared library in
-   `tests/lib/`.
+   churn-dataplane, tuning) plus a shared library in `tests/lib/`.
+5. `misc_tests/`: one-off checks, not part of the scale suite. Today one: the read-only Gateway
+   API check (`misc_tests/gateway-api`). They follow the same conventions and use `tests/lib/`;
+   `tests/lib/verify.sh` and CI check them like the suites.
 
 The default platform is vanilla Kubernetes (`platform = "kubernetes"`): upstream Argo CD (Helm),
 members registered as Argo CD cluster Secrets and selected by the label `istio-mesh-member=true`,
@@ -45,7 +46,7 @@ which wins over the upstream docs there when they disagree.
   install scripts. Per-environment differences go through `gitops_app_overrides` /
   `argocd_helm_values` (`argocd_config_values` on OpenShift), not forks; chart defaults stay sized
   for the 20-cluster campaign.
-- **Numbered scripts:** executable helpers in `tests/*/` and `terraform/*/scripts/` are named
+- **Numbered scripts:** executable helpers in `tests/*/`, `misc_tests/*/` and `terraform/*/scripts/` are named
   `NNN-kebab-case.sh` in execution order. When you add or renumber one, update every caller and
   README in the same change. Exception: `terraform/scripts/` holds helpers invoked by Terraform
   `local-exec`; keep their names (generated kubeconfigs reference them). `tests/lib/` is not a
@@ -133,9 +134,10 @@ which wins over the upstream docs there when they disagree.
 | `charts/spoke-ingress-gateway/`, `charts/spoke-east-west-gateway/` | Member gateways |
 | `charts/mesh-wiring-verify/` | Always-on gate per member (each other member's remote secret and istiod sync, by name; shared root, east-west address) |
 | `charts/mesh-verify/`, `charts/mesh-verify-appset.yaml` | On-demand cross-cluster echo check |
-| `charts/mesh-verify-gateway-api/`, `charts/mesh-verify-gateway-api-appset.yaml` | On-demand Gateway API check: HTTPRoutes on every member, echo workload on one (`tests/gateway-api`) |
+| `charts/mesh-verify-gateway-api/`, `charts/mesh-verify-gateway-api-appset.yaml` | On-demand Gateway API check: HTTPRoutes on every member, echo workload on one (`misc_tests/gateway-api`) |
 | `charts/istiod-monitor/` | Optional ServiceMonitor + recording rules for istiod |
-| `tests/<suite>/` | Numbered scripts + `chart/` (its `values-openshift.yaml` is added on OpenShift members by `tests/lib/platform.sh`; gateway-api deploys `charts/mesh-verify-gateway-api` instead; all but tuning also `configs/`, example run configs); see each suite README |
+| `tests/<suite>/` | Numbered scripts + `chart/` (its `values-openshift.yaml` is added on OpenShift members by `tests/lib/platform.sh`; all but tuning also `configs/`, example run configs); see each suite README |
+| `misc_tests/gateway-api/` | One-off Gateway API ingress check, not a scale suite: `001-run-ingress-check.sh` + `configs/`; deploys `charts/mesh-verify-gateway-api` from the hub |
 | `tests/preflight/` | `001-check-mesh.sh`: read-only readiness check before a run (tools, member contexts, wiring gate, Istio version; `--echo` sends traffic end to end). Not a suite: no chart, no results |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
 | `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.2 or 5.3 host); bats tests in `test/` |

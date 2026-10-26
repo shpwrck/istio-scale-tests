@@ -236,7 +236,7 @@ no_plan() { [[ "$output" != *"Dry-run complete"* && "$output" != *"[dry-run] 001
 @test "every configs/smoke.env runs each ci-dry-run script of its suite with the CI args" {
 	cd "$ROOT"
 	local c f args n=0
-	for c in tests/*/configs/smoke.env; do
+	for c in tests/*/configs/smoke.env misc_tests/*/configs/smoke.env; do
 		for f in "${c%/configs/smoke.env}"/0*.sh; do
 			grep -q '^# ci-dry-run:' "$f" || continue
 			args="$(sed -n 's/^# ci-dry-run://p' "$f" | head -1)"
@@ -247,7 +247,7 @@ no_plan() { [[ "$output" != *"Dry-run complete"* && "$output" != *"[dry-run] 001
 		done
 	done
 	# Six suites ship an example; each has at least one annotated script.
-	[ "$(find tests -path '*/configs/smoke.env' | wc -l)" -eq 6 ]
+	[ "$(find tests misc_tests -path '*/configs/smoke.env' | wc -l)" -eq 6 ]
 	((n >= 15))
 }
 

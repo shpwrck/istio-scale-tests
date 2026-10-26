@@ -256,13 +256,13 @@ that the report prints no warnings.
 ## One-off checks
 
 These answer a single yes/no question about the mesh. They are not scale tests: they measure
-nothing as the mesh grows, and a scale campaign does not run them.
+nothing as the mesh grows, and a scale campaign does not run them. They live in `misc_tests/`.
 
-- [Gateway API ingress check](tests/gateway-api/README.md): does an HTTPRoute need its backend
+- [Gateway API ingress check](misc_tests/gateway-api/README.md): does an HTTPRoute need its backend
   Service (or its namespace) on every member, or only where the workload runs? Answered and
   recorded in two labs (22 of 22 predictions matched). Run it again only to re-check that answer
   on another Istio version. It needs the Gateway API CRDs on every member (OpenShift installs
-  them; on Kubernetes use the pinned install in its [README](tests/gateway-api/README.md#deploy)).
+  them; on Kubernetes use the pinned install in its [README](misc_tests/gateway-api/README.md#deploy)).
 
 ## Grow the mesh
 

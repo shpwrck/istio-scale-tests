@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# --help of every numbered script (tests/*/ and terraform/*/scripts/) and of tests/lib's two
+# --help of every numbered script (tests/*/, misc_tests/*/ and terraform/*/scripts/) and of tests/lib's two
 # tools (redact-results.sh, verify.sh): it exits 0 without a cluster call, and names every --flag
 # its own argument parser accepts (its case arms), so a flag the parser takes is never missing
 # from its help. One --help per script, no run.
@@ -26,7 +26,7 @@ _parser_flags() {
 	chmod +x "${bin}/kubectl" "${bin}/oc"
 	: > "$kc"
 	: > "$STUB_LOG"
-	for f in "$ROOT"/tests/*/[0-9]*.sh "$ROOT"/terraform/*/scripts/[0-9]*.sh "$ROOT"/tests/lib/redact-results.sh "$ROOT"/tests/lib/verify.sh; do
+	for f in "$ROOT"/tests/*/[0-9]*.sh "$ROOT"/misc_tests/*/[0-9]*.sh "$ROOT"/terraform/*/scripts/[0-9]*.sh "$ROOT"/tests/lib/redact-results.sh "$ROOT"/tests/lib/verify.sh; do
 		n=$((n + 1))
 		rc=0
 		out="$(PATH="${bin}:${PATH}" KUBECONFIG="$kc" bash "$f" --help 2>&1)" || rc=$?

@@ -55,7 +55,7 @@ err()  { fail=$((fail + 1)); echo "    FAIL: $1"; }
 # 1. bash -n syntax check
 step 1 "bash -n on all test scripts"
 syntax_fail=0
-for f in "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh "$ROOT"/tests/tuning/lib/*.sh; do
+for f in "$ROOT"/tests/*/*.sh "$ROOT"/misc_tests/*/*.sh "$ROOT"/tests/lib/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh "$ROOT"/tests/tuning/lib/*.sh; do
 	if ! bash -n "$f" 2>/dev/null; then
 		echo "    syntax error: $f"
 		bash -n "$f" 2>&1 || true
@@ -74,7 +74,8 @@ else
 		# on the same command line, so a name used as an array in a lib and as a scalar in a
 		# suite is caught here too, not only in CI (whose find takes these files too, the bats
 		# fixtures and tests/tuning/lib included).
-		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh "$ROOT"/tests/lib/test/fixtures/*.sh \
+		if shellcheck --shell=bash "$ROOT"/tests/lib/*.sh "$ROOT"/tests/*/*.sh "$ROOT"/misc_tests/*/*.sh \
+			"$ROOT"/tests/lib/test/fixtures/*.sh \
 			"$ROOT"/tests/tuning/lib/*.sh; then
 			ok
 		else
@@ -333,7 +334,7 @@ EXTRACTED_PATTERNS=(
 )
 EXCEPTIONS="tests/lib/"
 for pat in "${EXTRACTED_PATTERNS[@]}"; do
-	matches=$(grep -rn "$pat" "$ROOT/tests/" --include='*.sh' | grep -vE "$EXCEPTIONS" || true)
+	matches=$(grep -rn "$pat" "$ROOT/tests/" "$ROOT/misc_tests/" --include='*.sh' | grep -vE "$EXCEPTIONS" || true)
 	if [[ -n "$matches" ]]; then
 		echo "    INLINE FOUND: $pat"
 		echo "      ${matches//$'\n'/$'\n'      }"
@@ -374,7 +375,7 @@ fi
 step 5 "bare by-design-non-zero scrape-call lint"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/lint-bare-scrape.sh"
-if lint_out="$(lint_bare_scrape_paths "$ROOT/tests")"; then
+if lint_out="$(lint_bare_scrape_paths "$ROOT/tests" "$ROOT/misc_tests")"; then
 	ok
 else
 	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
@@ -386,7 +387,7 @@ fi
 step 6 "keyed-array arithmetic lint"
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/lint-keyed-arith.sh"
-if lint_out="$(lint_keyed_arith_paths "$ROOT/tests" "$ROOT/terraform")"; then
+if lint_out="$(lint_keyed_arith_paths "$ROOT/tests" "$ROOT/misc_tests" "$ROOT/terraform")"; then
 	ok
 else
 	printf '    %s\n' "${lint_out//$'\n'/$'\n'    }"
@@ -412,7 +413,7 @@ else
 			tail -n 20 "$dry_out" | sed 's/^/      | /'
 			dry_fail=1
 		fi
-	done < <(grep -rl --exclude-dir='bats-*' '^# ci-dry-run:' "$ROOT/tests" --include='*.sh' | sort)
+	done < <(grep -rl --exclude-dir='bats-*' '^# ci-dry-run:' "$ROOT/tests" "$ROOT/misc_tests" --include='*.sh' | sort)
 	rm -f "$empty_kubeconfig" "$dry_out"
 	if ((dry_fail)); then err "dry-run failures"; else ok; fi
 fi

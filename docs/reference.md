@@ -95,7 +95,8 @@ Every numbered script of propagation, controlplane, dataplane, churn, churn-data
 one-off Gateway API check (gateway-api) takes `--config FILE`: one file of `KEY=value` lines (`SETUP_CONTEXTS` and the suite's
 keys in `config/options.env`, the ones its README lists; not every key there, see "Environment
 only" below) that describes a whole run, so setup, sweep, report and cleanup read
-the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env`,
+the same values. Each of these suites has a worked example, `tests/<suite>/configs/smoke.env` (the Gateway API
+check: `misc_tests/gateway-api/configs/smoke.env`),
 and a "Run config" section in its README that lists its keys. Tuning does not take one yet.
 
 - **Precedence:** flag > `--config` > environment > default. The file loads before

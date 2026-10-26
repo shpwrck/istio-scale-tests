@@ -228,13 +228,13 @@ without a local workload, so a request entering any member's ingress reaches the
 must it carry the backend's namespace?
 
 **Done:** `charts/mesh-verify-gateway-api` (deployed with
-`charts/mesh-verify-gateway-api-appset.yaml`; routes on every member, echo workload on one) and `tests/gateway-api/001-run-ingress-check.sh`,
+`charts/mesh-verify-gateway-api-appset.yaml`; routes on every member, echo workload on one) and `misc_tests/gateway-api/001-run-ingress-check.sh`,
 which records status, traffic, endpoints and Argo CD health per member and leads its report with
 the answers. Predicted from the Istio 1.30.5 source: no Service needed for traffic, but the route's
 status says `BackendNotFound` where the Service is missing; with a `kind: Service` backendRef the
 namespace is needed (it holds the route or the ReferenceGrant, which istiod reads locally only)
 but not the Service (S7 vs S7b), with a `Hostname` backendRef or a classic VirtualService it is not
-([`tests/gateway-api/README.md`](tests/gateway-api/README.md)).
+([`misc_tests/gateway-api/README.md`](misc_tests/gateway-api/README.md)).
 
 **Validated:** on the lab, 2026-10-14: 22 of 22 rows matched
 ([`docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`](docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)).

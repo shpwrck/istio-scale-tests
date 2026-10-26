@@ -245,9 +245,9 @@ standard channel through the ingress operator.
 ## Run
 
 ```bash
-tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+misc_tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
   --workload-context <mesh-b-ctx> --hub-context <hub-ctx> --dry-run
-tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
+misc_tests/gateway-api/001-run-ingress-check.sh --contexts <mesh-a-ctx>,<mesh-b-ctx> \
   --workload-context <mesh-b-ctx> --hub-context <hub-ctx>
 ```
 
@@ -632,7 +632,7 @@ The script takes `--config FILE`, one file of `KEY=value` lines (shared rules:
 on the wait and the gate, no istioctl evidence):
 
 ```bash
-./tests/gateway-api/001-run-ingress-check.sh --config tests/gateway-api/configs/smoke.env \
+./misc_tests/gateway-api/001-run-ingress-check.sh --config misc_tests/gateway-api/configs/smoke.env \
   --contexts <mesh-a-ctx>,<mesh-b-ctx> --workload-context <mesh-b-ctx> --dry-run
 ```
 

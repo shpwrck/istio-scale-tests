@@ -226,7 +226,7 @@ before anything else.
 
 ## One-off: the Gateway API check
 
-Not a scale suite: a one-off check of one yes/no question ([README](../tests/gateway-api/README.md)).
+Not a scale suite: a one-off check of one yes/no question ([README](../misc_tests/gateway-api/README.md)).
 
 **Good (real, existing-cluster lab 2026-10-14, and kind 2026-10-18).** 22 of 22 scenarios read
 `MATCH`: every route behaved as predicted, and both answers are definite (`NO` or `YES`).

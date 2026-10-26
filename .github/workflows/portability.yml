@@ -48,7 +48,7 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              tests/*.sh|tests/*.bats|tests/*.py|tests/lib/test/*|tests/*/chart/*|tests/*/configs/*|tests/tuning/profiles/*|charts/*|terraform/*.sh|terraform/*.tf|terraform/*.hcl|config/*.env|.gitmodules|.shellcheckrc|.github/workflows/portability.yml)
+              tests/*.sh|misc_tests/*|tests/*.bats|tests/*.py|tests/lib/test/*|tests/*/chart/*|tests/*/configs/*|tests/tuning/profiles/*|charts/*|terraform/*.sh|terraform/*.tf|terraform/*.hcl|config/*.env|.gitmodules|.shellcheckrc|.github/workflows/portability.yml)
                 relevant=true ;;
             esac
           done <<< "$changed"
@@ -95,13 +95,13 @@ jobs:
               echo "FAIL: $f"
               status=1
             fi
-          done < <(find tests/ terraform/ -name '*.sh' -type f -not -path '*/.terraform/*' -not -path 'tests/lib/test/bats-*')
+          done < <(find tests/ misc_tests/ terraform/ -name '*.sh' -type f -not -path '*/.terraform/*' -not -path 'tests/lib/test/bats-*')
           exit $status
 
       - name: shellcheck
         if: steps.changes.outputs.relevant == 'true'
         run: |
-          find tests/ terraform/ -name '*.sh' -type f -not -path '*/.terraform/*' -not -path 'tests/lib/test/bats-*' | sort \
+          find tests/ misc_tests/ terraform/ -name '*.sh' -type f -not -path '*/.terraform/*' -not -path 'tests/lib/test/bats-*' | sort \
             | xargs shellcheck --shell=bash
 
       - name: '--help smoke test'
@@ -116,7 +116,7 @@ jobs:
                 status=1
               fi
             fi
-          done < <(find tests/ terraform/ -name '0*.sh' -type f -not -path '*/.terraform/*' -not -path 'tests/lib/test/bats-*' | sort)
+          done < <(find tests/ misc_tests/ terraform/ -name '0*.sh' -type f -not -path '*/.terraform/*' -not -path 'tests/lib/test/bats-*' | sort)
           exit $status
 
       - name: '--dry-run smoke test'
@@ -134,7 +134,7 @@ jobs:
               echo "FAIL: $f --dry-run exited non-zero"
               status=1
             fi
-          done < <(grep -rl --exclude-dir=.terraform --exclude-dir='bats-*' '^# ci-dry-run:' tests/ terraform/ --include='*.sh' | sort)
+          done < <(grep -rl --exclude-dir=.terraform --exclude-dir='bats-*' '^# ci-dry-run:' tests/ misc_tests/ terraform/ --include='*.sh' | sort)
           exit $status
 
       - name: Dry-run annotation enforcement
@@ -146,7 +146,7 @@ jobs:
               echo "FAIL: $f mentions --dry-run but has no ci-dry-run annotation"
               status=1
             fi
-          done < <(grep -rl --exclude-dir=.terraform --exclude-dir='bats-*' '\-\-dry-run' tests/ terraform/ --include='0*.sh' | sort)
+          done < <(grep -rl --exclude-dir=.terraform --exclude-dir='bats-*' '\-\-dry-run' tests/ misc_tests/ terraform/ --include='0*.sh' | sort)
           if ((status == 0)); then echo "PASS — all --dry-run scripts are annotated"; fi
           exit $status
 
@@ -194,7 +194,7 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         run: |
           status=0
-          scan() { grep -rn --exclude-dir=.terraform --exclude-dir='bats-*' "$1" tests/ terraform/ --include='*.sh'; }
+          scan() { grep -rn --exclude-dir=.terraform --exclude-dir='bats-*' "$1" tests/ misc_tests/ terraform/ --include='*.sh'; }
 
           echo "--- Checking for raw date +%s%N outside detection code ---"
           if scan 'date +%s%N\|date +%s%3N' \
