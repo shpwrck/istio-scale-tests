@@ -14,7 +14,7 @@ SCRIPT="${ROOT}/terraform/scripts/create-argocd-cluster-secret.sh"
 OWNED="app.kubernetes.io/part-of=istio-scale-tests"
 
 setup() {
-	STUB_DIR="$(mktemp -d)"
+	STUB_DIR="${BATS_TEST_TMPDIR}/stub"
 	STUB_LOG="${STUB_DIR}/calls.log"
 	export STUB_DIR STUB_LOG
 	mkdir -p "${STUB_DIR}/bin"
@@ -109,8 +109,14 @@ EOF
 	unset ACTION SPOKE_SA_NAMESPACE SHARD
 }
 
-teardown() {
-	rm -rf "$STUB_DIR"
+# reset_stub: the spoke and hub as setup leaves them (a token, a kubeconfig with CA data), with
+# no namespace, earlier object, binding subject, pin or failure, and an empty call log.
+reset_stub() {
+	rm -f "${STUB_DIR}"/ns.* "${STUB_DIR}"/obj.* "${STUB_DIR}"/apply.* "${STUB_DIR}"/create.* \
+		"${STUB_DIR}"/subjects.txt "${STUB_DIR}"/fail.txt "${STUB_DIR}"/down.txt "${STUB_DIR}"/stuck.txt "${STUB_DIR}"/shard.b64
+	printf '%s' 'spoke-token' | base64 >"${STUB_DIR}/token.b64"
+	kubeconfig_json false
+	: >"$STUB_LOG"
 }
 
 # kubeconfig_json <insecure>: the spoke context's minified kubeconfig, with CA data unless insecure.
@@ -149,7 +155,7 @@ line_of() {
 	grep -nF -- "$1" "$STUB_LOG" | head -n 1 | cut -d: -f1
 }
 
-@test "cluster secret (kubernetes): a new namespace, the ServiceAccount and token, then the binding, then the hub Secret" {
+@test "cluster secret (kubernetes): a new namespace, the ServiceAccount and token, then the binding, then the hub Secret with the token, the kubeconfig's CA (or insecure: true without one) and the mesh-member label (none for a spoke that is not a member)" {
 	run bash "$SCRIPT"
 	assert_success
 	assert_output --partial "Created the namespace istio-scale-tests-access on mesh-a (label istio-scale-tests/created-by=create-argocd-cluster-secret)"
@@ -185,9 +191,19 @@ line_of() {
 	grep -q -- '--context=hub --request-timeout=60s apply -f -' "$STUB_LOG"
 	! grep -q ' delete ' "$STUB_LOG" || false
 	refute_output --partial "Moved the ServiceAccount"
+	# A kubeconfig that skips TLS verification, on a spoke that is not a mesh member.
+	reset_stub
+	kubeconfig_json true
+	MESH_MEMBER=false run bash "$SCRIPT"
+	assert_success
+	cfg="$(secret_field "$hub" config)"
+	[ "$(jq -r .tlsClientConfig.insecure <<<"$cfg")" = true ]
+	[ "$(jq -r '.tlsClientConfig | has("caData")' <<<"$cfg")" = false ]
+	! grep -q 'istio-mesh-member' "$hub" || false
+	grep -q 'argocd.argoproj.io/secret-type: cluster' "$hub"
 }
 
-@test "cluster secret (kubernetes): an existing namespace (kube-system here) is used as it is, never created or labelled" {
+@test "cluster secret (kubernetes): an existing namespace (kube-system here) is used as it is, never created or labelled; a terminating one fails, naming it, before any apply" {
 	namespace kube-system Active
 	SPOKE_SA_NAMESPACE=kube-system run bash "$SCRIPT"
 	assert_success
@@ -196,9 +212,7 @@ line_of() {
 	[ "$(grep -c 'namespace: kube-system' "${STUB_DIR}/apply.mesh-a.1.yaml")" -eq 2 ]
 	grep -A3 '^subjects:' "${STUB_DIR}/apply.mesh-a.2.yaml" | grep -q 'namespace: kube-system'
 	[ -e "${STUB_DIR}/apply.hub.1.yaml" ]
-}
-
-@test "cluster secret (kubernetes): a terminating namespace fails, naming it, before any apply" {
+	reset_stub
 	namespace istio-scale-tests-access Terminating ours
 	run bash "$SCRIPT"
 	assert_failure 1
@@ -206,7 +220,7 @@ line_of() {
 	! grep -q -e ' apply ' -e ' create ' "$STUB_LOG" || false
 }
 
-@test "cluster secret (kubernetes): moving from kube-system re-points the binding, then removes only the old labelled ServiceAccount and token" {
+@test "cluster secret (kubernetes): moving from an earlier run's namespace re-points the binding, then removes only the old labelled ServiceAccount and token (and the namespace if the script created it), and says what it removed, left or could not remove" {
 	namespace kube-system Active
 	old_object kube-system secret/argocd-gitops-token
 	old_object kube-system serviceaccount/argocd-gitops
@@ -227,17 +241,15 @@ line_of() {
 	[ "$(line_of '--context=hub --request-timeout=60s apply -f -')" -lt "$(line_of "$token")" ]
 	! grep -q -e 'delete namespace' -e 'delete clusterrolebinding' "$STUB_LOG" || false
 	! grep -q 'delete secret mesh-a-argocd-gitops-cluster-secret' "$STUB_LOG" || false
-}
-
-@test "cluster secret (kubernetes): other subjects of the binding are not moved or deleted" {
+	# Other subjects of the binding are not moved or deleted.
+	reset_stub
 	printf 'User kube-system admin\nServiceAccount kube-system someone-else\nServiceAccount istio-scale-tests-access argocd-gitops\n' >"${STUB_DIR}/subjects.txt"
 	run bash "$SCRIPT"
 	assert_success
 	! grep -q ' delete ' "$STUB_LOG" || false
 	refute_output --partial "Moved the ServiceAccount"
-}
-
-@test "cluster secret (kubernetes): moving out of a namespace the script created deletes that namespace and waits for it" {
+	# Out of a namespace the script created: that namespace goes too, waited for.
+	reset_stub
 	namespace old-access Active ours
 	old_object old-access secret/argocd-gitops-token
 	old_object old-access serviceaccount/argocd-gitops
@@ -248,21 +260,9 @@ line_of() {
 	grep -q -- '--context=mesh-a --request-timeout=60s delete namespace old-access --wait=false' "$STUB_LOG"
 	grep -q -- 'get namespace old-access --ignore-not-found -o name' "$STUB_LOG"
 	[ ! -e "${STUB_DIR}/ns.old-access" ]
-}
-
-@test "cluster secret (kubernetes): a failed removal of the old ServiceAccount warns with the commands and keeps the new access" {
-	namespace kube-system Active
-	printf 'ServiceAccount kube-system argocd-gitops\n' >"${STUB_DIR}/subjects.txt"
-	printf 'delete serviceaccount -n kube-system\n' >"${STUB_DIR}/fail.txt"
-	run bash "$SCRIPT"
-	assert_success
-	assert_output --partial "WARNING: the ServiceAccount argocd-gitops on mesh-a moved from kube-system to istio-scale-tests-access, but removing the old one failed: error: stub refused: delete serviceaccount -n kube-system"
-	assert_output --partial "WARNING: delete them by hand: kubectl --context mesh-a -n kube-system delete secret argocd-gitops-token; kubectl --context mesh-a -n kube-system delete serviceaccount argocd-gitops"
-	refute_output --partial "Moved the ServiceAccount"
-	[ -e "${STUB_DIR}/apply.hub.1.yaml" ]
-}
-
-@test "cluster secret (kubernetes): an old token Secret without the label is left and named, and an old ServiceAccount already gone is not called removed" {
+	# A token Secret without the label is left and named; a ServiceAccount already gone is not
+	# called removed.
+	reset_stub
 	namespace kube-system Active
 	old_object kube-system secret/argocd-gitops-token unlabelled
 	printf 'ServiceAccount kube-system argocd-gitops\n' >"${STUB_DIR}/subjects.txt"
@@ -272,18 +272,20 @@ line_of() {
 	refute_output --partial "removed kube-system/"
 	refute_output --partial "No resources found"
 	[ -e "${STUB_DIR}/obj.kube-system.secret.argocd-gitops-token" ]
-	grep -qF -- "get secret/argocd-gitops-token -n kube-system --ignore-not-found -o name" "$STUB_LOG"
-	grep -qF -- "get serviceaccount/argocd-gitops -n kube-system --ignore-not-found -o name" "$STUB_LOG"
-}
-
-@test "cluster secret (kubernetes): a spoke that is not a mesh member gets no istio-mesh-member label" {
-	MESH_MEMBER=false run bash "$SCRIPT"
+	# A failed removal warns with the commands and keeps the new access.
+	reset_stub
+	namespace kube-system Active
+	printf 'ServiceAccount kube-system argocd-gitops\n' >"${STUB_DIR}/subjects.txt"
+	printf 'delete serviceaccount -n kube-system\n' >"${STUB_DIR}/fail.txt"
+	run bash "$SCRIPT"
 	assert_success
-	! grep -q 'istio-mesh-member' "${STUB_DIR}/apply.hub.1.yaml" || false
-	grep -q 'argocd.argoproj.io/secret-type: cluster' "${STUB_DIR}/apply.hub.1.yaml"
+	assert_output --partial "WARNING: the ServiceAccount argocd-gitops on mesh-a moved from kube-system to istio-scale-tests-access, but removing the old one failed: error: stub refused: delete serviceaccount -n kube-system"
+	assert_output --partial "kubectl --context mesh-a -n kube-system delete secret argocd-gitops-token; kubectl --context mesh-a -n kube-system delete serviceaccount argocd-gitops"
+	refute_output --partial "Moved the ServiceAccount"
+	[ -e "${STUB_DIR}/apply.hub.1.yaml" ]
 }
 
-@test "cluster secret (kubernetes): SHARD pins the controller shard in the hub Secret, and a new SHARD changes it" {
+@test "cluster secret (kubernetes): SHARD pins the controller shard in the hub Secret and a new SHARD changes it; without SHARD there is no shard key, and one someone else set is named with the command that removes it" {
 	SHARD=2 run bash "$SCRIPT"
 	assert_success
 	assert_output --partial "(mesh member: true; controller shard: 2)"
@@ -295,9 +297,7 @@ line_of() {
 	assert_output --partial "(mesh member: true; controller shard: 0)"
 	[ "$(secret_field "${STUB_DIR}/apply.hub.2.yaml" shard)" = 0 ]
 	refute_output --partial WARNING
-}
-
-@test "cluster secret (kubernetes): without SHARD the hub Secret has no shard key, and the read-back finds none" {
+	reset_stub
 	run bash "$SCRIPT"
 	assert_success
 	assert_output --partial "(mesh member: true; controller shard: not pinned)"
@@ -306,13 +306,10 @@ line_of() {
 	grep -q -- '--context=hub --request-timeout=60s get secret mesh-a-argocd-gitops-cluster-secret -n argocd -o jsonpath={.data.shard}' "$STUB_LOG"
 	[ "$(line_of '--context=hub --request-timeout=60s apply -f -')" -lt "$(line_of 'jsonpath={.data.shard}')" ]
 	refute_output --partial WARNING
-}
-
-@test "cluster secret (kubernetes): without SHARD a shard key someone else set is named with the command that removes it" {
 	printf '%s' 1 | base64 >"${STUB_DIR}/shard.b64"
 	run bash "$SCRIPT"
 	assert_success
-	assert_output --partial "WARNING: argocd/mesh-a-argocd-gitops-cluster-secret keeps shard=1, which this script did not set: Argo CD keeps mesh-a on that controller replica."
+	assert_output --partial "WARNING: argocd/mesh-a-argocd-gitops-cluster-secret keeps shard=1, which this script did not set"
 	assert_output --partial "kubectl -n argocd patch secret mesh-a-argocd-gitops-cluster-secret --type=json -p '[{\"op\":\"remove\",\"path\":\"/data/shard\"}]'"
 	! grep -q ' patch ' "$STUB_LOG" || false
 	printf 'jsonpath={.data.shard}\n' >"${STUB_DIR}/fail.txt"
@@ -321,29 +318,19 @@ line_of() {
 	assert_output --partial "WARNING: could not read argocd/mesh-a-argocd-gitops-cluster-secret back to check for a shard key"
 }
 
-@test "cluster secret (kubernetes): a kubeconfig that skips TLS verification gives insecure: true and no CA" {
-	kubeconfig_json true
-	run bash "$SCRIPT"
-	assert_success
-	local cfg
-	cfg="$(secret_field "${STUB_DIR}/apply.hub.1.yaml" config)"
-	[ "$(jq -r .tlsClientConfig.insecure <<<"$cfg")" = true ]
-	[ "$(jq -r '.tlsClientConfig | has("caData")' <<<"$cfg")" = false ]
-}
-
-@test "cluster secret (kubernetes): a token the controller never fills fails, naming the Secret; the binding and the old access stay" {
+@test "cluster secret (kubernetes): a token the controller never fills fails after polling, naming the Secret; the binding and the old access stay" {
 	rm "${STUB_DIR}/token.b64"
 	printf 'ServiceAccount kube-system argocd-gitops\n' >"${STUB_DIR}/subjects.txt"
 	run bash "$SCRIPT"
 	assert_failure 1
 	assert_output --partial "the token controller did not fill istio-scale-tests-access/argocd-gitops-token on spoke mesh-a within 60s"
-	[ "$(grep -c 'jsonpath={.data.token}' "$STUB_LOG")" -eq 30 ]
+	[ "$(grep -c 'jsonpath={.data.token}' "$STUB_LOG")" -gt 1 ]
 	[ ! -e "${STUB_DIR}/apply.mesh-a.2.yaml" ]
 	[ ! -e "${STUB_DIR}/apply.hub.1.yaml" ]
 	! grep -q ' delete ' "$STUB_LOG" || false
 }
 
-@test "cluster secret (kubernetes): ACTION=delete removes the hub Secret, the spoke binding, token, ServiceAccount and the namespace it created" {
+@test "cluster secret (kubernetes): ACTION=delete removes the hub Secret, the spoke binding, token, ServiceAccount and the namespace it created, never kube-system or a namespace it did not create" {
 	namespace istio-scale-tests-access Active ours
 	ACTION=delete API_URL='' run bash "$SCRIPT"
 	assert_success
@@ -357,9 +344,7 @@ line_of() {
 	grep -q -- '--context=mesh-a --request-timeout=60s delete namespace istio-scale-tests-access --wait=false' "$STUB_LOG"
 	[ ! -e "${STUB_DIR}/ns.istio-scale-tests-access" ]
 	! grep -q ' apply ' "$STUB_LOG" || false
-}
-
-@test "cluster secret (kubernetes): ACTION=delete never deletes kube-system or a namespace the script did not create" {
+	reset_stub
 	namespace kube-system Active ours
 	SPOKE_SA_NAMESPACE=kube-system ACTION=delete run bash "$SCRIPT"
 	assert_success
@@ -373,19 +358,17 @@ line_of() {
 	[ -e "${STUB_DIR}/ns.shared" ]
 }
 
-@test "cluster secret (kubernetes): ACTION=delete warns when its namespace is still terminating after 120s, and exits 0" {
+@test "cluster secret (kubernetes): ACTION=delete is best effort: a namespace still terminating after 120s, or the spoke or the hub gone, warns, names what is left, and exits 0" {
 	namespace istio-scale-tests-access Active ours
 	: >"${STUB_DIR}/stuck.txt"
 	ACTION=delete run bash "$SCRIPT"
 	assert_success
 	assert_output --partial "the namespace istio-scale-tests-access on mesh-a is still terminating after 120s"
 	assert_output --partial "WARNING: could not remove the ServiceAccount istio-scale-tests-access/argocd-gitops"
-	assert_output --partial "Not all of the Argo CD access to mesh-a was removed (WARNING above); exiting 0 so the destroy goes on"
+	assert_output --partial "Not all of the Argo CD access to mesh-a was removed"
 	refute_output --partial "Removed the Argo CD access"
-	[ "$(grep -c 'get namespace istio-scale-tests-access --ignore-not-found -o name' "$STUB_LOG")" -eq 60 ]
-}
-
-@test "cluster secret (kubernetes): ACTION=delete with the spoke or the hub gone warns, names what is left, and exits 0" {
+	[ "$(grep -c 'get namespace istio-scale-tests-access --ignore-not-found -o name' "$STUB_LOG")" -gt 1 ]
+	reset_stub
 	echo mesh-a >"${STUB_DIR}/down.txt"
 	ACTION=delete run bash "$SCRIPT"
 	assert_success

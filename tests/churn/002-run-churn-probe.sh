@@ -71,54 +71,36 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE            Run config of KEY=value lines (config/options.env keys; see
-                           tests/churn/README.md, "Run config").
+Scales the churn targets on the source context up and back down, --iterations times, and
+times how long the source and each remote take to see the new pods (churn-<RUN_ID>.tsv;
+columns in tests/churn/README.md). Remotes stay at their base replicas.
+
+  --config FILE            Run config of KEY=value lines (config/options.env keys).
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the source cluster (required).
   --remote-contexts CSV    Remote cluster contexts (comma-separated).
   --mesh-size N            Metadata tag (default: 1 + remotes).
   --deployment-count N     Churn target deployments (default: $DEPLOYMENT_COUNT).
-  --scale-to N             Scale targets to N replicas (default: $SCALE_TO).
+  --scale-to N             Scale targets to N replicas, above the base (default: $SCALE_TO).
   --iterations N           Number of churn iterations (default: $ITERATIONS).
   --timeout SEC            Timeout per iteration (default: $TIMEOUT_SEC).
   --settle SEC             Settle time after scale-down convergence (default: $SETTLE_SEC).
   --output-dir DIR         Results directory (default: ${CHURN_RESULTS_DIR}).
-  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
-  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
+  --tuning-baseline STR    Tuning levers for the preamble (default: unknown; a sweep sets it).
+  --sidecar-egress-hosts STR  Root Sidecar egress hosts for the preamble (default: unknown;
+                           a sweep sets it).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
-Only the source context is scaled; remotes stay at base replicas, so the remote
-columns measure cross-cluster propagation. Per iteration:
-  convergence_local_ms          the source watcher sees at least one new Ready pod
-                                per deployment and the source istiod reports every
-                                proxy SYNCED (includes pod scheduling and sidecar start).
-  remote_endpoint_reachable_ms  every churn target on the remote watcher has more
-                                healthy endpoint weight than before t0 (at least one
-                                new Ready source pod per deployment; includes pod
-                                scheduling and sidecar start).
-  convergence_remote_eds_ms     first remote EDS push after t0 (control plane only).
+Environment (config/options.env describes each): CHURN_TEST_NAMESPACE, the flags' CHURN_*
+keys, CHURN_BASE_REPLICAS ($BASE_REPLICAS), CHURN_POLL_INTERVAL_MS, CHURN_RESULTS_DIR (relative
+to the repo root), FANOUT_*, METRICS_SCRAPE_TIMEOUT, ISTIOD_DIAG_*, TEST_PLATFORM,
+PLATFORM_READ_TIMEOUT, PLATFORM_READ_PARALLEL. Environment only: ISTIO_VERSION_CHECK,
+ISTIO_VERSION_READY_WAIT_SEC.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
-  CHURN_TEST_NAMESPACE         Namespace for churn-target/watcher workloads (default churn-test).
-  CHURN_DEPLOYMENT_COUNT       Default --deployment-count.
-  CHURN_BASE_REPLICAS          Replicas before scale-up and after scale-down (must be < --scale-to).
-  CHURN_SCALE_TO_REPLICAS      Default --scale-to.
-  CHURN_ITERATIONS             Default --iterations.
-  CHURN_TIMEOUT_SEC            Default --timeout.
-  CHURN_SETTLE_SEC             Default --settle.
-  CHURN_POLL_INTERVAL_MS       syncz / endpoint poll interval in ms.
-  CHURN_RESULTS_DIR            Default --output-dir (relative to the repo root).
-  FANOUT_PF_BASE               Per-pod istiod port-forward block base (default 21014).
-  FANOUT_CTX_STRIDE            Per-context port stride (default 20).
+Exit codes: 0 the rows were written (or the plan shown); 1 an error.
+
+See tests/churn/README.md.
 EOF
 }
 
@@ -241,7 +223,7 @@ mkdir -p "$OUTPUT_DIR"
 
 # Preflight every context: require >= 1 Running istiod pod (all pods are scraped
 # via tests/lib/fanout.sh). Each member's count goes into the preamble, as
-# ISTIOD_REPLICAS=<ctx>=<n>,... (as propagation records it; a sweep reads it again at its end).
+# ISTIOD_REPLICAS=<ctx>=<n>,... (as propagation records it).
 echo "Preflighting istiod replicas..."
 SOURCE_REPLICAS="$(fanout_preflight_istiod "$SOURCE_CTX" "${KUBECTL[@]}")"
 echo "  [$SOURCE_CTX] Running istiod replicas: $SOURCE_REPLICAS"
@@ -258,10 +240,10 @@ done
 ALL_CTXS=("$SOURCE_CTX" ${REMOTES[@]+"${REMOTES[@]}"})
 istio_version_resolve "$(IFS=,; echo "${ALL_CTXS[*]}")" 0 "${KUBECTL[@]}"
 
-# HARNESS_SHA, HARNESS_CONTENT_KEY and the Istio version keys are recorded here so 004
-# reports the run's harness and Istio version, not the report host's (the 003 placeholder
-# writes the same keys, PL36); this probe's own results do not count.
-harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
+# HARNESS_SHA and the Istio version keys are recorded here so 004 reports the run's harness
+# and Istio version, not the report host's (the 003 placeholder writes the same keys, PL36);
+# this probe's own results do not count.
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 # Every member's Kubernetes version and the platform record (inherited from 003, else read here),
 # before the first churn event.
 ALL_CTXS_CSV="$(IFS=,; echo "${ALL_CTXS[*]}")"
@@ -272,7 +254,6 @@ cat > "$TSV_FILE" <<EOF
 # Source: $SOURCE_CTX  Remotes: ${REMOTES[*]:-none}  Mesh size: $MESH_SIZE
 # Deployments: $DEPLOYMENT_COUNT  Scale: $BASE_REPLICAS -> $SCALE_TO  Iterations: $ITERATIONS
 # HARNESS_SHA=${HARNESS_SHA}
-# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}
 $(istio_version_kv | sed 's/^/# /')
 # KUBE_VERSIONS=${KUBE_VERSIONS_CSV}
 # ISTIOD_REPLICAS=${ISTIOD_REPLICAS_CSV}

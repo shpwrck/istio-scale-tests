@@ -55,35 +55,32 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE            Run config of KEY=value lines (config/options.env keys; see
-                           tests/churn-dataplane/README.md, "Run config").
+Deploys the fortio client on the source context, and a fortio server and the churn-target
+Deployments on every context, and waits for them. Context names must be lowercase DNS
+labels of at most 49 characters.
+
+  --config FILE            Run config of KEY=value lines (config/options.env keys).
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Context where fortio-client is deployed (required).
-  --remote-contexts CSV    Additional contexts that also receive fortio-server +
-                           churn-target workloads (comma-separated).
+  --remote-contexts CSV    Other contexts for fortio-server + churn targets (comma-separated).
   --deployment-count N     Number of churn-target Deployments (default: $CHURN_DEPLOYMENT_COUNT_OPT).
   --base-replicas N        Initial replicas per churn-target Deployment (default: $CHURN_BASE_REPLICAS_OPT).
   --wait-timeout N         Seconds to wait for Deployments to become Available (default: $WAIT_TIMEOUT).
   --ns-wait-timeout N      Seconds to wait for a Terminating namespace from a previous
                            run to disappear before applying (default: $SETUP_NS_WAIT_SEC).
-  --dry-run                Render the chart and run apply --dry-run=client; contexts
-                           missing from the kubeconfig get the render only.
+  --dry-run                Render the chart and run apply --dry-run=client (render only for
+                           a context missing from the kubeconfig).
   -h, --help               Show this help.
 
-Context names are used in Service names (fortio-server-<ctx>), so each must be a
-lowercase DNS label of at most 49 characters; rename others with
-'kubectl config rename-context'.
+Environment (config/options.env describes each): COEXEC_TEST_NAMESPACE,
+CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS, COEXEC_ISTIOD_REPLICAS, COEXEC_SERVICE_PORT,
+COEXEC_SETUP_NS_WAIT_SEC (else COEXEC_NS_DELETE_TIMEOUT_SEC), COEXEC_WAIT_TIMEOUT_SEC,
+FANOUT_PF_BASE, TEST_PLATFORM (${TEST_PLATFORM:-auto}); FORTIO_VERSION and BUSYBOX_VERSION
+(config/versions.env).
 
-Environment:
-  COEXEC_TEST_NAMESPACE, CHURN_DEPLOYMENT_COUNT, CHURN_BASE_REPLICAS,
-  COEXEC_ISTIOD_REPLICAS (expected istiod replica pin; warns on mismatch),
-  COEXEC_SERVICE_PORT (fortio-server port; default 8080),
-  COEXEC_SETUP_NS_WAIT_SEC (pre-apply wait for a Terminating namespace to clear;
-  defaults to COEXEC_NS_DELETE_TIMEOUT_SEC, then 240),
-  COEXEC_WAIT_TIMEOUT_SEC (--wait-timeout default, 300),
-  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
-  TEST_PLATFORM (auto, kubernetes or openshift: whether a member gets the chart's
-  values-openshift.yaml; auto asks each member, and a --dry-run renders kubernetes).
+Exit codes: 0 deployed and ready (or the --dry-run passed); 1 an error or a timeout.
+
+See tests/churn-dataplane/README.md.
 EOF
 }
 
@@ -277,8 +274,6 @@ done
 for pid in ${APPLY_PIDS[@]+"${APPLY_PIDS[@]}"}; do
 	wait "$pid" || die "one or more contexts failed the workload apply"
 done
-# Under a sweep, a chart file changed for these renders reaches its outcome (harness_read).
-harness_read _hs _hk
 
 if ((DRY_RUN)); then
 	echo "Dry-run complete."

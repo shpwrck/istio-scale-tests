@@ -256,19 +256,23 @@ jobs:
 
           exit $status
 
-      # python3 + PyYAML on PATH for the rest of the job: the tuning profiles below, the bats
-      # that parse report frontmatter and the signal bats' pseudo-terminal test (they skip
-      # without it, so CI must provide it).
+      # python3 + PyYAML on PATH for the rest of the job: the tuning profiles below and the
+      # bats that parse report frontmatter (they skip without it, so CI must provide it).
+      # GNU parallel lets the gate run the bats files four at a time (verify.sh --jobs).
       - name: Install python3 + PyYAML (Linux)
         if: runner.os == 'Linux' && steps.changes.outputs.relevant == 'true'
         run: |
           python3 -m venv "$RUNNER_TEMP/py"
           "$RUNNER_TEMP/py/bin/pip" install --quiet pyyaml
           echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
+          if ! command -v parallel >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends parallel \
+              || echo "::warning::GNU parallel did not install: the gate runs the bats files one at a time"
+          fi
 
       - name: Shared lib gate (inline audit, bats, lints)
         if: runner.os == 'Linux' && steps.changes.outputs.relevant == 'true'
-        run: tests/lib/verify.sh --skip-shellcheck --skip-dry-run
+        run: tests/lib/verify.sh --skip-shellcheck --skip-dry-run --jobs 4
 
       - name: helm lint
         if: runner.os == 'Linux' && steps.changes.outputs.relevant == 'true'

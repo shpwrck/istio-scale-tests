@@ -77,12 +77,14 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE            Run config of KEY=value lines (config/options.env keys; see
-                           tests/churn-dataplane/README.md, "Run config").
+Checks that every fortio server answers (reach-<RUN_ID>.tsv), then runs one fortio load
+from the source's client pod with no churn: the baseline row of a combo (status OK, FAILED,
+PERCENTILE_MISSING, ERROR_RATE_HIGH, POISONED_RESTART or POISONED_SCRAPE).
+
+  --config FILE            Run config of KEY=value lines (config/options.env keys).
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Context where fortio-client runs (required).
-  --remote-contexts CSV    Other contexts in the mesh; each is reach-checked through
-                           its fortio-server-<ctx> Service before the window.
+  --remote-contexts CSV    Other contexts in the mesh, reach-checked before the window.
   --mesh-size N            Mesh-size tag (default: 1 + remotes).
   --combo-id ID            Stable id linking baseline+churn rows in 004 (default: \$RUN_ID).
   --run-id ID              Reuse a prior run_id (default: fresh timestamp).
@@ -93,53 +95,28 @@ Usage: $(basename "$0") [options]
   --output-file FILE       TSV file to write/append to
                            (default: ${COEXEC_RESULTS_DIR}/churn-dataplane-\$RUN_ID.tsv).
   --output-dir DIR         Default results dir if --output-file not given.
-  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
-  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
-  --on-unreachable POLICY  warn: record a remote the reach check cannot reach and go
-                           on; fail: stop before the window when a remote is
-                           UNREACHABLE or UNKNOWN, exit 3 (default: $ON_UNREACHABLE).
-  --reach-requests N       Requests per target in the reach check; 0 turns it off
-                           (default: $REACH_REQUESTS).
+  --tuning-baseline STR    Tuning levers for the preamble (default: unknown; a sweep sets it).
+  --sidecar-egress-hosts STR  Root Sidecar egress hosts for the preamble (default: unknown;
+                           a sweep sets it).
+  --on-unreachable POLICY  warn, or fail: stop before the window, exit 3 (default: $ON_UNREACHABLE).
+  --reach-requests N       Requests per target in the reach check; 0 = off (default: $REACH_REQUESTS).
   --append                 Append to --output-file without rewriting preamble/header.
   --dry-run                Print plan only.
   -h, --help               Show this help.
 
-Row status: FAILED (fortio exec failed), PERCENTILE_MISSING or ERROR_RATE_HIGH
-(HTTP 200 share below COEXEC_MIN_PCT_200, default $MIN_PCT_200; 0 turns the rule off),
-POISONED_RESTART, POISONED_SCRAPE, else OK. The marker comment records pct_200 and
-top_code (the most frequent code other than 200).
+Environment (config/options.env describes each): the flags' COEXEC_* keys,
+COEXEC_MIN_PCT_200 (ERROR_RATE_HIGH below it; default $MIN_PCT_200, 0 = off),
+COEXEC_TEST_NAMESPACE, COEXEC_SERVICE_PORT, COEXEC_ISTIOD_REPLICAS, COEXEC_RESULTS_DIR
+(relative to the repo root), REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
+REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE, FANOUT_*
+(FANOUT_MAX_SKEW_MS: POISONED_SCRAPE above it), METRICS_SCRAPE_TIMEOUT, ISTIOD_DIAG_*,
+TEST_PLATFORM, PLATFORM_READ_TIMEOUT, PLATFORM_READ_PARALLEL. Environment only:
+ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC.
 
-The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
-whose exec failed (a FAILED row) may run on there, so the probe waits until its
---duration and 5 s more have passed before going on, unless the client pod is gone
-(deleted, or evicted and Failed: then no load runs). When the probe ends during a load
-(a stop, Ctrl-C), it deletes the client pod, so the load ends with it; the pod's
-Deployment starts a new one, which a sweep started right after waits for (its setup 001
-waits until the Deployments are Available). Run by hand, the probe loads only a Ready
-client pod that is not being deleted, and stops when there is none: run 001, or wait
-until the new pod is Ready.
+Exit codes: 0 the row was written (or the plan shown); 1 an error; 3 --on-unreachable fail
+stopped the probe.
 
-Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the probe.
-
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
-  COEXEC_MIN_PCT_200, REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC, REACH_ON_UNREACHABLE,
-  COEXEC_SERVICE_PORT, COEXEC_BASELINE_DURATION_SEC, COEXEC_QPS, COEXEC_NUM_CONNECTIONS,
-  COEXEC_SETTLE_SEC,
-  COEXEC_TEST_NAMESPACE, COEXEC_ISTIOD_REPLICAS (expected pin; warns on mismatch),
-  COEXEC_RESULTS_DIR (--output-dir; relative to the repo root),
-  FANOUT_PF_BASE (per-pod istiod port-forward block base; default 21014),
-  FANOUT_MAX_SKEW_MS (per-window scrape_skew ceiling in ms; default 1000 — a row
-  whose pre/post fanout scrape skew exceeds this is tagged POISONED_SCRAPE because
-  the istiod-side deltas are computed across an incoherent snapshot).
+See tests/churn-dataplane/README.md.
 EOF
 }
 
@@ -237,7 +214,7 @@ RUN_ID="${RUN_ID_OPT:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 REACH_TSV="$(dirname "$OUTPUT_FILE")/reach-${RUN_ID}.tsv"
 REACH_URL_TEMPLATE="http://fortio-server-{ctx}.${NS}.svc.cluster.local:${COEXEC_SERVICE_PORT:-8080}/echo"
 
-harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$(dirname "$OUTPUT_FILE")"
+HARNESS_SHA="$(harness_sha --exclude "$(dirname "$OUTPUT_FILE")")"
 ALL_CTXS_CSV="$SOURCE_CTX"
 for r in ${REMOTES[@]+"${REMOTES[@]}"}; do ALL_CTXS_CSV+=",$r"; done
 
@@ -276,7 +253,6 @@ if [[ ! -f "$OUTPUT_FILE" || "$APPEND" -eq 0 ]]; then
 	write_preamble "churn-dataplane co-exec test" "$OUTPUT_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
-		"HARNESS_CONTENT_KEY=$HARNESS_CONTENT_KEY" \
 		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
@@ -312,7 +288,7 @@ if ((REACH_REQUESTS > 0)); then
 	# A sweep's 002s share one reach file (its RUN_ID): its header records every member the
 	# sweep covers (the inherited record), not the first mesh size's.
 	if reach_write_header "$REACH_TSV" --contexts "$(platform_recorded_contexts)" "RUN_ID=${RUN_ID}" \
-		"HARNESS_SHA=${HARNESS_SHA}" "HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=churn-dataplane" \
+		"HARNESS_SHA=${HARNESS_SHA}" "SUITE=churn-dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$COMBO_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$REACH_URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then

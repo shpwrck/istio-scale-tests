@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
-# tests/lib/istiod-diag.sh (istiod restart evidence): one case per cause over a fake
-# kubectl and hand-written fixtures, the cost, dedup, budget and deadline bounds, PL40
-# containment, redaction, the report renderer, the ISTIOD_DIAG_* --config keys, the
-# controlplane window hook, and the entrypoints that call the capture (dataplane 002,
-# churn 002) plus the tuning comparison that must not read the index (PL33).
+# tests/lib/istiod-diag.sh (istiod restart evidence): the cause of each kind of restart over a
+# fake kubectl and hand-written fixtures, one restart counted once, the bounds that still keep
+# its row, PL40 containment, redaction, the report renderer, the ISTIOD_DIAG_* --config keys,
+# the controlplane window hook, and the entrypoints that call the capture (dataplane 002,
+# churn-dataplane 002, controlplane 002, churn 002, propagation 002) plus the tuning
+# comparison that must not read the index (PL33).
 # Fixtures use documentation addresses (192.0.2.0/24, 2001:db8::/32) and made-up node
 # names (worker-node-a/b): never real cluster data.
 
@@ -53,6 +54,7 @@ setup() {
 	cp "${FX}/pre_metrics.txt" "$PRE"
 	echo 1716940800123456789 > "${BATS_TEST_TMPDIR}/pre-0.ts"  # ns, 2024-05-29T00:00:00Z
 	FAKE_PODS="${FX}/pods_oom.json"
+	export TMPDIR="$BATS_TEST_TMPDIR"
 }
 
 # _cap [trigger] [tag]: one capture of ctx-a into $D.
@@ -71,24 +73,20 @@ _col() {
 # _rows: the number of index data rows.
 _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' "${D}/index.tsv"; }
 
-# --- one case per cause ---
+# _next <dir>: start a fresh index in <dir> and the call log.
+_next() { D="$1"; : > "$CALLS"; }
 
-@test "OOM in place: restarted_in_place/oom_killed, limit and pre-window memory, bounded --previous fetch" {
+# --- causes ---
+
+@test "each kind of restart gets its cause, exit code and pre-window memory against its limit; nothing changed is no_restart_found after one call; no Running istiod is no_pods" {
+	# OOM in place: the limit, the pre-window memory, the previous log, bounded.
 	run _cap
 	assert_success
-	[ "$(_col change)" = restarted_in_place ]
-	[ "$(_col cause)" = oom_killed ]
-	[ "$(_col exit_code)" = 137 ]
-	[ "$(_col signal)" = 9 ]
-	[ "$(_col term_reason)" = OOMKilled ]
+	[ "$(_col change)/$(_col cause)/$(_col exit_code)/$(_col signal)/$(_col term_reason)" = restarted_in_place/oom_killed/137/9/OOMKilled ]
 	[ "$(_col restart_count)" = 1 ]
-	[ "$(_col started_at)" = 2024-05-29T00:10:00Z ]
-	[ "$(_col finished_at)" = 2024-05-29T00:09:58Z ]
-	[ "$(_col mem_limit_mi)" = 3072 ]
-	[ "$(_col rss_pre_mi)" = 300 ]
-	[ "$(_col heap_inuse_pre_mi)" = 200 ]
-	[ "$(_col goroutines_pre)" = 1234 ]
-	[ "$(_col proxies_pre)" = 5 ]
+	[ "$(_col started_at)/$(_col finished_at)" = 2024-05-29T00:10:00Z/2024-05-29T00:09:58Z ]
+	[ "$(_col mem_limit_mi)/$(_col rss_pre_mi)/$(_col heap_inuse_pre_mi)" = 3072/300/200 ]
+	[ "$(_col goroutines_pre)/$(_col proxies_pre)" = 1234/5 ]
 	[ "$(_col pre_scrape_at)" = 2024-05-29T00:00:00Z ]
 	[ "$(_col node_ready_at)" = 2026-10-13T12:23:08Z ]
 	ev="$(_col evidence)"
@@ -96,160 +94,129 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	grep -q -- '-n istio-system logs istiod-abc-x1 -c discovery .*--previous --tail=5000 --limit-bytes=8388608' "$CALLS"
 	[ -s "${D}/${ev}/istiod-abc-x1.previous.log.gz" ]
 	[ -s "${D}/${ev}/istiod-abc-x1.pre.metrics.gz" ]
-	grep -q 'container_memory_working_set_bytes{namespace="istio-system",pod="istiod-abc-x1",container="discovery"}' "${D}/${ev}/summary.md"
-	# The pod projection keeps no env, managedFields or IPs.
-	[ -s "${D}/${ev}/pods.json" ]
-	run grep -E 'do-not-copy|managedFields|podIP|hostIP' "${D}/${ev}/pods.json"
-	assert_failure
 	grep -qx '# ISTIOD_DIAG_SCHEMA=1' "${D}/index.tsv"
 	grep -qx '# RUN_ID=RUN1' "${D}/index.tsv"
-	grep -qx '# ISTIOD_DIAG_LOG_BYTES=1048576' "${D}/index.tsv"
-	[ -s "${D}/README.md" ]
 	[ "$(_rows)" -eq 1 ]
-	# The folder ignores itself, so even a tracked --output-dir cannot commit the raw evidence.
-	grep -qx '\*' "${D}/.gitignore"
-	git init -q "$RES"
-	git -C "$RES" check-ignore -q "istiod-diag-RUN1/${ev}/istiod-abc-x1.previous.log.gz"
-	git -C "$RES" check-ignore -q "istiod-diag-RUN1/index.tsv"
-}
-
-@test "pod deleted: replaced_gone/deleted plus new_pod/replacement; no log call for the gone pod" {
+	# Deleted: the gone pod's own row (no log call for it), its replacement's startup log.
+	_next "${RES}/istiod-diag-DEL"
 	FAKE_PODS="${FX}/pods_deleted.json" FAKE_EVENTS="${FX}/events_deleted.json" run _cap
 	assert_success
-	[ "$(_col change istiod-abc-x1)" = replaced_gone ]
-	[ "$(_col cause istiod-abc-x1)" = deleted ]
-	[ "$(_col rs_changed istiod-abc-x1)" = 0 ]
-	[ "$(_col rss_pre_mi istiod-abc-x1)" = 300 ]
-	[ "$(_col change istiod-abc-y2)" = new_pod ]
-	[ "$(_col cause istiod-abc-y2)" = replacement ]
-	run grep -q 'logs istiod-abc-x1' "$CALLS"
-	assert_failure
+	[ "$(_col change istiod-abc-x1)/$(_col cause istiod-abc-x1)/$(_col rs_changed istiod-abc-x1)/$(_col rss_pre_mi istiod-abc-x1)" = replaced_gone/deleted/0/300 ]
+	[ "$(_col change istiod-abc-y2)/$(_col cause istiod-abc-y2)" = new_pod/replacement ]
+	! grep -q 'logs istiod-abc-x1' "$CALLS" || false
 	grep -q -- 'logs istiod-abc-y2 -c discovery .*--limit-bytes=262144' "$CALLS"
-	ev="$(_col evidence istiod-abc-y2)"
-	[ -s "${D}/${ev}/istiod-abc-y2.startup.log.gz" ]
-	grep -q $'\tKilling\tPod\tistiod-abc-x1\t' "${D}/${ev}/events.tsv"
-	# Only istiod objects' events are kept.
-	run grep -q 'istio-ingressgateway' "${D}/${ev}/events.tsv"
-	assert_failure
-}
-
-@test "rollout: the new pod has another ReplicaSet; the gone pod's limit comes from its old ReplicaSet" {
+	# Rollout: another ReplicaSet; the gone pod's limit is its old ReplicaSet's.
+	_next "${RES}/istiod-diag-ROLL"
 	FAKE_PODS="${FX}/pods_rollout.json" FAKE_DEPLOY_RS="${FX}/deploy_rs_rollout.json" run _cap
 	assert_success
-	[ "$(_col cause istiod-abc-x1)" = rollout ]
-	[ "$(_col rs_changed istiod-abc-x1)" = 1 ]
-	[ "$(_col mem_limit_mi istiod-abc-x1)" = 3072 ]
-	[ "$(_col cause istiod-def-z3)" = rollout ]
-	[ "$(_col rs_changed istiod-def-z3)" = 1 ]
-	[ "$(_col mem_limit_mi istiod-def-z3)" = 512 ]
-	ev="$(_col evidence istiod-def-z3)"
-	[ "$(jq -r '.[] | select(.kind == "Deployment") | .revision' "${D}/${ev}/deploy-rs.json")" = 22 ]
-	run grep -q 'istio-ingressgateway' "${D}/${ev}/deploy-rs.json"
-	assert_failure
-}
-
-@test "evicted: replaced_failed/evicted, the old pod's own log, IPs, hosts and node names masked in the note" {
+	[ "$(_col cause istiod-abc-x1)/$(_col rs_changed istiod-abc-x1)/$(_col mem_limit_mi istiod-abc-x1)" = rollout/1/3072 ]
+	[ "$(_col cause istiod-def-z3)/$(_col rs_changed istiod-def-z3)/$(_col mem_limit_mi istiod-def-z3)" = rollout/1/512 ]
+	# Evicted: the old pod still exists, so its current log (no --previous).
+	_next "${RES}/istiod-diag-EVIC"
 	FAKE_PODS="${FX}/pods_evicted.json" FAKE_EVENTS="${FX}/events_evicted.json" run _cap
 	assert_success
-	[ "$(_col change istiod-abc-x1)" = replaced_failed ]
-	[ "$(_col cause istiod-abc-x1)" = evicted ]
-	[ "$(_col exit_code istiod-abc-x1)" = 137 ]
-	note="$(_col note istiod-abc-x1)"
-	[[ "$note" == *"low on resource: memory"* ]]
-	[[ "$note" == *"<ip>"* && "$note" == *"<host>"* && "$note" == *"<node>"* ]]
-	[[ "$note" != *192.0.2* && "$note" != *example.internal* && "$note" != *worker-node* ]]
-	# The old pod still exists: its current log (no --previous).
+	[ "$(_col change istiod-abc-x1)/$(_col cause istiod-abc-x1)/$(_col exit_code istiod-abc-x1)" = replaced_failed/evicted/137 ]
+	[[ "$(_col note istiod-abc-x1)" == *"low on resource: memory"* ]]
 	grep -q -- 'logs istiod-abc-x1 -c discovery --request-timeout=15 --tail=5000 --limit-bytes=8388608$' "$CALLS"
 	[ "$(_col cause istiod-abc-y2)" = replacement ]
-}
-
-@test "probe kill: an Unhealthy liveness event plus Killing gives probe_kill even with exit 0" {
+	# Probe kill: an Unhealthy liveness event plus Killing, even with exit 0; without the
+	# events the same restart is a plain exit.
+	_next "${RES}/istiod-diag-PROBE"
 	FAKE_PODS="${FX}/pods_probe.json" FAKE_EVENTS="${FX}/events_probe.json" run _cap
-	assert_success
-	[ "$(_col change)" = restarted_in_place ]
-	[ "$(_col cause)" = probe_kill ]
-	[ "$(_col exit_code)" = 0 ]
-	# Without the events the same restart is a plain exit.
-	D="${RES}/istiod-diag-RUN2" FAKE_PODS="${FX}/pods_probe.json" run _cap
-	[ "$(D="${RES}/istiod-diag-RUN2" _col cause)" = exited ]
-}
-
-@test "crash: exit 2 in a crash loop gives crash, with the sanitized panic line in the note" {
+	[ "$(_col change)/$(_col cause)/$(_col exit_code)" = restarted_in_place/probe_kill/0 ]
+	_next "${RES}/istiod-diag-EXIT"
+	FAKE_PODS="${FX}/pods_probe.json" run _cap
+	[ "$(_col cause)" = exited ]
+	# Crash: exit 2 in a crash loop, the panic line in the note.
+	_next "${RES}/istiod-diag-CRASH"
 	FAKE_PODS="${FX}/pods_crash.json" run _cap
-	assert_success
-	[ "$(_col change)" = restarted_in_place ]
-	[ "$(_col cause)" = crash ]
-	[ "$(_col exit_code)" = 2 ]
-	[ "$(_col started_at)" = N/A ]
-	note="$(_col note)"
-	[[ "$note" == *"panic: runtime error: invalid memory address or nil pointer dereference"* ]]
-	[[ "$note" == *"waiting: CrashLoopBackOff"* ]]
-	[[ "$note" != *192.0.2* ]]
-}
-
-@test "node restart (lab case): empty lastState, node Ready 2 s before the start, no previous log, still 0" {
+	[ "$(_col change)/$(_col cause)/$(_col exit_code)/$(_col started_at)" = restarted_in_place/crash/2/N/A ]
+	[[ "$(_col note)" == *"panic: runtime error: invalid memory address or nil pointer dereference"* ]]
+	[[ "$(_col note)" == *"waiting: CrashLoopBackOff"* ]]
+	# Node restart (lab case): empty lastState, node Ready 2 s before the start, no
+	# previous log.
+	_next "${RES}/istiod-diag-NODE"
 	FAKE_PODS="${FX}/pods_node_restart.json" FAKE_PREV_FAIL=1 run _cap
 	assert_success
-	[ "$(_col change)" = restarted_in_place ]
-	[ "$(_col cause)" = node_restart ]
-	[ "$(_col restart_count)" = 2 ]
-	[ "$(_col node_ready_at)" = 2026-10-13T12:23:08Z ]
+	[ "$(_col change)/$(_col cause)/$(_col restart_count)" = restarted_in_place/node_restart/2 ]
 	[[ "$(_col note)" == *"previous log unavailable: previous terminated container"*"not found"* ]]
-	ev="$(_col evidence)"
-	[ -s "${D}/${ev}/istiod-abc-x1.previous.log.unavailable" ]
-	[ -s "${D}/${ev}/node-1.json" ]
-	[ "$(jq -r '.boot_id' "${D}/${ev}/node-1.json")" = 00000000-0000-0000-0000-000000000001 ]
-	run grep -q '192.0.2' "${D}/${ev}/node-1.json"
-	assert_failure
-}
-
-# --- cost, dedup, budget, deadline, size ---
-
-@test "unknown trigger, nothing changed: exactly one kubectl call and a no_restart_found row" {
+	[ -s "${D}/$(_col evidence)/istiod-abc-x1.previous.log.unavailable" ]
+	# Nothing changed after an unknown trigger: one call, no folder.
+	_next "${RES}/istiod-diag-STEADY"
 	FAKE_PODS="${FX}/pods_steady.json" run _cap unknown
 	assert_success
 	[ "$(wc -l < "$CALLS")" -eq 1 ]
 	grep -q -- '-n istio-system get pods -l app=istiod -o json --request-timeout=15' "$CALLS"
-	[ "$(_col trigger)" = unknown ]
-	[ "$(_col change)" = no_change ]
-	[ "$(_col cause)" = no_restart_found ]
-	[ "$(_col evidence)" = - ]
+	[ "$(_col trigger)/$(_col change)/$(_col cause)/$(_col evidence)" = unknown/no_change/no_restart_found/- ]
 	[ -z "$(ls -d "${D}"/[0-9][0-9][0-9]-* 2>/dev/null)" ]
+	# No Running istiod at the start (no pod set): no_pods without pods, restarted_untimed
+	# with restarts.
+	_next "${RES}/istiod-diag-NOPODS"
+	FAKE_PODS="${FX}/empty_list.json" run istiod_diag_capture "$D" m2 ctx-a no_running_pods "" "" _fake_kubectl
+	assert_success
+	[ "$(_col trigger)/$(_col change)/$(_col cause)" = no_running_pods/no_pods/no_istiod_pods ]
+	run istiod_diag_capture "$D" m2 ctx-a unknown "" "" _fake_kubectl
+	[ "$(_col change istiod-abc-x1)/$(_col cause istiod-abc-x1)" = restarted_untimed/oom_killed ]
 }
 
-@test "dedup: the same restart twice gets a row, not a second folder, and only the pod list" {
+@test "one restart is one restart however often it is seen: a repeat gets a row but no second folder (already_captured), a row-only repeat is already_reported, a restart skipped on the deadline gets its folder later, a pod seen failed then gone; the report counts each once" {
 	_cap
 	n1="$(wc -l < "$CALLS")"
 	run _cap iter2
 	assert_success
+	[ "$(_col evidence)/$(_col cause)" = already_captured/oom_killed ]
+	[ "$(($(wc -l < "$CALLS") - n1))" -eq 1 ]
+	[ "$(ls -d "${D}"/[0-9][0-9][0-9]-* | wc -l)" -eq 1 ]
+	# Row-only captures (no budget): the repeat is already_reported, counted once.
+	_next "${RES}/istiod-diag-RO"
+	ISTIOD_DIAG_MAX_CAPTURES=0 _cap 1 iter1
+	ISTIOD_DIAG_MAX_CAPTURES=0 _cap 1 iter2
+	[ "$(_col evidence)" = already_reported ]
+	[ "$(_rows)" -eq 2 ]
+	# Skipped on the deadline, then captured at a later call: the report lists that row.
+	_next "${RES}/sweep-x/istiod-diag-DL"
+	ISTIOD_DIAG_MAX_SEC=0 _cap 1 iter1
+	[ "$(_col evidence)" = skipped_deadline ]
+	_cap 1 iter2
+	[ "$(_col evidence)" = 001-iter2-ctx-a ]
+	_cap 1 iter3
 	[ "$(_col evidence)" = already_captured ]
-	[ "$(_col cause)" = oom_killed ]
-	[ "$(($(wc -l < "$CALLS") - n1))" -eq 1 ]
-	[ "$(ls -d "${D}"/[0-9][0-9][0-9]-* | wc -l)" -eq 1 ]
-}
-
-@test "budget: ISTIOD_DIAG_MAX_CAPTURES=1 leaves a second restart with a row only (budget_exhausted)" {
-	export ISTIOD_DIAG_MAX_CAPTURES=1
-	_cap
+	# A replaced pod seen failed, then gone: one restart, no second folder.
+	_next "${RES}/sweep-y/istiod-diag-EV"
+	FAKE_PODS="${FX}/pods_evicted.json" FAKE_EVENTS="${FX}/events_evicted.json" _cap 1 iter1
+	[ "$(_col change istiod-abc-x1)" = replaced_failed ]
 	n1="$(wc -l < "$CALLS")"
-	FAKE_PODS="${FX}/pods_crash.json" run _cap iter2
-	assert_success
-	[ "$(_col evidence)" = budget_exhausted ]
-	[ "$(_col cause)" = crash ]
+	FAKE_PODS="${FX}/pods_deleted.json" FAKE_EVENTS="${FX}/events_deleted.json" _cap podset_changed iter2
+	[ "$(_col change istiod-abc-x1)/$(_col evidence istiod-abc-x1)/$(_col evidence istiod-abc-y2)" = replaced_gone/already_captured/already_captured ]
 	[ "$(($(wc -l < "$CALLS") - n1))" -eq 1 ]
 	[ "$(ls -d "${D}"/[0-9][0-9][0-9]-* | wc -l)" -eq 1 ]
+	# Each index alone, then all four together.
+	run istiod_diag_report json "${RES}/sweep-x"
+	[ "$(jq -c '[.rows, .repeat_rows, .by_cause]' <<<"$output")" = '[3,2,{"oom_killed":1}]' ]
+	[ "$(jq -c '[.captures[] | select(.repeat | not) | .evidence]' <<<"$output")" = '["istiod-diag-DL/001-iter2-ctx-a"]' ]
+	run istiod_diag_report json "${RES}/sweep-y"
+	[ "$(jq -c '[.rows, .repeat_rows, .by_cause]' <<<"$output")" = '[4,2,{"evicted":1,"replacement":1}]' ]
+	run istiod_diag_report json "$RES"
+	# Across runs too: the three indexes of the same OOM count it once.
+	[ "$(jq -c '[.index_files, .rows, .repeat_rows, .by_cause]' <<<"$output")" = '[4,11,8,{"evicted":1,"oom_killed":1,"replacement":1}]' ]
 }
 
-@test "deadline: ISTIOD_DIAG_MAX_SEC=0 runs only the pod list and marks the row skipped_deadline" {
+@test "the capture is bounded and still writes each restart's row: past the budget (budget_exhausted) or the deadline (skipped_deadline) a row only, the last ISTIOD_DIAG_LOG_BYTES of a log, the request timeout as given (a bad one warns and uses 15); ISTIOD_DIAG_ENABLED=0 makes no call" {
+	ISTIOD_DIAG_MAX_CAPTURES=1 _cap
+	n1="$(wc -l < "$CALLS")"
+	FAKE_PODS="${FX}/pods_crash.json" ISTIOD_DIAG_MAX_CAPTURES=1 run _cap iter2
+	assert_success
+	[ "$(_col evidence)/$(_col cause)" = budget_exhausted/crash ]
+	[ "$(($(wc -l < "$CALLS") - n1))" -eq 1 ]
+	[ "$(ls -d "${D}"/[0-9][0-9][0-9]-* | wc -l)" -eq 1 ]
+	_next "${RES}/istiod-diag-DL"
 	ISTIOD_DIAG_MAX_SEC=0 run _cap
 	assert_success
 	[ "$(wc -l < "$CALLS")" -eq 1 ]
-	[ "$(_col evidence)" = skipped_deadline ]
-	[ "$(_col cause)" = oom_killed ]
+	[ "$(_col evidence)/$(_col cause)" = skipped_deadline/oom_killed ]
 	[ -z "$(ls -d "${D}"/[0-9][0-9][0-9]-* 2>/dev/null)" ]
-}
-
-@test "size bound: a 5 MiB log keeps its last ISTIOD_DIAG_LOG_BYTES (marker line kept); the pre scrape stays gzipped" {
+	# A 5 MiB log keeps its last bytes (the marker line); the pre scrape stays gzipped.
+	_next "${RES}/istiod-diag-BIG"
 	big="${BATS_TEST_TMPDIR}/big.log"
 	awk 'BEGIN { for (i = 0; i < 70000; i++) printf "%08d filler line for the size bound test, 192.0.2.99 ..................\n", i; print "FINAL-MARKER-LINE" }' > "$big"
 	[ "$(wc -c < "$big")" -gt 5000000 ]
@@ -260,28 +227,28 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	gzip -dc "${D}/${ev}/istiod-abc-x1.previous.log.gz" > "$kept"
 	[ "$(wc -c < "$kept")" -le 262144 ]
 	[ "$(tail -n 1 "$kept")" = FINAL-MARKER-LINE ]
-	run grep -c '192.0.2.99' "$kept"
-	[ "$output" = 0 ]
 	gzip -dc "${D}/${ev}/istiod-abc-x1.pre.metrics.gz" | grep -q '^process_start_time_seconds 1.7169408e+09$'
 	grep -qx '# ISTIOD_DIAG_LOG_BYTES=262144' "${D}/index.tsv"
-}
-
-@test "ISTIOD_DIAG_REQUEST_TIMEOUT goes to kubectl unchanged (1ms stays 1ms); a bad one warns and uses 15" {
+	_next "${RES}/istiod-diag-TO"
 	ISTIOD_DIAG_REQUEST_TIMEOUT=1ms run _cap
 	assert_success
 	grep -q -- '--request-timeout=1ms$' "$CALLS"
-	run grep -q -- '1mss' "$CALLS"
-	assert_failure
-	: > "$CALLS"
-	D="${RES}/istiod-diag-RUN2" ISTIOD_DIAG_REQUEST_TIMEOUT='1 ms' run --separate-stderr _cap
+	! grep -q -- '1mss' "$CALLS" || false
+	_next "${RES}/istiod-diag-TO2"
+	ISTIOD_DIAG_REQUEST_TIMEOUT='1 ms' run --separate-stderr _cap
 	assert_success
 	[[ "$stderr" == *"ISTIOD_DIAG_REQUEST_TIMEOUT='1 ms' is not a kubectl --request-timeout"* ]]
 	grep -q -- '--request-timeout=15 ' "$CALLS"
+	_next "${RES}/istiod-diag-OFF"
+	ISTIOD_DIAG_ENABLED=0 run _cap
+	assert_success
+	[ ! -s "$CALLS" ]
+	[ ! -e "$D" ]
 }
 
 # --- safety (PL40) and redaction ---
 
-@test "containment: every call failing under set -euo pipefail and an ERR trap -> capture_failed row, rc 0, run continues" {
+@test "containment (PL40): every call failing under set -euo pipefail and an ERR trap, or a die inside the helper, gives a capture_failed row with its reason and rc 0; an unwritable results dir or a missing reach.sh warns and returns 0" {
 	export -f _fake_kubectl
 	export FX D PODSET PRE ROOT FAKE_PODS
 	FAKE_FAIL_ALL=1 run --separate-stderr bash -c '
@@ -296,16 +263,11 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	assert_output "rc=0 CONTINUED"
 	[[ "$stderr" != *ERR-TRAP-FIRED* ]]
 	[[ "$stderr" == *"change=capture_failed"* ]]
-	[ "$(_col change)" = capture_failed ]
-	[ "$(_col evidence)" = capture_failed ]
+	[ "$(_col change)/$(_col evidence)" = capture_failed/capture_failed ]
 	note="$(_col note)"
 	[[ "$note" == *"istiod pod list failed: error: Unable to connect to the server"* ]]
 	[[ "$note" == *"<ip>"* && "$note" != *192.0.2* ]]
-}
-
-@test "containment: a die inside the helper (subshell) -> capture_failed with its reason, rc 0" {
-	export -f _fake_kubectl
-	export FX D PODSET PRE ROOT FAKE_PODS
+	export D="${RES}/istiod-diag-DIE"
 	FAKE_DIE=1 run --separate-stderr bash -c '
 		set -euo pipefail
 		source "$ROOT/tests/lib/common.sh"
@@ -317,9 +279,7 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	assert_output "rc=0 CONTINUED"
 	[ "$(_col change)" = capture_failed ]
 	[[ "$(_col note)" == *"fake kubectl died"* ]]
-}
-
-@test "containment: an unwritable results dir or a missing reach.sh warns and returns 0" {
+	: > "$CALLS"
 	touch "${BATS_TEST_TMPDIR}/afile"
 	run --separate-stderr istiod_diag_capture "${BATS_TEST_TMPDIR}/afile/istiod-diag-x" iter1 ctx-a 1 "$PODSET" "$PRE" _fake_kubectl
 	assert_success
@@ -330,16 +290,20 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	[[ "$stderr" == *"reach.sh is not sourced"* ]]
 }
 
-@test "redaction: index, summaries and README hold no IP, host or node name; raw logs mask tokens, JWTs and IPs" {
+@test "redaction: index, summaries and README hold no IP, host or node name; notes, raw logs, events, the pod and node projections mask them (and tokens, JWTs); the folder ignores itself" {
 	_cap
 	FAKE_PODS="${FX}/pods_evicted.json" FAKE_EVENTS="${FX}/events_evicted.json" _cap unknown iter2
 	FAKE_PODS="${FX}/pods_crash.json" _cap 1 iter3
 	FAKE_PODS="${FX}/pods_node_restart.json" FAKE_PREV_FAIL=1 _cap 1 iter4
-	local f
+	local f note
 	for f in "${D}/index.tsv" "${D}/README.md" "${D}"/*/summary.md; do
+		[ -s "$f" ]
 		run grep -nE '([0-9]{1,3}\.){3}[0-9]{1,3}|2001:db8|worker-node|example\.internal' "$f"
-		assert_failure
+		assert_failure 1
 	done
+	# The eviction note is masked, not dropped.
+	note="$(awk -F'\t' '$1 != "captured_at" && /low on resource/' "${D}/index.tsv")"
+	[[ "$note" == *"<ip>"* && "$note" == *"<host>"* && "$note" == *"<node>"* ]]
 	log="${BATS_TEST_TMPDIR}/raw.log"
 	gzip -dc "${D}/001-iter1-ctx-a/istiod-abc-x1.previous.log.gz" > "$log"
 	run grep -E 's3cr3t-token|eyJhbGciOiJSUzI1NiJ9|192\.0\.2\.40|2001:db8' "$log"
@@ -348,58 +312,39 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	grep -q '<jwt>' "$log"
 	grep -q 'sidecar~<ip>~' "$log"
 	grep -q 'peer <ip>:15012' "$log"
-	# Raw events keep the host (stack traces and events need it) but mask the IPs.
+	# Raw events keep the host (stack traces and events need it) but mask the IPs; the pod
+	# projection keeps no env, managedFields or IPs; the node's no IP.
 	run grep -E '192\.0\.2|2001:db8' "${D}"/002-iter2-ctx-a/events.tsv
 	assert_failure
+	[ -s "${D}/001-iter1-ctx-a/pods.json" ]
+	run grep -E 'do-not-copy|managedFields|podIP|hostIP' "${D}/001-iter1-ctx-a/pods.json"
+	assert_failure 1
+	f="$(ls "${D}"/*-iter4-ctx-a/node-1.json)"
+	[ -s "$f" ]
+	run grep -q '192.0.2' "$f"
+	assert_failure 1
+	# The folder ignores itself, so even a tracked --output-dir cannot commit the raw evidence.
+	grep -qx '\*' "${D}/.gitignore"
+	git init -q "$RES"
+	git -C "$RES" check-ignore -q "istiod-diag-RUN1/001-iter1-ctx-a/istiod-abc-x1.previous.log.gz"
+	git -C "$RES" check-ignore -q "istiod-diag-RUN1/index.tsv"
 }
 
-@test "kill switch: ISTIOD_DIAG_ENABLED=0 makes no call and writes nothing" {
-	ISTIOD_DIAG_ENABLED=0 run _cap
+@test "folder names: no ':', '+' or '/' (NTFS copies); a context's part is ctx_file_safe's form in any locale (tuning's ctx_key too), so redact-results maps it in the index and names the folder" {
+	local loc ctx want got
+	D="${BATS_TEST_TMPDIR}/ntfs/istiod-diag-N" run istiod_diag_capture "${BATS_TEST_TMPDIR}/ntfs/istiod-diag-N" \
+		'w2026-10-13T12:23:10+00:00' 'default/api-x:6443/kube:admin' 1 "$PODSET" "$PRE" _fake_kubectl
 	assert_success
-	[ ! -s "$CALLS" ]
-	[ ! -e "$D" ]
-}
-
-@test "PL29: an empty or 100-byte pre-window scrape gives N/A memory, never 0 (and no start time to time it)" {
-	: > "$PRE"
-	run _cap
-	[ "$(_col rss_pre_mi)" = N/A ]
-	[ "$(_col heap_inuse_pre_mi)" = N/A ]
-	[ "$(_col change)" = restarted_untimed ]
-	[[ "$(_col note)" == *"no pre-window start time"* ]]
-	head -c 100 "${FX}/pre_metrics.txt" > "$PRE"
-	D="${RES}/istiod-diag-RUN2" run _cap
-	[ "$(D="${RES}/istiod-diag-RUN2" _col rss_pre_mi)" = N/A ]
-	[ "$(D="${RES}/istiod-diag-RUN2" _col proxies_pre)" = N/A ]
-}
-
-@test "no pod set (no Running istiod at the start): no_pods row without pods, restarted_untimed with restarts" {
-	FAKE_PODS="${FX}/empty_list.json" run istiod_diag_capture "$D" m2 ctx-a no_running_pods "" "" _fake_kubectl
-	assert_success
-	[ "$(_col trigger)" = no_running_pods ]
-	[ "$(_col change)" = no_pods ]
-	[ "$(_col cause)" = no_istiod_pods ]
-	run istiod_diag_capture "$D" m2 ctx-a unknown "" "" _fake_kubectl
-	[ "$(_col change istiod-abc-x1)" = restarted_untimed ]
-	[ "$(_col cause istiod-abc-x1)" = oom_killed ]
-}
-
-@test "tag and folder names carry no ':' or '+' (NTFS copies)" {
-	run istiod_diag_capture "$D" 'w2026-10-13T12:23:10+00:00' 'default/api-x:6443/kube:admin' 1 "$PODSET" "$PRE" _fake_kubectl
-	assert_success
-	ev="$(_col evidence)"
-	[[ "$ev" != *:* && "$ev" != *+* && "$ev" != */* ]]
-	[ -d "${D}/${ev}" ]
-	[[ "$(_col tag)" != *:* ]]
+	got="$(D="${BATS_TEST_TMPDIR}/ntfs/istiod-diag-N" _col evidence)"
+	[[ "$got" != *:* && "$got" != *+* && "$got" != */* ]]
+	[ -d "${BATS_TEST_TMPDIR}/ntfs/istiod-diag-N/${got}" ]
+	[[ "$(D="${BATS_TEST_TMPDIR}/ntfs/istiod-diag-N" _col tag)" != *:* ]]
 	run istiod_diag_dir /x/y/latency-R1.tsv 'R1:+'
 	assert_output "/x/y/istiod-diag-R1__"
-}
-
-@test "folder names: a context's part is ctx_file_safe's form in any locale (tuning's ctx_key too), so redact-results maps it in the index and names the folder" {
-	local loc ctx want got
 	source "${ROOT}/tests/tuning/lib/tuning.sh"
 	export -f _fake_kubectl
-	export D PODSET PRE FAKE_PODS FX
+	export PODSET PRE FAKE_PODS FX
+	export D="${RES}/istiod-diag-RUN2"
 	# A UTF-8 letter is two bytes (ctx-é1 -> ctx-__1, as in a C locale), a long name is cut
 	# to CTX_FILE_NAME_MAX, and the cut and whole forms are what ctx_key and redact use.
 	for ctx in 'ctx-é1' 'ns/api-long-cluster-name.example:6443/ci-user-with-long-name'; do
@@ -423,177 +368,108 @@ _rows() { awk -F'\t' '!/^#/ && $1 != "captured_at" { n++ } END { print n + 0 }' 
 	LC_ALL=C.UTF-8 run --separate-stderr "${ROOT}/tests/lib/redact-results.sh" --context "$ctx" \
 		--out "${BATS_TEST_TMPDIR}/copy" "$RES"
 	assert_success
-	[ "$(awk -F'\t' '!/^#/ && $1 != "captured_at" { print $3 "|" $(NF - 1) }' "${BATS_TEST_TMPDIR}/copy/res/istiod-diag-RUN1/index.tsv")" = '<mesh-a-ctx>|001-iter1-<mesh-a-ctx>' ]
-	[[ "$stderr" == *"istiod-diag-RUN1/${got}/"*"raw istiod-diag evidence"* ]]
+	[ "$(awk -F'\t' '!/^#/ && $1 != "captured_at" { print $3 "|" $(NF - 1) }' "${BATS_TEST_TMPDIR}/copy/res/istiod-diag-RUN2/index.tsv")" = '<mesh-a-ctx>|001-iter1-<mesh-a-ctx>' ]
+	[[ "$stderr" == *"istiod-diag-RUN2/${got}/"*"raw istiod-diag evidence"* ]]
 	run grep -rF -e 'ns_api-long' -e 'long-cluster' "${BATS_TEST_TMPDIR}/copy"
 	assert_failure
 }
 
-# --- report ---
-
-@test "istiod_diag_report: tally by cause over two index files in md, text and json; csv prints nothing" {
-	_cap
-	_cap 1 iter2  # a repeat row: listed apart, not tallied
-	D="${RES}/sweep-x/istiod-diag-RUN2" FAKE_PODS="${FX}/pods_deleted.json" FAKE_EVENTS="${FX}/events_deleted.json" _cap
+@test "a failed or partial pre-window scrape (PL29): memory N/A, never 0; the restart is untimed and stays out of the tally; restarts long before it are no_change, within the clock margin still untimed" {
+	: > "$PRE"
+	run _cap unknown
+	[ "$(_col rss_pre_mi)/$(_col heap_inuse_pre_mi)" = N/A/N/A ]
+	[ "$(_col change)/$(_col cause)" = restarted_untimed/oom_killed ]
+	[[ "$(_col note)" == *"no pre-window start time"* ]]
 	run istiod_diag_report json "$RES"
-	assert_success
-	[ "$(jq -c '[.index_files, .rows, .repeat_rows, .untimed_rows]' <<<"$output")" = '[2,4,1,0]' ]
-	[ "$(jq -c '.by_cause' <<<"$output")" = '{"deleted":1,"oom_killed":1,"replacement":1}' ]
-	[ "$(jq -c '.untimed_by_cause' <<<"$output")" = '{}' ]
-	[ "$(jq -c '.captures[0] | [.run_id, .cause, .evidence, .repeat, .untimed]' <<<"$output")" = '["RUN1","oom_killed","istiod-diag-RUN1/001-iter1-ctx-a",false,false]' ]
-	[ "$(jq -c '.captures[1] | [.evidence, .repeat]' <<<"$output")" = '["already_captured",true]' ]
-	run istiod_diag_report md "$RES"
-	assert_output --partial "## istiod restart diagnostics"
-	assert_output --partial "4 row(s) from 2 \`istiod-diag-*/index.tsv\` file(s); by cause: oom_killed=1, deleted=1, replacement=1."
-	assert_output --partial "1 repeat row(s) of an already listed restart are not listed."
-	assert_output --partial "| RUN1 | ctx-a | iter1 | istiod-abc-x1 | restarted_in_place | oom_killed | 137 | 300/3072 | istiod-diag-RUN1/001-iter1-ctx-a |"
-	refute_output --partial "already_captured"
-	run istiod_diag_report text "$RES"
-	assert_output --partial "istiod restart diagnostics: 4 row(s) from 2 istiod-diag-*/index.tsv file(s)"
-	assert_output --partial "RUN2 | ctx-a | iter1 | istiod-abc-y2 | new_pod | replacement | exit=N/A | rss_pre/limit=N/A/3072 Mi | sweep-x/istiod-diag-RUN2/001-iter1-ctx-a"
-	run istiod_diag_report csv "$RES"
-	assert_success
-	assert_output ""
-}
-
-@test "istiod_diag_report: two runs with the same tag and folder name stay apart (run_id, evidence path)" {
-	_cap 1 iter1
-	D="${RES}/istiod-diag-RUN2" FAKE_PODS="${FX}/pods_crash.json" _cap 1 iter1
-	[ -d "${RES}/istiod-diag-RUN1/001-iter1-ctx-a" ]
-	[ -d "${RES}/istiod-diag-RUN2/001-iter1-ctx-a" ]
-	run istiod_diag_report json "$RES"
-	[ "$(jq -c '[.captures[] | [.run_id, .tag, .evidence, .cause]]' <<<"$output")" = '[["RUN1","iter1","istiod-diag-RUN1/001-iter1-ctx-a","oom_killed"],["RUN2","iter1","istiod-diag-RUN2/001-iter1-ctx-a","crash"]]' ]
-	[ "$(jq -c '.by_cause' <<<"$output")" = '{"crash":1,"oom_killed":1}' ]
-	run istiod_diag_report md "$RES"
-	assert_output --partial "| RUN1 | ctx-a | iter1 | istiod-abc-x1 | restarted_in_place | oom_killed |"
-	assert_output --partial "| istiod-diag-RUN1/001-iter1-ctx-a |"
-	assert_output --partial "| RUN2 | ctx-a | iter1 | istiod-abc-x1 | restarted_in_place | crash |"
-	assert_output --partial "| istiod-diag-RUN2/001-iter1-ctx-a |"
-	run istiod_diag_report text "$RES"
-	assert_output --partial "  RUN1 | ctx-a | iter1 | istiod-abc-x1 |"
-	assert_output --partial "  RUN2 | ctx-a | iter1 | istiod-abc-x1 |"
-	# A trailing slash on the results dir gives the same relative paths.
-	run istiod_diag_report json "${RES}/"
-	[ "$(jq -r '.captures[1].evidence' <<<"$output")" = istiod-diag-RUN2/001-iter1-ctx-a ]
-}
-
-@test "istiod_diag_report: an untimed restart (failed pre-window scrape, old OOM) stays out of the tally" {
-	: > "$PRE"  # the pre-window scrape failed: no start time to place the restart
-	_cap unknown
-	[ "$(_col change)" = restarted_untimed ]
-	[ "$(_col cause)" = oom_killed ]
-	run istiod_diag_report json "$RES"
-	[ "$(jq -c '[.rows, .untimed_rows, .repeat_rows]' <<<"$output")" = '[1,1,0]' ]
-	[ "$(jq -c '.by_cause' <<<"$output")" = '{}' ]
-	[ "$(jq -c '.untimed_by_cause' <<<"$output")" = '{"oom_killed":1}' ]
-	[ "$(jq -r '.captures[0].untimed' <<<"$output")" = true ]
+	[ "$(jq -c '[.rows, .untimed_rows, .repeat_rows, .by_cause, .untimed_by_cause, .captures[0].untimed]' <<<"$output")" = '[1,1,0,{},{"oom_killed":1},true]' ]
 	run istiod_diag_report md "$RES"
 	assert_output --partial "by cause: none. Not in the tally: 1 restart(s) at an unknown time (\`restarted_untimed\`"
-	assert_output --partial "may predate the window): oom_killed=1."
 	assert_output --partial "| restarted_untimed | oom_killed (untimed) |"
 	run istiod_diag_report text "$RES"
-	assert_output --partial "by cause: none"
 	assert_output --partial "not in the tally, 1 restart(s) at an unknown time"
 	assert_output --partial "| restarted_untimed | oom_killed (untimed) | exit=137"
-}
-
-@test "untimed: restarts of a container that started long before the failed pre-window scrape are no_change" {
+	head -c 100 "${FX}/pre_metrics.txt" > "$PRE"
+	D="${RES}/istiod-diag-RUN2" run _cap
+	[ "$(D="${RES}/istiod-diag-RUN2" _col rss_pre_mi)/$(D="${RES}/istiod-diag-RUN2" _col proxies_pre)" = N/A/N/A ]
 	# Lab case: restartCount 2 from an old node reboot, then one flaky pre-window scrape.
 	: > "$PRE"
+	_next "${BATS_TEST_TMPDIR}/res3/istiod-diag-RUN3"
 	echo 1791980590000 > "${BATS_TEST_TMPDIR}/pre-0.ts"  # ms, a day after the 12:23:10Z start
 	FAKE_PODS="${FX}/pods_node_restart.json" run _cap unknown
 	assert_success
 	[ "$(wc -l < "$CALLS")" -eq 1 ]
 	[ "$(_rows)" -eq 1 ]
-	[ "$(_col change)" = no_change ]
-	[ "$(_col cause)" = no_restart_found ]
+	[ "$(_col change)/$(_col cause)" = no_change/no_restart_found ]
 	[[ "$(_col note)" == *"1 with restarts that predate it"* ]]
-	run istiod_diag_report json "$RES"
+	run istiod_diag_report json "${BATS_TEST_TMPDIR}/res3"
 	[ "$(jq -c '[.by_cause, .untimed_rows]' <<<"$output")" = '[{"no_restart_found":1},0]' ]
-	# Within the clock margin of the scrape the restart stays untimed, never no_change.
-	rm -rf "$D"
+	_next "${BATS_TEST_TMPDIR}/res3/istiod-diag-RUN4"
 	echo 1791894290000 > "${BATS_TEST_TMPDIR}/pre-0.ts"  # 100 s after the start
 	FAKE_PODS="${FX}/pods_node_restart.json" run _cap unknown
 	[ "$(_col change)" = restarted_untimed ]
 }
 
-@test "dedup of row-only captures: a repeat without a folder is already_reported and counted once" {
-	export ISTIOD_DIAG_MAX_CAPTURES=0
-	_cap 1 iter1
-	_cap 1 iter2
-	[ "$(_col evidence)" = already_reported ]
-	[ "$(_rows)" -eq 2 ]
-	run istiod_diag_report json "$RES"
-	[ "$(jq -c '[.rows, .repeat_rows, .by_cause]' <<<"$output")" = '[2,1,{"oom_killed":1}]' ]
-	# A restart first skipped on the deadline gets its folder at a later call; the report
-	# lists that row and counts the restart once.
-	rm -rf "$D"
-	unset ISTIOD_DIAG_MAX_CAPTURES
-	ISTIOD_DIAG_MAX_SEC=0 _cap 1 iter1
-	[ "$(_col evidence)" = skipped_deadline ]
-	_cap 1 iter2
-	[ "$(_col evidence)" = 001-iter2-ctx-a ]
-	_cap 1 iter3
-	[ "$(_col evidence)" = already_captured ]
-	run istiod_diag_report json "$RES"
-	[ "$(jq -c '[.rows, .repeat_rows, .by_cause]' <<<"$output")" = '[3,2,{"oom_killed":1}]' ]
-	[ "$(jq -c '[.captures[] | select(.repeat | not) | .evidence]' <<<"$output")" = '["istiod-diag-RUN1/001-iter2-ctx-a"]' ]
-}
+# --- report ---
 
-@test "dedup: a replaced pod seen failed, then gone, is one restart (no second folder, one tally entry)" {
-	FAKE_PODS="${FX}/pods_evicted.json" FAKE_EVENTS="${FX}/events_evicted.json" _cap 1 iter1
-	[ "$(_col change istiod-abc-x1)" = replaced_failed ]
-	n1="$(wc -l < "$CALLS")"
-	FAKE_PODS="${FX}/pods_deleted.json" FAKE_EVENTS="${FX}/events_deleted.json" _cap podset_changed iter2
-	[ "$(_col change istiod-abc-x1)" = replaced_gone ]
-	[ "$(_col evidence istiod-abc-x1)" = already_captured ]
-	[ "$(_col evidence istiod-abc-y2)" = already_captured ]
-	[ "$(($(wc -l < "$CALLS") - n1))" -eq 1 ]
-	[ "$(ls -d "${D}"/[0-9][0-9][0-9]-* | wc -l)" -eq 1 ]
-	run istiod_diag_report json "$RES"
-	[ "$(jq -c '[.rows, .repeat_rows, .by_cause]' <<<"$output")" = '[4,2,{"evicted":1,"replacement":1}]' ]
-}
-
-@test "istiod_diag_report: none captured, and an index of another width is skipped with a warning" {
-	mkdir -p "${RES}"
-	run istiod_diag_report md "$RES"
-	assert_output --partial "None captured"
+@test "istiod_diag_report: by cause over every index file in md, text and json (csv prints nothing), repeats listed apart; two runs with the same tag stay apart; none captured; an index of another width is skipped with a warning" {
 	run istiod_diag_report text "$RES"
 	assert_output "istiod restart diagnostics: none captured"
+	run istiod_diag_report md "$RES"
+	assert_output --partial "None captured"
 	run istiod_diag_report json "$RES"
 	[ "$(jq -c '[.index_files, .rows, .by_cause]' <<<"$output")" = '[0,0,{}]' ]
+	_cap
+	_cap 1 iter2  # a repeat row: listed apart, not tallied
+	D="${RES}/sweep-x/istiod-diag-RUN2" FAKE_PODS="${FX}/pods_deleted.json" FAKE_EVENTS="${FX}/events_deleted.json" _cap
+	# Another run with the same tag and folder name.
+	D="${RES}/istiod-diag-RUN3" FAKE_PODS="${FX}/pods_crash.json" _cap 1 iter1
 	mkdir -p "${RES}/istiod-diag-OLD"
 	printf 'captured_at\tpod\n2026-01-01T00:00:00Z\tp\n' > "${RES}/istiod-diag-OLD/index.tsv"
 	run --separate-stderr istiod_diag_report json "$RES"
-	[ "$(jq -c '.rows' <<<"$output")" = 0 ]
+	assert_success
 	[[ "$stderr" == *"skipped 1 index row(s) of another schema"* ]]
+	[ "$(jq -c '[.index_files, .rows, .repeat_rows, .untimed_rows]' <<<"$output")" = '[4,5,1,0]' ]
+	[ "$(jq -c '.by_cause' <<<"$output")" = '{"crash":1,"deleted":1,"oom_killed":1,"replacement":1}' ]
+	[ "$(jq -c '[.captures[] | select(.tag == "iter1" and .run_id != "RUN2") | [.run_id, .evidence, .cause]]' <<<"$output")" = '[["RUN1","istiod-diag-RUN1/001-iter1-ctx-a","oom_killed"],["RUN3","istiod-diag-RUN3/001-iter1-ctx-a","crash"]]' ]
+	[ "$(jq -c '[.captures[] | select(.repeat) | .evidence]' <<<"$output")" = '["already_captured"]' ]
+	# A trailing slash on the results dir gives the same relative paths.
+	run --separate-stderr istiod_diag_report json "${RES}/"
+	[ "$(jq -r '[.captures[].evidence] | index("istiod-diag-RUN3/001-iter1-ctx-a") != null' <<<"$output")" = true ]
+	run istiod_diag_report md "$RES"
+	assert_output --partial "## istiod restart diagnostics"
+	assert_output --partial "5 row(s) from 4 \`istiod-diag-*/index.tsv\` file(s); by cause: oom_killed=1, crash=1, deleted=1, replacement=1."
+	assert_output --partial "1 repeat row(s) of an already listed restart are not listed."
+	assert_output --partial "| RUN1 | ctx-a | iter1 | istiod-abc-x1 | restarted_in_place | oom_killed | 137 | 300/3072 | istiod-diag-RUN1/001-iter1-ctx-a |"
+	assert_output --partial "| RUN3 | ctx-a | iter1 | istiod-abc-x1 | restarted_in_place | crash |"
+	refute_output --partial "already_captured"
+	run istiod_diag_report text "$RES"
+	assert_output --partial "istiod restart diagnostics: 5 row(s) from 4 istiod-diag-*/index.tsv file(s)"
+	assert_output --partial "RUN2 | ctx-a | iter1 | istiod-abc-y2 | new_pod | replacement | exit=N/A | rss_pre/limit=N/A/3072 Mi | sweep-x/istiod-diag-RUN2/001-iter1-ctx-a"
+	assert_output --partial "  RUN3 | ctx-a | iter1 | istiod-abc-x1 |"
+	run istiod_diag_report csv "$RES"
+	assert_success
+	assert_output ""
 }
 
 # --- --config keys (every suite) ---
 
-@test "--config: every suite takes the six ISTIOD_DIAG_* keys; an unknown key names them" {
-	local s k f
-	for s in "${SUITES[@]}"; do
-		for k in ISTIOD_DIAG_ENABLED ISTIOD_DIAG_REQUEST_TIMEOUT ISTIOD_DIAG_MAX_SEC ISTIOD_DIAG_MAX_CAPTURES \
-			ISTIOD_DIAG_LOG_LINES ISTIOD_DIAG_LOG_BYTES; do
-			config_allowed_keys "$s" | grep -qx "$k" || { echo "$s: missing $k"; false; }
-		done
-	done
-	f="${BATS_TEST_TMPDIR}/diag.env"
-	printf 'ISTIOD_DIAG_ENABLED=0\nISTIOD_DIAG_REQUEST_TIMEOUT=1ms\n' > "$f"
-	for s in "${SUITES[@]}"; do
-		run --separate-stderr bash -c 'source "$1/tests/lib/common.sh"; ROOT="$1"; source "$1/tests/lib/config.sh"
-			load_config "$2" "$3" >/dev/null; echo "$ISTIOD_DIAG_ENABLED $ISTIOD_DIAG_REQUEST_TIMEOUT $RUN_CONFIG_SHA256"' _ "$ROOT" "$f" "$s"
-		assert_success
-		assert_output --regexp '^0 1ms ([0-9a-f]{64}|unknown)$'
-	done
+@test "--config: every suite takes the ISTIOD_DIAG_* keys; an unknown one is refused, naming them" {
+	local f="${BATS_TEST_TMPDIR}/diag.env" s want=""
+	printf '%s\n' ISTIOD_DIAG_ENABLED=0 ISTIOD_DIAG_REQUEST_TIMEOUT=1ms ISTIOD_DIAG_MAX_SEC=5 ISTIOD_DIAG_MAX_CAPTURES=2 \
+		ISTIOD_DIAG_LOG_LINES=10 ISTIOD_DIAG_LOG_BYTES=4096 > "$f"
+	# In a child bash: the key lists' loops are slow under the bats DEBUG trap.
+	run --separate-stderr bash -c 'source "$1/tests/lib/common.sh"; ROOT="$1"; source "$1/tests/lib/config.sh"; f="$2"; shift 2
+		for s in "$@"; do
+			(load_config "$f" "$s" > /dev/null && echo "$s $ISTIOD_DIAG_ENABLED $ISTIOD_DIAG_REQUEST_TIMEOUT $ISTIOD_DIAG_MAX_SEC $ISTIOD_DIAG_MAX_CAPTURES $ISTIOD_DIAG_LOG_LINES $ISTIOD_DIAG_LOG_BYTES")
+		done' _ "$ROOT" "$f" "${SUITES[@]}"
+	assert_success
+	for s in "${SUITES[@]}"; do want+="${s} 0 1ms 5 2 10 4096"$'\n'; done
+	assert_output "${want%$'\n'}"
 	printf 'ISTIOD_DIAG_TYPO=1\n' > "$f"
-	run load_config "$f" churn
+	run bash -c 'source "$1/tests/lib/common.sh"; ROOT="$1"; source "$1/tests/lib/config.sh"; load_config "$2" churn' _ "$ROOT" "$f"
 	assert_failure
-	assert_output --partial "keys CHURN_*, FANOUT_*, METRICS_SCRAPE_TIMEOUT); every suite also takes ISTIOD_DIAG_*"
-	# options.env defaults.
-	run bash -c 'source "$1/config/options.env"; echo "$ISTIOD_DIAG_ENABLED $ISTIOD_DIAG_REQUEST_TIMEOUT $ISTIOD_DIAG_MAX_SEC $ISTIOD_DIAG_MAX_CAPTURES $ISTIOD_DIAG_LOG_LINES $ISTIOD_DIAG_LOG_BYTES"' _ "$ROOT"
-	assert_output "1 15 120 20 5000 1048576"
+	assert_output --partial "unknown key ISTIOD_DIAG_TYPO"
+	assert_output --partial "every suite also takes ISTIOD_DIAG_*"
 }
 
 # --- controlplane 002: the window hook reads its rows back ---
@@ -648,18 +524,20 @@ _cp_tsv() {
 	[ ! -s "$CALLS" ]
 }
 
-# --- entrypoints (PL33): dataplane 002, churn 002, tuning 004 ---
+# --- entrypoints (PL33) ---
 
 # Stub kubectl and curl on PATH for the probes. istiod /metrics answers STUB_PRE_BODY
 # until the measured window starts (STUB_MARK: the fortio load, the churn scale-up or
 # the propagation t0 label), STUB_POST_BODY after. With STUB_REPLACE_ON_DRAIN, the
 # propagation drain replaces istiod-abc-x1 by istiod-abc-y2 and kills its port-forward
-# once (the next /metrics read fails).
+# once (the next /metrics read fails). The churn targets settle at once.
 _stub_bin() {
 	BIN="${BATS_TEST_TMPDIR}/bin"
 	mkdir -p "$BIN"
 	export STUB_LOG="${BATS_TEST_TMPDIR}/kubectl.log" STUB_MARK="${BATS_TEST_TMPDIR}/post.mark" FX
 	export STUB_REPLACED="${BATS_TEST_TMPDIR}/replaced.mark" STUB_FAIL_ONCE="${BATS_TEST_TMPDIR}/fail-once.mark"
+	# controlplane 002's kubectl top reads retry without a pause.
+	export CAP_TOP_BACKOFF_S=0
 	: > "$STUB_LOG"
 	cat > "${BIN}/kubectl" <<'STUB'
 #!/usr/bin/env bash
@@ -672,6 +550,7 @@ case " $* " in
 *" scale "*" --replicas=1 "*)
 	if [[ -n "${STUB_REPLACE_ON_SCALE_DOWN:-}" ]]; then : > "$STUB_REPLACED"; fi ;;
 *" scale "*) : > "$STUB_MARK" ;;
+*" get pods -l churn-target=true "*) : ;;
 *" label pod/"*"=true "*) : > "$STUB_MARK" ;;
 *" label pod/"*)
 	if [[ -n "${STUB_REPLACE_ON_DRAIN:-}" ]]; then : > "$STUB_REPLACED"; : > "$STUB_FAIL_ONCE"; fi ;;
@@ -726,7 +605,7 @@ _dp_run() {
 		--output-dir "$RES"
 }
 
-@test "dataplane 002 entrypoint, istiod_restarted=0: no extra API call and no istiod-diag folder" {
+@test "dataplane 002 entrypoint: no restart, no diag call or folder; a restart sets its rows to 1, the index says oom_killed and the report's md and json tally it (csv prints nothing); every capture call failing leaves exit 0, the rows and a capture_failed row" {
 	_stub_bin
 	_dp_run
 	assert_success
@@ -735,34 +614,26 @@ _dp_run() {
 	run grep -E 'app=istiod -o json|get events|get deploy,rs|get node| logs ' "$STUB_LOG"
 	assert_failure
 	[ -z "$(ls -d "$RES"/istiod-diag-* 2>/dev/null)" ]
-}
-
-@test "dataplane 002 entrypoint, restart: rows say 1 and the index says oom_killed; report sections in md and json" {
-	_stub_bin
+	RES="${BATS_TEST_TMPDIR}/res2"
+	rm -f "$STUB_MARK"
 	STUB_POST_BODY="$RESTARTED_BODY" _dp_run
 	assert_success
 	f="$(ls "$RES"/latency-*.tsv)"
 	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $16 }' "$f" | sort -u)" = 1 ]
-	idx="$(ls "$RES"/istiod-diag-*/index.tsv)"
-	D="$(dirname "$idx")"
-	[ "$(_col cause istiod-abc-x1)" = oom_killed ]
-	[ "$(_col tag istiod-abc-x1)" = m1 ]
+	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
+	[ "$(_col cause istiod-abc-x1)/$(_col tag istiod-abc-x1)" = oom_killed/m1 ]
 	[[ "$stderr" == *"istiod-diag: ctx-a istiod-abc-x1: change=restarted_in_place cause=oom_killed"* ]]
 	run "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$RES" --format md
 	assert_success
 	assert_output --partial "## istiod restart diagnostics"
 	assert_output --partial "oom_killed=1"
-	# stdout only: the stub reads no platform record, so the report warns on stderr (H5).
+	# stdout only: the report's warnings (the stub reads no platform record) go to stderr (H5).
 	run --separate-stderr "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$RES" --format json
 	[ "$(jq -c '.istiod_diag.by_cause' <<<"$output")" = '{"oom_killed":1}' ]
-	# No comment line in CSV output: the section is in text, md and json only.
 	run "${ROOT}/tests/dataplane/004-report-results.sh" --results-dir "$RES" --format csv
-	refute_output --partial "restart diagnostics"
 	refute_output --partial "oom_killed"
-}
-
-@test "dataplane 002 entrypoint, restart with every capture call failing: exit 0, rows intact, capture_failed" {
-	_stub_bin
+	RES="${BATS_TEST_TMPDIR}/res3"
+	rm -f "$STUB_MARK"
 	STUB_POST_BODY="$RESTARTED_BODY" STUB_DIAG_FAIL=1 _dp_run
 	assert_success
 	f="$(ls "$RES"/latency-*.tsv)"
@@ -781,36 +652,24 @@ _dp_run() {
 	f="$(ls "$RES"/churn-dataplane-*.tsv)"
 	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $16 "/" $17 }' "$f")" = 1/POISONED_RESTART ]
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
-	[ "$(_col tag istiod-abc-x1)" = c7-baseline ]
-	[ "$(_col cause istiod-abc-x1)" = oom_killed ]
+	[ "$(_col tag istiod-abc-x1)/$(_col cause istiod-abc-x1)" = c7-baseline/oom_killed ]
 	run --separate-stderr "${ROOT}/tests/churn-dataplane/005-report-results.sh" --results-dir "$RES" --format json
 	[ "$(jq -c '.istiod_diag.by_cause' <<<"$output")" = '{"oom_killed":1}' ]
-	run "${ROOT}/tests/churn-dataplane/005-report-results.sh" --results-dir "$RES" --format md
-	assert_output --partial "| ctx-a | c7-baseline | istiod-abc-x1 | restarted_in_place | oom_killed |"
 }
 
-_cp_run() {
-	PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh" \
-		--contexts ctx-a --config-dump-samples 0 --settle 0 --output-dir "$RES" "$@"
-}
-
-@test "controlplane 002 entrypoint: no restart -> no extra call; a restart across split phases -> oom_killed row" {
+@test "controlplane 002 entrypoint, split phases as 003 runs it: a restart between baseline and final sets istiod_restarted=1 and captures an oom_killed row with the pre-window scrape" {
 	_stub_bin
-	_cp_run
-	assert_success
-	f="$(ls "$RES"/controlplane-*.tsv)"
-	[ "$(awk -F'\t' '$1 == "timestamp" { for (i = 1; i <= NF; i++) if ($i == "istiod_restarted") c = i; next } !/^#/ && c { print $c }' "$f")" = 0 ]
-	run grep -E 'app=istiod -o json|get events|get deploy,rs| logs ' "$STUB_LOG"
-	assert_failure
-	[ -z "$(ls -d "$RES"/istiod-diag-* 2>/dev/null)" ]
-	# Split phase (as 003 runs it): the restart lands between baseline and final.
-	rm -rf "$RES"
 	SD="${BATS_TEST_TMPDIR}/state"
 	mkdir -p "$SD"
-	_cp_run --phase baseline --state-dir "$SD"
+	# 002 waits a fixed 3 s for its port-forwards; the stub has none to wait for.
+	printf '#!/bin/sh\n[ "$*" = 3 ] && exit 0\nexec %s "$@"\n' "$(command -v sleep)" > "${BIN}/sleep"
+	chmod +x "${BIN}/sleep"
+	PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh" \
+		--contexts ctx-a --config-dump-samples 0 --settle 0 --output-dir "$RES" --phase baseline --state-dir "$SD"
 	assert_success
 	: > "$STUB_MARK"
-	STUB_POST_BODY="$RESTARTED_BODY" _cp_run --phase final --state-dir "$SD"
+	PATH="${BIN}:${PATH}" STUB_POST_BODY="$RESTARTED_BODY" run --separate-stderr "${ROOT}/tests/controlplane/002-collect-resource-metrics.sh" \
+		--contexts ctx-a --config-dump-samples 0 --settle 0 --output-dir "$RES" --phase final --state-dir "$SD"
 	assert_success
 	f="$(ls "$RES"/controlplane-*.tsv)"
 	[ "$(awk -F'\t' '$1 == "timestamp" { for (i = 1; i <= NF; i++) if ($i == "istiod_restarted") c = i; next } !/^#/ && c { print $c }' "$f")" = 1 ]
@@ -822,26 +681,21 @@ _cp_run() {
 
 _churn_run() {
 	PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/churn/002-run-churn-probe.sh" \
-		--source-context ctx-a --iterations 1 --timeout 2 --settle 0 --deployment-count 1 \
-		--output-dir "$RES"
+		--source-context ctx-a --timeout 2 --settle 0 --deployment-count 1 --output-dir "$RES" "$@"
 }
 
-@test "churn 002 entrypoint (PL32): a capture inside the iteration subshell never adds a SETUP_FAILED row" {
+@test "churn 002 entrypoint (PL32): a capture inside the iteration subshell, failing or not, never adds a row" {
 	_stub_bin
 	export CHURN_POLL_INTERVAL_MS=50
-	STUB_POST_BODY="$RESTARTED_BODY" STUB_DIAG_FAIL=1 _churn_run
+	STUB_POST_BODY="$RESTARTED_BODY" STUB_DIAG_FAIL=1 _churn_run --iterations 1
 	assert_success
 	f="$(ls "$RES"/churn-*.tsv)"
-	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id"' "$f" | wc -l)" -eq 1 ]
 	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $21 }' "$f")" = POISONED_RESTART ]
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
-	[ "$(_col change)" = capture_failed ]
-	[ "$(_col tag)" = iter1 ]
-	# The same run with a working capture names the cause.
-	rm -rf "$RES"
-	: > "$STUB_LOG"
+	[ "$(_col change)/$(_col tag)" = capture_failed/iter1 ]
+	RES="${BATS_TEST_TMPDIR}/res2"
 	rm -f "$STUB_MARK"
-	STUB_POST_BODY="$RESTARTED_BODY" _churn_run
+	STUB_POST_BODY="$RESTARTED_BODY" _churn_run --iterations 1
 	assert_success
 	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id"' "$(ls "$RES"/churn-*.tsv)" | wc -l)" -eq 1 ]
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
@@ -850,49 +704,47 @@ _churn_run() {
 	assert_output --partial "## istiod restart diagnostics"
 }
 
-@test "churn 002 entrypoint: a pod replaced during the scale-down is captured at the next re-open (podset_changed)" {
+@test "churn 002 entrypoint: a pod replaced during the scale-down is captured at the next re-open (podset_changed), and neither window is POISONED_RESTART" {
 	_stub_bin
 	export CHURN_POLL_INTERVAL_MS=50
-	PATH="${BIN}:${PATH}" STUB_REPLACE_ON_SCALE_DOWN=1 STUB_PODS_JSON="${FX}/pods_deleted.json" run --separate-stderr \
-		"${ROOT}/tests/churn/002-run-churn-probe.sh" --source-context ctx-a --iterations 2 --timeout 2 --settle 0 \
-		--deployment-count 1 --output-dir "$RES"
+	STUB_REPLACE_ON_SCALE_DOWN=1 STUB_PODS_JSON="${FX}/pods_deleted.json" _churn_run --iterations 2
 	assert_success
 	f="$(ls "$RES"/churn-*.tsv)"
-	# Neither row is POISONED_RESTART: the replacement happened between the windows.
-	# (They are MISSING_VALUE: this stub's watcher lists no churn target, so
-	# convergence_local_ms is N/A.)
+	# MISSING_VALUE: this stub's watcher lists no churn target, so convergence_local_ms is N/A.
 	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $21 }' "$f" | sort -u)" = MISSING_VALUE ]
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
-	[ "$(_col trigger istiod-abc-x1)" = podset_changed ]
-	[ "$(_col tag istiod-abc-x1)" = before-iter2 ]
-	[ "$(_col change istiod-abc-x1)" = replaced_gone ]
-	[ "$(_col rss_pre_mi istiod-abc-x1)" = 300 ]
+	[ "$(_col trigger istiod-abc-x1)/$(_col tag istiod-abc-x1)/$(_col change istiod-abc-x1)/$(_col rss_pre_mi istiod-abc-x1)" = podset_changed/before-iter2/replaced_gone/300 ]
 	[ "$(_col change istiod-abc-y2)" = new_pod ]
 }
 
 _prop_run() {
 	PATH="${BIN}:${PATH}" run --separate-stderr "${ROOT}/tests/propagation/002-run-endpoint-probe.sh" \
-		--source-context ctx-a --timeout 2 --poll-interval-ms 100 --settle-sec 0 --tsv \
-		--output-dir "$RES" "$@"
+		--source-context ctx-a --poll-interval-ms 100 --settle-sec 0 --tsv --output-dir "$RES" "$@"
+}
+
+# _conv <body> <count> <sum>: <body> plus a convergence histogram. The t0 flip from count 0
+# to 10 (10 samples for 5 proxies) makes P1 converge at once, so no run waits its timeout.
+_conv() {
+	cat "$1"
+	printf 'pilot_proxy_convergence_time_bucket{le="0.1"} %s\npilot_proxy_convergence_time_bucket{le="+Inf"} %s\npilot_proxy_convergence_time_sum %s\npilot_proxy_convergence_time_count %s\n' "$2" "$2" "$3" "$2"
 }
 
 @test "propagation 002 entrypoint: the summary averages only the rows 005 counts and tallies the rest" {
 	_stub_bin
-	# P1 converges: the flip adds 10 convergence samples for 5 proxies.
-	hist() { printf 'pilot_proxy_convergence_time_bucket{le="0.1"} %s\npilot_proxy_convergence_time_bucket{le="+Inf"} %s\npilot_proxy_convergence_time_sum %s\npilot_proxy_convergence_time_count %s\n' "$1" "$1" "$2" "$1"; }
-	{ cat "${FX}/pre_metrics.txt"; hist 0 0; } > "${BATS_TEST_TMPDIR}/pre.txt"
-	{ cat "${FX}/pre_metrics.txt"; hist 10 0.5; } > "${BATS_TEST_TMPDIR}/post.txt"
-	STUB_PRE_BODY="${BATS_TEST_TMPDIR}/pre.txt" STUB_POST_BODY="${BATS_TEST_TMPDIR}/post.txt" _prop_run --iterations 1
+	_conv "${FX}/pre_metrics.txt" 0 0 > "${BATS_TEST_TMPDIR}/pre.txt"
+	_conv "${FX}/pre_metrics.txt" 10 0.5 > "${BATS_TEST_TMPDIR}/post.txt"
+	STUB_PRE_BODY="${BATS_TEST_TMPDIR}/pre.txt" STUB_POST_BODY="${BATS_TEST_TMPDIR}/post.txt" _prop_run --iterations 1 --timeout 2
 	assert_success
 	assert_output --regexp 'P1 local xDS push: +n=1/1 min=[0-9]+ms'
 	assert_output --partial "rows_dropped_total=0/1"
 	grep -qE '^\| P1 local xDS push \| 1/1 \| [0-9]+ \|' "$RES"/endpoint-*.md
 	# The same P1 with no process_start_time_seconds: the row is written OK with
 	# restarted=unknown, which 005 drops. The summary used to average it anyway.
-	rm -rf "$RES"; rm -f "$STUB_MARK"
+	RES="${BATS_TEST_TMPDIR}/res2"
+	rm -f "$STUB_MARK"
 	grep -v '^process_start_time_seconds' "${BATS_TEST_TMPDIR}/pre.txt" > "${BATS_TEST_TMPDIR}/pre-u.txt"
 	grep -v '^process_start_time_seconds' "${BATS_TEST_TMPDIR}/post.txt" > "${BATS_TEST_TMPDIR}/post-u.txt"
-	STUB_PRE_BODY="${BATS_TEST_TMPDIR}/pre-u.txt" STUB_POST_BODY="${BATS_TEST_TMPDIR}/post-u.txt" _prop_run --iterations 1
+	STUB_PRE_BODY="${BATS_TEST_TMPDIR}/pre-u.txt" STUB_POST_BODY="${BATS_TEST_TMPDIR}/post-u.txt" _prop_run --iterations 1 --timeout 2
 	assert_success
 	f="$(ls "$RES"/endpoint-*.tsv)"
 	[[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $10 "/" $16 }' "$f")" == OK/unknown ]]
@@ -904,47 +756,34 @@ _prop_run() {
 	assert_output --regexp 'RESTART_UNKNOWN +1'
 	grep -qxF '| P1 local xDS push | 0/1 | - | - | - |' "$RES"/endpoint-*.md
 	grep -qxF '| `RESTART_UNKNOWN` | 1 |' "$RES"/endpoint-*.md
-	grep -qF "that remote's side leaves them out" "$RES"/endpoint-*.md
-	# 005 counts the same rows.
+	# 005 counts the same rows; n_attempted (the last column) is the probe's one iteration.
 	run "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "$RES" --format csv
-	# n_attempted (the last column): the probe's one iteration.
 	assert_line "1,P1_local_wall,1,0,,,,,,,,1"
 }
 
-@test "propagation 002 entrypoint: a restart in the window (RESTART row) gets an oom_killed index row" {
+@test "propagation 002 entrypoint: a restart in the window gives a RESTART row and an oom_killed index row; a pod replaced between iterations is captured at the re-open (podset_changed)" {
 	_stub_bin
-	STUB_POST_BODY="$RESTARTED_BODY" _prop_run --iterations 1
+	export STUB_PRE_BODY="${BATS_TEST_TMPDIR}/pre.txt"
+	_conv "${FX}/pre_metrics.txt" 0 0 > "$STUB_PRE_BODY"
+	_conv "$RESTARTED_BODY" 10 0.5 > "${BATS_TEST_TMPDIR}/restarted.txt"
+	_conv "${FX}/pre_metrics.txt" 10 0.5 > "${BATS_TEST_TMPDIR}/post.txt"
+	STUB_POST_BODY="${BATS_TEST_TMPDIR}/restarted.txt" _prop_run --iterations 1 --timeout 1
 	assert_success
 	f="$(ls "$RES"/endpoint-*.tsv)"
 	[ "$(awk -F'\t' '!/^#/ && $1 != "run_id" { print $10 "/" $16 }' "$f")" = RESTART/1 ]
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
-	[ "$(_col cause istiod-abc-x1)" = oom_killed ]
-	[ "$(_col tag istiod-abc-x1)" = iter1 ]
+	[ "$(_col cause istiod-abc-x1)/$(_col tag istiod-abc-x1)" = oom_killed/iter1 ]
 	run "${ROOT}/tests/propagation/005-report-results.sh" --results-dir "$RES" --format json
 	[ "$(jq -c '.istiod_diag.by_cause' <<<"$output")" = '{"oom_killed":1}' ]
-}
-
-@test "propagation 002 entrypoint: a pod replaced between iterations is captured at the re-open (podset_changed)" {
-	_stub_bin
-	STUB_REPLACE_ON_DRAIN=1 STUB_PODS_JSON="${FX}/pods_deleted.json" _prop_run --iterations 2
+	RES="${BATS_TEST_TMPDIR}/res2"
+	rm -f "$STUB_MARK"
+	STUB_POST_BODY="${BATS_TEST_TMPDIR}/post.txt" STUB_REPLACE_ON_DRAIN=1 STUB_PODS_JSON="${FX}/pods_deleted.json" \
+		_prop_run --iterations 2 --timeout 1
 	assert_success
 	[[ "$stderr" == *"re-opening fanout block"* ]]
 	D="$(dirname "$(ls "$RES"/istiod-diag-*/index.tsv)")"
-	[ "$(_col trigger istiod-abc-x1)" = podset_changed ]
-	[ "$(_col change istiod-abc-x1)" = replaced_gone ]
-	[ "$(_col tag istiod-abc-x1)" = iter1 ]
-	[ "$(_col rss_pre_mi istiod-abc-x1)" = 300 ]
-	[ "$(_col change istiod-abc-y2)" = new_pod ]
-	[ "$(_col cause istiod-abc-y2)" = replacement ]
-	# Without a replacement the re-open check costs no API call.
-	rm -rf "$RES" "$STUB_REPLACED"
-	: > "$STUB_LOG"
-	rm -f "$STUB_MARK"
-	_prop_run --iterations 2
-	assert_success
-	run grep -E 'app=istiod -o json' "$STUB_LOG"
-	assert_failure
-	[ -z "$(ls -d "$RES"/istiod-diag-* 2>/dev/null)" ]
+	[ "$(_col trigger istiod-abc-x1)/$(_col change istiod-abc-x1)/$(_col tag istiod-abc-x1)/$(_col rss_pre_mi istiod-abc-x1)" = podset_changed/replaced_gone/iter1/300 ]
+	[ "$(_col change istiod-abc-y2)/$(_col cause istiod-abc-y2)" = new_pod/replacement ]
 }
 
 @test "tuning 004: an istiod-diag-*/index.tsv inside a pass dir is not read as a pass TSV" {

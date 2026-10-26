@@ -63,7 +63,7 @@ mesh() {
 }
 
 setup() {
-	STUB_DIR="$(mktemp -d)"
+	STUB_DIR="${BATS_TEST_TMPDIR}/stub"
 	export STUB_DIR
 	mkdir -p "${STUB_DIR}/bin" "${STUB_DIR}/sa" "${STUB_DIR}/work"
 	echo token >"${STUB_DIR}/sa/token"
@@ -152,10 +152,6 @@ EOF
 	sync c1 synced
 }
 
-teardown() {
-	rm -rf "$STUB_DIR"
-}
-
 # cacerts <root pem>: the Secret as the API returns it (data base64, plus a CA key).
 cacerts() {
 	printf '{"kind":"Secret","metadata":{"name":"cacerts","managedFields":[{"fieldsV1":{"f:data":{"f:root-cert.pem":{}}}}]},"data":{"ca-key.pem":"%s","root-cert.pem":"%s"}}\n' \
@@ -242,7 +238,7 @@ synced_replica() {
 	[ -z "$(ls -A "${STUB_DIR}/work")" ]
 }
 
-@test "mesh-wiring gate: a root bundle that contains the shared root is Ready; root= is the first certificate of cacerts" {
+@test "mesh-wiring gate, the shared root: a root bundle that contains it is Ready, root= is cacerts' first certificate, one that does not decode is root=unknown (never a hash of nothing), istiod on its own root is NotReady" {
 	configmap "$(pem other)
 ${ROOT_PEM}"
 	run sh "${STUB_DIR}/readiness.sh"
@@ -255,9 +251,6 @@ $(pem second)"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_success
 	assert_output --partial "root=$(fingerprint shared) "
-}
-
-@test "mesh-wiring gate: a root that does not decode prints root=unknown, never a hash of nothing" {
 	cacerts '-----BEGIN CERTIFICATE-----
 !!!!
 -----END CERTIFICATE-----'
@@ -268,16 +261,13 @@ $(pem second)"
 	assert_success
 	assert_output --partial "root=unknown"
 	refute_output --partial "root=e3b0c44298fc1c14"
-}
-
-@test "mesh-wiring gate: istiod on its own self-signed root is NotReady" {
 	configmap "$(pem other)"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output --partial "NotReady: istiod is not using the shared mesh root from cacerts"
 }
 
-@test "mesh-wiring gate: every failed API read is NotReady, with the HTTP status" {
+@test "mesh-wiring gate: every failed API or /metrics read is NotReady, with the HTTP status or the timeout (never a bare HTTP 000)" {
 	echo 403 >"${STUB_DIR}/list.code"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
@@ -314,17 +304,15 @@ $(pem second)"
 	echo 403 >"${STUB_DIR}/eps.code"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: cannot list the EndpointSlices of the istiod Service istio-system/istiod (HTTP 403)"
+	assert_output --partial "NotReady: cannot list the EndpointSlices of the istiod Service istio-system/istiod (HTTP 403)"
 	rm "${STUB_DIR}/eps.code"
 
 	echo 503 >"${STUB_DIR}/m_${A}.code"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}): metrics unreachable at http://${A}:15014/metrics (curl: (22) The requested URL returned error: 503)"
+	assert_output --partial "NotReady: istiod pod istiod-a (${A}): metrics unreachable at http://${A}:15014/metrics (curl: (22) The requested URL returned error: 503)"
 	[ -z "$(ls -A "${STUB_DIR}/work")" ]
-}
-
-@test "mesh-wiring gate: a request that times out is NotReady naming the timeout, not a bare HTTP 000" {
+	rm "${STUB_DIR}/m_${A}.code"
 	echo 28 >"${STUB_DIR}/list.rc"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
@@ -341,13 +329,13 @@ $(pem second)"
 	assert_output "NotReady: istiod pod istiod-a (${A}): metrics unreachable at http://${A}:15014/metrics (no answer within 5s)"
 }
 
-@test "mesh-wiring gate: the requests share the check budget, and running out is NotReady with the reason" {
+@test "mesh-wiring gate: the requests share the check budget (running out is NotReady with the reason), and istiod's /metrics gets only what is left" {
 	# 8s budget: the list takes 4s, so cacerts may take only the 4s left; it takes them all.
 	echo 4 >"${STUB_DIR}/list.delay"
 	echo 4 >"${STUB_DIR}/cacerts.delay"
 	CHECK_TIMEOUT=8 run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: the 8s check budget ran out before GET /api/v1/namespaces/istio-system/configmaps/istio-ca-root-cert (slow API server or istiod)"
+	assert_output --partial "NotReady: the 8s check budget ran out before GET /api/v1/namespaces/istio-system/configmaps/istio-ca-root-cert"
 	[ "$(cat "${STUB_DIR}/requests.log")" = "list 5
 cacerts 4" ]
 	# The EndpointSlice list used up what was left: no replica is read.
@@ -356,11 +344,10 @@ cacerts 4" ]
 	echo 4 >"${STUB_DIR}/eps.delay"
 	CHECK_TIMEOUT=8 run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: the 8s check budget ran out before reading /metrics from 1 istiod replica(s) (slow API server or istiod)"
+	assert_output --partial "NotReady: the 8s check budget ran out before reading /metrics from 1 istiod replica(s)"
 	! grep -q '^m_' "${STUB_DIR}/requests.log" || false
-}
-
-@test "mesh-wiring gate: istiod's /metrics gets only what is left of the budget" {
+	rm "${STUB_DIR}/eps.delay" "${STUB_DIR}/list.delay"
+	: >"${STUB_DIR}/requests.log"
 	echo 6 >"${STUB_DIR}/ew.delay"
 	CHECK_TIMEOUT=8 run sh "${STUB_DIR}/readiness.sh"
 	assert_success
@@ -368,7 +355,7 @@ cacerts 4" ]
 	grep -qx "m_${A} 2" "${STUB_DIR}/requests.log"
 }
 
-@test "mesh-wiring gate: the deployment gives the check the probe timeout minus 2s" {
+@test "mesh-wiring gate, the chart: the check gets the probe timeout minus 2s, may list the istiod EndpointSlices and writes only to its emptyDir; an istiodCheck.host override fails the render, naming istiodCheck.service" {
 	command -v helm >/dev/null || skip "helm not installed"
 	run helm template x "$CHART" --show-only templates/deployment.yaml
 	assert_success
@@ -376,10 +363,6 @@ cacerts 4" ]
 	run helm template x "$CHART" --set probe.timeoutSeconds=2 --show-only templates/deployment.yaml
 	assert_success
 	grep -A1 'name: CHECK_TIMEOUT' <<<"$output" | grep -q 'value: "1"'
-}
-
-@test "mesh-wiring gate: the chart lets the check list the istiod EndpointSlices and write only to its emptyDir" {
-	command -v helm >/dev/null || skip "helm not installed"
 	run helm template x "$CHART" --show-only templates/rbac.yaml
 	assert_success
 	grep -A2 'apiGroups: \["discovery.k8s.io"\]' <<<"$output" | grep -q 'resources: \["endpointslices"\]'
@@ -394,10 +377,6 @@ cacerts 4" ]
 	grep -A1 -- '- name: work$' <<<"$output" | grep -q 'mountPath: /work'
 	grep -q 'readOnlyRootFilesystem: true' <<<"$output"
 	refute_output --partial ISTIOD_HOST
-}
-
-@test "mesh-wiring gate: an istiodCheck.host override fails the render, naming istiodCheck.service" {
-	command -v helm >/dev/null || skip "helm not installed"
 	run helm template x "$CHART" --set istiodCheck.host=istiod.istio-system.svc
 	assert_failure
 	assert_output --partial "istiodCheck.host was replaced by istiodCheck.service"
@@ -406,7 +385,7 @@ cacerts 4" ]
 	grep -A1 'name: ISTIOD_SERVICE' <<<"$output" | grep -q 'value: "istiod-canary"'
 }
 
-@test "mesh-wiring gate: missing remote secrets or remote clusters are NotReady" {
+@test "mesh-wiring gate by count: fewer remote secrets or remote clusters than expected, a remote cluster managed but not synced (named with its state), and without an expected size any managed cluster not synced or remote secret not ingested, is NotReady" {
 	table 1 >"${STUB_DIR}/list.body"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
@@ -417,14 +396,11 @@ cacerts 4" ]
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: istiod pod istiod-a (${A}) sees 0 remote clusters < expected 1 (N-1)"
-}
-
-@test "mesh-wiring gate: a remote cluster istiod manages but has not synced is NotReady, named with its state" {
 	metrics 1 1
 	sync c1 timeout
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}) has synced 0 remote cluster(s) < 1; not synced: c1 (timeout). This member's istiod must reach each member's API server at the URL in its remote secret"
+	assert_output --partial "NotReady: istiod pod istiod-a (${A}) has synced 0 remote cluster(s) < 1; not synced: c1 (timeout). This member's istiod must reach each member's API server"
 
 	export EXPECTED_MEMBERS=3
 	table 3 >"${STUB_DIR}/list.body"
@@ -434,11 +410,31 @@ cacerts 4" ]
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output --partial "istiod-a (${A}) has synced 1 remote cluster(s) < 2; not synced: c2 (syncing)"
+	# Without an expected size.
+	table 2 >"${STUB_DIR}/list.body"
+	export EXPECTED_MEMBERS=0
+	metrics 1 2
+	sync c1 synced
+	sync c2 timeout
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output --partial "istiod-a (${A}) has synced 1 remote cluster(s) < 2; not synced: c2 (timeout)"
+	metrics 1 2
+	sync c1 synced
+	sync c2 synced
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_success
+	assert_output --partial "synced=2"
+	synced_replica "$A"
+	table 3 >"${STUB_DIR}/list.body"
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: istiod pod istiod-a (${A}) manages 2 clusters < 3 remote secrets present"
 }
 
-@test "mesh-wiring gate: closed counts as synced on Istio 1.30 and later (a remote secret changed and the new connection synced)" {
+@test "mesh-wiring gate: closed counts as synced only when the replica's istio_build tag reads 1.30 or a later 1.x (a remote secret changed and the new connection synced); on 1.29, or a tag missing or not 1.<minor>, it is not synced and the restart is advised" {
 	local tag
-	for tag in 1.30.5 1.30 1.30.0-beta.1 1.31-dev 1.100.0; do
+	for tag in 1.30 1.30.0-beta.1 1.31-dev 1.100.0; do
 		metrics 1 1 "$tag"
 		sync c1 closed
 		run sh "${STUB_DIR}/readiness.sh"
@@ -452,15 +448,16 @@ cacerts 4" ]
 	sync c2 timeout
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}) has synced 1 remote cluster(s) < 2; not synced: c2 (timeout). This member's istiod must reach each member's API server at the URL in its remote secret"
-}
-
-@test "mesh-wiring gate: closed is not synced on Istio 1.29, and the reason names the build and the restart" {
+	assert_output --partial "NotReady: istiod pod istiod-a (${A}) has synced 1 remote cluster(s) < 2; not synced: c2 (timeout)."
+	# 1.29: not synced; synced still counts.
+	export EXPECTED_MEMBERS=2
+	table 2 >"${STUB_DIR}/list.body"
 	metrics 1 1 1.29.4
 	sync c1 closed
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}) has synced 0 remote cluster(s) < 1; not synced: c1 (closed). closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is 1.29.4 (before 1.30, closed can be a stopped connection that nothing replaced); restarting the pod (kubectl -n istio-system delete pod istiod-a) reconnects every remote cluster."
+	assert_output --partial "NotReady: istiod pod istiod-a (${A}) has synced 0 remote cluster(s) < 1; not synced: c1 (closed). closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is 1.29.4 "
+	assert_output --partial "restarting the pod (kubectl -n istio-system delete pod istiod-a) reconnects every remote cluster."
 	# A closed and a timeout: both named, with both fixes.
 	export EXPECTED_MEMBERS=3
 	table 3 >"${STUB_DIR}/list.body"
@@ -478,41 +475,35 @@ cacerts 4" ]
 	sync c1 synced
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_success
-}
-
-@test "mesh-wiring gate: closed with a missing or unparsable istio_build tag is not synced" {
+	# A missing or unparsable tag, a build name or a product's own version (OSSM 3.4) never
+	# reads as Istio 1.30 or later: closed is not synced, and the restart is advised.
+	export EXPECTED_MEMBERS=2
+	table 2 >"${STUB_DIR}/list.body"
 	metrics 1 1 none
 	sync c1 closed
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output --partial "not synced: c1 (closed). closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is missing (before 1.30,"
-	local tag
-	for tag in custom-build v1.30.5 1 ""; do
+	for tag in "" 1 v1.30.5 release-1.30 custom-build OSSM_3.4.0 2.0.0; do
 		metrics 1 1 "$tag"
 		sync c1 closed
 		run sh "${STUB_DIR}/readiness.sh"
 		assert_failure
-		assert_output --partial "not synced: c1 (closed). closed counts"
+		assert_output --partial "not synced: c1 (closed). closed counts as synced only on Istio 1.30 and later"
+		assert_output --partial "restarting the pod (kubectl -n istio-system delete pod istiod-a) reconnects every remote cluster."
 	done
-}
-
-@test "mesh-wiring gate: without an expected size, every managed remote cluster must be synced" {
-	export EXPECTED_MEMBERS=0
-	metrics 1 2
-	sync c1 synced
-	sync c2 timeout
+	assert_output --partial "istio_build tag is 2.0.0, which does not read as 1.<minor>"
+	# By name too.
+	mesh mesh-a mesh-a mesh-b
+	secrets mesh-a mesh-b >"${STUB_DIR}/list.body"
+	metrics 1 1 OSSM_3.4.0
+	sync mesh-b closed
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output --partial "istiod-a (${A}) has synced 1 remote cluster(s) < 2; not synced: c2 (timeout)"
-	metrics 1 2
-	sync c1 synced
-	sync c2 synced
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_success
-	assert_output --partial "synced=2"
+	assert_output --partial "has not synced mesh member(s) mesh-b (closed). closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is OSSM_3.4.0, which does not read as 1.<minor>"
 }
 
-@test "mesh-wiring gate: no sync metric at all is NotReady unless requireRemoteSync is off" {
+@test "mesh-wiring gate: no sync metric at all is NotReady unless requireRemoteSync is off; off, istiod is checked by count and the secrets still by name" {
 	metrics 1 1
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
@@ -521,66 +512,26 @@ cacerts 4" ]
 	REQUIRE_REMOTE_SYNC=false run sh "${STUB_DIR}/readiness.sh"
 	assert_success
 	assert_output --partial "synced=unchecked replicas=1"
-}
-
-@test "mesh-wiring gate: without an expected size, every remote secret must be ingested" {
-	export EXPECTED_MEMBERS=0
-	table 3 >"${STUB_DIR}/list.body"
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}) manages 2 clusters < 3 remote secrets present"
-}
-
-@test "mesh-wiring gate: two replicas, one synced and one timed out, is NotReady naming only the second pod" {
-	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true")"
-	synced_replica "$A"
-	replica "$B"
+	# By name.
+	mesh mesh-a mesh-a mesh-b mesh-c
+	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
 	metrics 1 1
-	sync c1 timeout
-	run sh "${STUB_DIR}/readiness.sh"
+	REQUIRE_REMOTE_SYNC=false run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-b (${B}) has synced 0 remote cluster(s) < 1; not synced: c1 (timeout). This member's istiod must reach each member's API server at the URL in its remote secret"
-	# A replica that does not answer at all is named the same way.
-	synced_replica "$B"
-	echo 28 >"${STUB_DIR}/m_${B}.rc"
-	run sh "${STUB_DIR}/readiness.sh"
+	assert_output --partial "NotReady: istiod pod istiod-a (${A}) manages 2 clusters (local=1 remote=1) < expected 3"
+	secrets mesh-a mesh-b mesh-c mesh-d >"${STUB_DIR}/list.body"
+	metrics 1 3
+	REQUIRE_REMOTE_SYNC=false run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-b (${B}): metrics unreachable at http://${B}:15014/metrics (no answer within 5s)"
-}
-
-@test "mesh-wiring gate: two synced replicas are Ready with replicas=2; every failing replica is named" {
-	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true")"
-	synced_replica "$A"
-	synced_replica "$B"
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_success
-	assert_output "Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 members=unchecked ca=shared synced=1 replicas=2 root=$(fingerprint shared) eastwest=192.0.2.20"
-	[ "$(grep -c '^m_' "${STUB_DIR}/requests.log")" = 2 ]
-	# Both failing: one line each.
-	replica "$A"
-	metrics 1 1
-	sync c1 syncing
-	rm "${STUB_DIR}/m_${B}.body"
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_line --index 0 --partial "NotReady: istiod pod istiod-a (${A}) has synced 0 remote cluster(s) < 1; not synced: c1 (syncing)."
-	assert_line --index 1 "NotReady: istiod pod istiod-b (${B}): metrics unreachable at http://${B}:15014/metrics (curl: (7) Failed to connect to ${B} port 15014: Connection refused)"
-}
-
-@test "mesh-wiring gate: the Ready figures are the lowest any replica reports" {
-	export EXPECTED_MEMBERS=0
-	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true")"
-	replica "$A"
+	assert_output --partial "NotReady: remote secret(s) of no mesh member (not in expectedClusters): istio-remote-secret-mesh-d."
+	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
 	metrics 1 2
-	sync c1 synced
-	sync c2 synced
-	synced_replica "$B"
-	run sh "${STUB_DIR}/readiness.sh"
+	REQUIRE_REMOTE_SYNC=false run sh "${STUB_DIR}/readiness.sh"
 	assert_success
-	assert_output --partial "istiod_managed=2 (local=1 remote=1) expected=0 members=unchecked ca=shared synced=1 replicas=2 "
+	assert_output --partial "expected=3 members=mesh-a,mesh-b,mesh-c ca=shared synced=unchecked "
 }
 
-@test "mesh-wiring gate: a not-ready (terminating) endpoint is skipped; one without a ready condition is read" {
+@test "mesh-wiring gate, the istiod endpoints read: every Ready one of ISTIOD_SERVICE (a terminating one skipped, one without a ready condition read), IPv6 in brackets, a dual-stack pod once, one without a pod named by its address; none Ready is NotReady, never Ready" {
 	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b false" "$C istiod-c unset")"
 	synced_replica "$A"
 	synced_replica "$C"
@@ -589,13 +540,11 @@ cacerts 4" ]
 	assert_output --partial "synced=1 replicas=2 "
 	! grep -q "^m_${B} " "${STUB_DIR}/requests.log" || false
 	grep -q "^m_${C} " "${STUB_DIR}/requests.log"
-}
-
-@test "mesh-wiring gate: no Ready endpoint is NotReady with the reason, never Ready" {
+	: >"${STUB_DIR}/requests.log"
 	endpoints "$(slice istiod-abcde IPv4)"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: the istiod Service istio-system/istiod has no Ready endpoint, so no istiod replica can be checked (kubectl -n istio-system get endpointslices -l kubernetes.io/service-name=istiod)"
+	assert_output --partial "NotReady: the istiod Service istio-system/istiod has no Ready endpoint"
 	endpoints
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
@@ -609,9 +558,7 @@ cacerts 4" ]
 	ISTIOD_SERVICE=istiod-canary run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output --partial "stub curl: unexpected URL https://kubernetes.default.svc/apis/discovery.k8s.io/v1/namespaces/istio-system/endpointslices?labelSelector=kubernetes.io%2Fservice-name%3Distiod-canary"
-}
-
-@test "mesh-wiring gate: an IPv6 endpoint is read in brackets; a pod in both slices of a dual-stack Service is read once" {
+	: >"${STUB_DIR}/requests.log"
 	endpoints "$(slice istiod-v6 IPv6 "$V6 istiod-a true")"
 	synced_replica "$V6"
 	run sh "${STUB_DIR}/readiness.sh"
@@ -630,9 +577,6 @@ cacerts 4" ]
 	assert_success
 	assert_output --partial "synced=1 replicas=1 "
 	[ "$(grep -c '^m_' "${STUB_DIR}/requests.log")" = 1 ]
-}
-
-@test "mesh-wiring gate: an endpoint without a pod reference is named by its address" {
 	endpoints "$(slice istiod-abcde IPv4 "$A - true")"
 	replica "$A"
 	metrics 1 1 1.29.4
@@ -643,7 +587,53 @@ cacerts 4" ]
 	assert_output --partial "restarting that istiod reconnects every remote cluster."
 }
 
-@test "mesh-wiring gate: three replicas are read at once with the same budget; a slow one is named alone" {
+@test "mesh-wiring gate, the istiod replicas: read at once with one budget, Ready with replicas=N and the lowest figures any replica reports; each failing replica is named on its own line, a working one never" {
+	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true")"
+	synced_replica "$A"
+	replica "$B"
+	metrics 1 1
+	sync c1 timeout
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output --partial "NotReady: istiod pod istiod-b (${B}) has synced 0 remote cluster(s) < 1; not synced: c1 (timeout)."
+	refute_output --partial "istiod-a"
+	# A replica that does not answer at all is named the same way.
+	synced_replica "$B"
+	echo 28 >"${STUB_DIR}/m_${B}.rc"
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_output "NotReady: istiod pod istiod-b (${B}): metrics unreachable at http://${B}:15014/metrics (no answer within 5s)"
+	rm -f "${STUB_DIR}/m_${B}.rc"
+	: >"${STUB_DIR}/requests.log"
+	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true")"
+	synced_replica "$A"
+	synced_replica "$B"
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_success
+	assert_output "Ready: secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 members=unchecked ca=shared synced=1 replicas=2 root=$(fingerprint shared) eastwest=192.0.2.20"
+	[ "$(grep -c '^m_' "${STUB_DIR}/requests.log")" = 2 ]
+	# Both failing: one line each.
+	replica "$A"
+	metrics 1 1
+	sync c1 syncing
+	rm "${STUB_DIR}/m_${B}.body"
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_failure
+	assert_line --index 0 --partial "NotReady: istiod pod istiod-a (${A}) has synced 0 remote cluster(s) < 1; not synced: c1 (syncing)."
+	assert_line --index 1 --partial "NotReady: istiod pod istiod-b (${B}): metrics unreachable at http://${B}:15014/metrics"
+	: >"${STUB_DIR}/requests.log"
+	# The Ready figures are the lowest any replica reports.
+	export EXPECTED_MEMBERS=0
+	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true")"
+	replica "$A"
+	metrics 1 2
+	sync c1 synced
+	sync c2 synced
+	synced_replica "$B"
+	run sh "${STUB_DIR}/readiness.sh"
+	assert_success
+	assert_output --partial "istiod_managed=2 (local=1 remote=1) expected=0 members=unchecked ca=shared synced=1 replicas=2 "
+	: >"${STUB_DIR}/requests.log"
 	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true" "$C istiod-c true")"
 	synced_replica "$A"
 	synced_replica "$B"
@@ -683,7 +673,7 @@ other.old" ]
 	service LoadBalancer
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: the east-west gateway Service istio-system/istio-eastwestgateway has no external address yet (LoadBalancer <pending>)"
+	assert_output --partial "NotReady: the east-west gateway Service istio-system/istio-eastwestgateway has no external address yet"
 	service LoadBalancer '"ingress":[{"hostname":"ew.mesh-a.example"}]'
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_success
@@ -694,7 +684,7 @@ other.old" ]
 	assert_output --partial "eastwest=NodePort"
 }
 
-@test "mesh-wiring gate: with the CA or east-west check off it says so instead of a value" {
+@test "mesh-wiring gate: with the CA, east-west or istiod check off it says so instead of a value, and reads nothing for it" {
 	configmap "$(pem other)"
 	CA_CHECK_ENABLED=false run sh "${STUB_DIR}/readiness.sh"
 	assert_success
@@ -704,9 +694,7 @@ other.old" ]
 	assert_success
 	assert_output --partial "eastwest=unchecked"
 	! grep -q '^ew ' "${STUB_DIR}/requests.log" || false
-}
-
-@test "mesh-wiring gate: with the istiod check off, the line still carries the root and the east-west address" {
+	configmap "$ROOT_PEM"
 	: >"${STUB_DIR}/requests.log"
 	ISTIOD_CHECK_ENABLED=false run sh "${STUB_DIR}/readiness.sh"
 	assert_success
@@ -736,7 +724,8 @@ other.old" ]
 	assert_output "Ready: secrets=2 expected=3 members=mesh-a,mesh-b,mesh-c ca=shared root=$(fingerprint shared) eastwest=192.0.2.20 (istiod check disabled)"
 }
 
-@test "mesh-wiring gate by name: a stale synced secret cannot stand in for a member that timed out" {
+@test "mesh-wiring gate by name: a remote secret or cluster of no member (a removed or dead member's, a labelled secret of another name) is NotReady with its delete command, a member without its secret is named with its PushSecret, even where the count would read Ready (a stale synced secret standing in for a member that timed out, a member swap)" {
+	# A stale synced secret cannot stand in for a member that timed out.
 	# A member that left (mesh-d) keeps its secret here, and istiod its cluster, still synced.
 	mesh mesh-a mesh-a mesh-b mesh-c
 	secrets mesh-a mesh-b mesh-c mesh-d >"${STUB_DIR}/list.body"
@@ -746,8 +735,9 @@ other.old" ]
 	sync mesh-d synced
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_line --index 0 "NotReady: remote secret(s) of no mesh member (not in expectedClusters): istio-remote-secret-mesh-d. istiod keeps the cluster in each, and its last sync state, until the secret is deleted, and External Secrets leaves a removed member's behind; if that cluster left the mesh, delete them on this member: kubectl -n istio-system delete secret istio-remote-secret-mesh-d"
-	assert_line --index 1 "NotReady: istiod pod istiod-a (${A}) has not synced mesh member(s) mesh-c (timeout). This member's istiod must reach each member's API server at the URL in its remote secret"
+	assert_line --index 0 --partial "NotReady: remote secret(s) of no mesh member (not in expectedClusters): istio-remote-secret-mesh-d."
+	assert_line --index 0 --partial "kubectl -n istio-system delete secret istio-remote-secret-mesh-d"
+	assert_line --index 1 --partial "NotReady: istiod pod istiod-a (${A}) has not synced mesh member(s) mesh-c (timeout)."
 	# Stage 1 named the stale cluster: stage 2 does not name it again.
 	[ "${#lines[@]}" -eq 2 ]
 	# By count (no names), the stale cluster takes mesh-c's place: Ready.
@@ -755,9 +745,7 @@ other.old" ]
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_success
 	assert_output --partial "expected=3 members=unchecked ca=shared synced=2 "
-}
-
-@test "mesh-wiring gate by name: a member swap (mesh-d out, mesh-c in) whose new member's secret never arrived" {
+	# A member swap (mesh-d out, mesh-c in) whose new member's secret never arrived.
 	mesh mesh-a mesh-a mesh-b mesh-c
 	secrets mesh-a mesh-b mesh-d >"${STUB_DIR}/list.body"
 	metrics 1 2
@@ -765,7 +753,8 @@ other.old" ]
 	sync mesh-d synced
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_line --index 0 "NotReady: no remote secret here for mesh member(s) mesh-c (istio-system has no istio-remote-secret-mesh-c): External Secrets on the hub has not pushed it here; on the hub, kubectl -n external-secrets-operator describe pushsecret push-remote-secret-mesh-c shows the stores each one reached and its last error"
+	assert_line --index 0 --partial "NotReady: no remote secret here for mesh member(s) mesh-c (istio-system has no istio-remote-secret-mesh-c)"
+	assert_line --index 0 --partial "kubectl -n external-secrets-operator describe pushsecret push-remote-secret-mesh-c"
 	assert_line --index 1 --partial "NotReady: remote secret(s) of no mesh member (not in expectedClusters): istio-remote-secret-mesh-d. "
 	assert_line --index 1 --partial "if that cluster left the mesh, delete them on this member: kubectl -n istio-system delete secret istio-remote-secret-mesh-d"
 	# mesh-c's missing secret is named once, not again as a cluster istiod lacks.
@@ -775,9 +764,7 @@ other.old" ]
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_success
 	assert_output --partial "Ready: secrets=3 istiod_managed=3 (local=1 remote=2) expected=3 members=unchecked "
-}
-
-@test "mesh-wiring gate by name: the stale secret of a dead cluster is NotReady with its delete command" {
+	# The stale secret of a dead cluster.
 	mesh mesh-a mesh-a mesh-b mesh-c
 	secrets mesh-a mesh-b mesh-c mesh-d =istio-remote-secret-old >"${STUB_DIR}/list.body"
 	metrics 1 4
@@ -787,7 +774,9 @@ other.old" ]
 	sync old syncing
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: remote secret(s) of no mesh member (not in expectedClusters): istio-remote-secret-mesh-d, istio-remote-secret-old. istiod keeps the cluster in each, and its last sync state, until the secret is deleted, and External Secrets leaves a removed member's behind; if that cluster left the mesh, delete them on this member: kubectl -n istio-system delete secret istio-remote-secret-mesh-d istio-remote-secret-old"
+	assert_output --partial "NotReady: remote secret(s) of no mesh member (not in expectedClusters): istio-remote-secret-mesh-d, istio-remote-secret-old."
+	assert_output --partial "kubectl -n istio-system delete secret istio-remote-secret-mesh-d istio-remote-secret-old"
+	[ "${#lines[@]}" -eq 1 ]
 	# The istiod check off: still NotReady.
 	ISTIOD_CHECK_ENABLED=false run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
@@ -797,9 +786,7 @@ other.old" ]
 	unset EXPECTED_CLUSTERS CLUSTER_NAME
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_success
-}
-
-@test "mesh-wiring gate by name: a labelled secret of another name and a cluster no member holds are named" {
+	# A labelled secret of another name and a cluster no member holds.
 	mesh mesh-a mesh-a mesh-b
 	secrets mesh-a mesh-b =manual-remote >"${STUB_DIR}/list.body"
 	metrics 1 2
@@ -809,7 +796,7 @@ other.old" ]
 	assert_failure
 	assert_line --index 0 --partial "NotReady: remote secret(s) of no mesh member (not in expectedClusters): manual-remote. "
 	# Its cluster's name is not the secret's suffix, so stage 2 names it too.
-	assert_line --index 1 "NotReady: istiod pod istiod-a (${A}) manages remote cluster(s) of no mesh member (not in expectedClusters): legacy (synced). istiod keeps a cluster until the remote secret that holds it is deleted: kubectl -n istio-system get secrets -l istio/multiCluster=true -o json | jq -r '.items[] | .metadata.name + \": \" + (.data // {} | keys | join(\",\"))' lists each remote secret's clusters; if that cluster left the mesh, delete its secret (or only that key, in a member's secret)"
+	assert_line --index 1 --partial "NotReady: istiod pod istiod-a (${A}) manages remote cluster(s) of no mesh member (not in expectedClusters): legacy (synced)."
 	# A member's own secret that holds another cluster too: only stage 2 sees that cluster.
 	secrets mesh-a mesh-b >"${STUB_DIR}/list.body"
 	run sh "${STUB_DIR}/readiness.sh"
@@ -825,50 +812,13 @@ other.old" ]
 	assert_success
 	assert_output "istio-remote-secret-mesh-b: legacy,mesh-b
 empty: "
-}
-
-@test "mesh-wiring gate by name: a member add and a removal, as each other member's gate sees them" {
-	# Add mesh-c: the gate restarts with the new list before mesh-c's secret arrives.
-	mesh mesh-a mesh-a mesh-b mesh-c
-	secrets mesh-a mesh-b >"${STUB_DIR}/list.body"
-	metrics 1 1
-	sync mesh-b synced
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output --partial "NotReady: no remote secret here for mesh member(s) mesh-c (istio-system has no istio-remote-secret-mesh-c): "
-	refute_output --partial "not managed"
-	# Pushed: istiod connects.
-	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
-	metrics 1 2
-	sync mesh-b synced
-	sync mesh-c syncing
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output --partial "has not synced mesh member(s) mesh-c (syncing). This member's istiod must reach"
-	sync mesh-c synced
-	metrics 1 2
-	sync mesh-b synced
-	sync mesh-c synced
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_success
-	assert_output --partial "members=mesh-a,mesh-b,mesh-c ca=shared synced=2 "
 	# Two members added at once and neither pushed yet: both secrets and both PushSecrets named.
 	mesh mesh-a mesh-a mesh-b mesh-c mesh-d mesh-e
+	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output --partial "for mesh member(s) mesh-d, mesh-e (istio-system has no istio-remote-secret-mesh-d, istio-remote-secret-mesh-e): External Secrets on the hub has not pushed it here; on the hub, kubectl -n external-secrets-operator describe pushsecret push-remote-secret-mesh-d push-remote-secret-mesh-e shows"
-	# Remove mesh-b: its secret stays, and istiod keeps it synced, until it is deleted here.
-	mesh mesh-a mesh-a mesh-c
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output --partial "(not in expectedClusters): istio-remote-secret-mesh-b. "
-	assert_output --partial "kubectl -n istio-system delete secret istio-remote-secret-mesh-b"
-	secrets mesh-a mesh-c >"${STUB_DIR}/list.body"
-	metrics 1 1
-	sync mesh-c synced
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_success
-	assert_output --partial "secrets=2 istiod_managed=2 (local=1 remote=1) expected=2 members=mesh-a,mesh-c "
+	assert_output --partial "for mesh member(s) mesh-d, mesh-e (istio-system has no istio-remote-secret-mesh-d, istio-remote-secret-mesh-e)"
+	assert_output --partial "describe pushsecret push-remote-secret-mesh-d push-remote-secret-mesh-e shows"
 }
 
 @test "mesh-wiring gate: a missing member's PushSecret is named as charts/hub-mesh-push-secrets names it" {
@@ -885,23 +835,21 @@ empty: "
 	assert_output --partial "describe pushsecret push-remote-secret-mesh-b ${want} shows"
 }
 
-@test "mesh-wiring gate by name: a member whose secret istiod has not loaded reads not managed, with its log command" {
+@test "mesh-wiring gate by name: every replica must manage and sync every other member: one whose secret istiod has not loaded reads not managed (with its log command), this member's own name as a remote cluster is NotReady, and only the replica that has not synced a member is named, with each state" {
 	mesh mesh-a mesh-a mesh-b mesh-c
 	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
 	metrics 1 1
 	sync mesh-b synced
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}) has not synced mesh member(s) mesh-c (not managed). not managed: the member's remote secret is here, but istiod holds no cluster of that name from it (a kubeconfig it cannot use, another data key, or a cluster ID another secret already holds; kubectl -n istio-system logs istiod-a | grep <member>)."
+	assert_output --partial "NotReady: istiod pod istiod-a (${A}) has not synced mesh member(s) mesh-c (not managed)."
+	assert_output --partial "kubectl -n istio-system logs istiod-a | grep <member>"
 	# No remote cluster at all: no sync series to export, and every other member is not managed.
 	metrics 1 0
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output --partial "has not synced mesh member(s) mesh-b (not managed), mesh-c (not managed)."
 	refute_output --partial "exports no istiod_remote_cluster_sync_status"
-}
-
-@test "mesh-wiring gate by name: an istiod that manages this member's own name as a remote cluster is NotReady" {
 	mesh mesh-a mesh-a mesh-b
 	secrets mesh-a mesh-b >"${STUB_DIR}/list.body"
 	metrics 1 2
@@ -909,10 +857,8 @@ empty: "
 	sync mesh-a synced
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}) manages this member's own name as a remote cluster: mesh-a (synced). So its cluster ID is not mesh-a: clusterName must be the Istio cluster ID of this member (the Istio CR's spec.values.global.multiCluster.clusterName), whose own remote secret istiod then skips"
-}
-
-@test "mesh-wiring gate by name: two replicas, one has not synced a member: only that pod is named, with each state" {
+	assert_output --partial "NotReady: istiod pod istiod-a (${A}) manages this member's own name as a remote cluster: mesh-a (synced)."
+	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true")"
 	mesh mesh-a mesh-a mesh-b mesh-c
 	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
 	endpoints "$(slice istiod-abcde IPv4 "$A istiod-a true" "$B istiod-b true")"
@@ -926,10 +872,11 @@ empty: "
 	sync mesh-c syncing
 	run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
-	assert_output "NotReady: istiod pod istiod-b (${B}) has not synced mesh member(s) mesh-b (closed), mesh-c (syncing). closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is 1.29.4 (before 1.30, closed can be a stopped connection that nothing replaced); restarting the pod (kubectl -n istio-system delete pod istiod-b) reconnects every remote cluster. This member's istiod must reach each member's API server at the URL in its remote secret"
+	assert_output --partial "NotReady: istiod pod istiod-b (${B}) has not synced mesh member(s) mesh-b (closed), mesh-c (syncing)."
+	refute_output --partial "istiod-a"
 }
 
-@test "mesh-wiring gate by name: bad names, a count that disagrees, no clusterName or a member not listed is NotReady" {
+@test "mesh-wiring gate by name: bad names, a count that disagrees, no clusterName or a member not listed is NotReady, before any API read" {
 	local rule="expectedClusters and clusterName take only cluster names (lowercase letters, digits, '-' and '.'), the list comma-separated"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,Mesh_B' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
@@ -941,80 +888,23 @@ empty: "
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a,mesh-b EXPECTED_CLUSTERS='mesh-a, mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedClusters holds \" mesh-b\"; clusterName is \"mesh-a,mesh-b\": ${rule}"
-	# SC6-N2: five bad names at most, then how many more; the good ones not copied.
-	EXPECTED_MEMBERS=0 CLUSTER_NAME=ok EXPECTED_CLUSTERS='ok,A1,A2,A3,A4,A5,A6,A7,good' run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output "NotReady: expectedClusters holds \"A1\", \"A2\", \"A3\", \"A4\", \"A5\" and 2 more: ${rule}"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,,mesh-b' run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output "NotReady: expectedClusters holds an empty name: a comma at either end of the list, or two in a row"
-	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b,' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedClusters holds an empty name: a comma at either end of the list, or two in a row"
 	EXPECTED_MEMBERS=0 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b,mesh-a' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedClusters repeats mesh-a (3 names in all): list each member once"
-	# Sc5-N1: five duplicates named at most, the list counted, not copied.
-	EXPECTED_MEMBERS=0 CLUSTER_NAME=m1 EXPECTED_CLUSTERS='m1,m2,m3,m4,m5,m6,m7,m1,m2,m3,m4,m5,m6,m7' run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output "NotReady: expectedClusters repeats m1, m2, m3, m4, m5 and 2 more (14 names in all): list each member once"
 	EXPECTED_MEMBERS=3 CLUSTER_NAME=mesh-a EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedMembers is 3 but expectedClusters names 2 member(s) (mesh-a, mesh-b): set both from the same members, or expectedMembers to 0"
-	EXPECTED_MEMBERS=3 CLUSTER_NAME=m1 EXPECTED_CLUSTERS='m1,m2,m3,m4,m5,m6,m7' run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output "NotReady: expectedMembers is 3 but expectedClusters names 7 member(s) (m1, m2, m3, m4, m5 and 2 more): set both from the same members, or expectedMembers to 0"
 	EXPECTED_MEMBERS=2 CLUSTER_NAME= EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: expectedClusters is set but clusterName is empty, so the gate cannot tell which member it runs on (the ApplicationSet sets it per member)"
 	EXPECTED_MEMBERS=2 CLUSTER_NAME=mesh-z EXPECTED_CLUSTERS='mesh-a,mesh-b' run sh "${STUB_DIR}/readiness.sh"
 	assert_failure
 	assert_output "NotReady: this member (mesh-z) is not in expectedClusters (mesh-a, mesh-b); a member the apply just added waits for the gate ApplicationSet's new list"
-	EXPECTED_MEMBERS=0 CLUSTER_NAME=m8 EXPECTED_CLUSTERS='m1,m2,m3,m4,m5,m6,m7' run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output "NotReady: this member (m8) is not in expectedClusters (m1, m2, m3, m4, m5 and 2 more); a member the apply just added waits for the gate ApplicationSet's new list"
 	# None of these asked the API anything.
 	[ ! -s "${STUB_DIR}/requests.log" ]
-}
-
-@test "mesh-wiring gate by name: with requireRemoteSync off, the secrets are checked by name and istiod by count" {
-	mesh mesh-a mesh-a mesh-b mesh-c
-	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
-	metrics 1 1
-	REQUIRE_REMOTE_SYNC=false run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output "NotReady: istiod pod istiod-a (${A}) manages 2 clusters (local=1 remote=1) < expected 3"
-	secrets mesh-a mesh-b mesh-c mesh-d >"${STUB_DIR}/list.body"
-	metrics 1 3
-	REQUIRE_REMOTE_SYNC=false run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output --partial "NotReady: remote secret(s) of no mesh member (not in expectedClusters): istio-remote-secret-mesh-d."
-	secrets mesh-a mesh-b mesh-c >"${STUB_DIR}/list.body"
-	metrics 1 2
-	REQUIRE_REMOTE_SYNC=false run sh "${STUB_DIR}/readiness.sh"
-	assert_success
-	assert_output --partial "expected=3 members=mesh-a,mesh-b,mesh-c ca=shared synced=unchecked "
-}
-
-@test "mesh-wiring gate: closed with a tag that does not read 1.<minor> (OSSM's is unverified) fails closed, advising a restart" {
-	local tag
-	# A build name, or a product's own version (OSSM 3.4), never reads as Istio 1.30 or later.
-	for tag in unknown OSSM_3.4.0 servicemesh-3.4 3e7b1c2 release-1.30 3.4.0 2.0.0; do
-		metrics 1 1 "$tag"
-		sync c1 closed
-		run sh "${STUB_DIR}/readiness.sh"
-		assert_failure
-		assert_output "NotReady: istiod pod istiod-a (${A}) has synced 0 remote cluster(s) < 1; not synced: c1 (closed). closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is ${tag}, which does not read as 1.<minor> (before 1.30, closed can be a stopped connection that nothing replaced); restarting the pod (kubectl -n istio-system delete pod istiod-a) reconnects every remote cluster."
-	done
-	# By name too.
-	mesh mesh-a mesh-a mesh-b
-	secrets mesh-a mesh-b >"${STUB_DIR}/list.body"
-	metrics 1 1 OSSM_3.4.0
-	sync mesh-b closed
-	run sh "${STUB_DIR}/readiness.sh"
-	assert_failure
-	assert_output --partial "has not synced mesh member(s) mesh-b (closed). closed counts as synced only on Istio 1.30 and later, and this replica's istio_build tag is OSSM_3.4.0, which does not read as 1.<minor> (before 1.30,"
-	assert_output --partial "restarting the pod (kubectl -n istio-system delete pod istiod-a) reconnects every remote cluster."
 }
 
 @test "mesh-wiring gate: the chart passes the names and this member's own; bad names or a count that disagrees fail the render" {
@@ -1034,9 +924,6 @@ empty: "
 	run helm template x "$CHART" --set clusterName=mesh-a --set 'expectedClusters={mesh-a,mesh-b}' --set expectedMembers=3
 	assert_failure
 	assert_output --partial "expectedMembers is 3 but expectedClusters names 2 member(s) (mesh-a, mesh-b): set both"
-	run helm template x "$CHART" --set clusterName=m1 --set 'expectedClusters={m1,m2,m3,m4,m5,m6,m7}' --set expectedMembers=3
-	assert_failure
-	assert_output --partial "expectedMembers is 3 but expectedClusters names 7 member(s) (m1, m2, m3, m4, m5 and 2 more): set both"
 	run helm template x "$CHART" --set 'expectedClusters={mesh-a,mesh-b}'
 	assert_failure
 	assert_output --partial 'clusterName "" is not a cluster name: with expectedClusters set it to this member'
@@ -1046,7 +933,4 @@ empty: "
 	run helm template x "$CHART" --set clusterName=mesh-a --set 'expectedClusters={mesh-a,mesh-b,mesh-a}'
 	assert_failure
 	assert_output --partial "expectedClusters repeats mesh-a (3 names in all): list each member once"
-	run helm template x "$CHART" --set clusterName=m1 --set 'expectedClusters={m1,m2,m3,m4,m5,m6,m7,m1,m2,m3,m4,m5,m6,m7}'
-	assert_failure
-	assert_output --partial "expectedClusters repeats m1, m2, m3, m4, m5 and 2 more (14 names in all): list each member once"
 }

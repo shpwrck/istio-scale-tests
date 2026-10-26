@@ -29,18 +29,22 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE          Run config of KEY=value lines (config/options.env keys; see
-                         tests/dataplane/README.md, "Run config"). Precedence: flag >
-                         --config > environment > default.
+Deletes the '$NS' namespace on every context and waits for it to go.
+
+  --config FILE          Run config of KEY=value lines (config/options.env keys).
+                         Precedence: flag > --config > environment > default.
   --contexts CSV         Kube contexts to clean up (default: \$SETUP_CONTEXTS).
   --dry-run              Print the delete commands without contacting any cluster.
   --no-wait-deletion     Return once the delete is accepted (default: wait).
   --deletion-timeout N   Seconds to wait for namespace termination (default: $DELETION_TIMEOUT).
   -h, --help             Show this help.
 
-Environment:
-  SETUP_CONTEXTS, DATAPLANE_TEST_NAMESPACE,
-  DATAPLANE_NS_DELETE_TIMEOUT_SEC (--deletion-timeout default, 180).
+Environment (config/options.env describes each): SETUP_CONTEXTS, DATAPLANE_TEST_NAMESPACE,
+DATAPLANE_NS_DELETE_TIMEOUT_SEC.
+
+Exit codes: 0 cleaned up (or printed); 1 an error, a timeout or an unreachable context.
+
+See tests/dataplane/README.md.
 EOF
 }
 

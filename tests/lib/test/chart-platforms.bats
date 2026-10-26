@@ -33,27 +33,20 @@ overlay_charts() {
 	done
 }
 
-@test "charts: every chart with a values-openshift.yaml renders with its defaults and with the overlay" {
-	local c n=0
-	while IFS= read -r c; do
-		helm template t "$c" "${MEMBER[@]}" >/dev/null || { echo "${c#"$ROOT"/}: the kubernetes (default) render fails"; false; }
-		helm template t "$c" -f "${c}/values-openshift.yaml" "${MEMBER[@]}" >/dev/null || { echo "${c#"$ROOT"/}: the openshift render fails"; false; }
-		n=$((n + 1))
-	done < <(overlay_charts)
-	((n >= 15)) || { echo "only $n charts have a values-openshift.yaml"; false; }
-}
-
-@test "charts: the Kubernetes render of every platform-neutral chart never names OpenShift" {
-	local c name out
+@test "charts: every chart with a values-openshift.yaml renders with its defaults and with the overlay, and the default (kubernetes) render of a platform-neutral one never names OpenShift" {
+	local c n=0 name out
 	while IFS= read -r c; do
 		name="$(basename "$c")"
+		out="$(helm template t "$c" "${MEMBER[@]}")" || { echo "${c#"$ROOT"/}: the kubernetes (default) render fails"; false; }
+		helm template t "$c" -f "${c}/values-openshift.yaml" "${MEMBER[@]}" >/dev/null || { echo "${c#"$ROOT"/}: the openshift render fails"; false; }
+		n=$((n + 1))
 		[[ "$OPENSHIFT_ONLY_CHARTS" != *" ${name} "* ]] || continue
-		out="$(helm template t "$c" "${MEMBER[@]}")"
 		if grep -in openshift <<<"$out"; then
 			echo "${c#"$ROOT"/}: its default (kubernetes) render names OpenShift (above)"
 			false
 		fi
 	done < <(overlay_charts)
+	((n >= 15)) || { echo "only $n charts have a values-openshift.yaml"; false; }
 }
 
 # appset_render <preset> <platform>: the ApplicationSet chart with the preset and the overlay.

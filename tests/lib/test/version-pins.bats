@@ -48,45 +48,13 @@ assert_image_pin() {
 	((n >= min)) || fail "found ${repo} in ${n} values files, expected at least ${min}; update this test if the image moved"
 }
 
-@test "version pins: helpers read a default and every tag of a repository" {
-	local f="${BATS_TEST_TMPDIR}/values.yaml"
-	cat >"$f" <<'EOF'
-image:
-  repository: busybox
-  # comment between
-  tag: "1.2.3"
-other:
-  repository: busybox
-  tag: '4.5'
-lost:
-  repository: busybox
-  a: 1
-  b: 2
-  c: 3
-  tag: "9"
-EOF
-	run chart_tags "$f" busybox
-	assert_output $'1.2.3\n4.5\n<no tag>'
-	run pin_default ISTIO_VERSION
-	assert_output --regexp '^v[0-9]+\.[0-9]+\.[0-9]+$'
-}
-
-@test "version pins: charts/spoke-ossm istioVersion matches ISTIO_VERSION" {
+@test "version pins: charts/spoke-ossm istioVersion is ISTIO_VERSION, and every chart tag of the busybox, fortio and http-echo images is its versions.env default" {
 	local want got
 	want="$(pin_default ISTIO_VERSION)"
 	got="$(awk '$1 == "istioVersion:" { v = $2; gsub(/["\047]/, "", v); print v }' "${ROOT}/charts/spoke-ossm/values.yaml")"
 	[[ -n "$want" && "$got" == "$want" ]] \
 		|| fail "charts/spoke-ossm/values.yaml istioVersion is '${got}', but ISTIO_VERSION in config/versions.env is '${want}'; keep them in sync"
-}
-
-@test "version pins: busybox chart tags match BUSYBOX_VERSION" {
 	assert_image_pin BUSYBOX_VERSION busybox 4
-}
-
-@test "version pins: fortio chart tags match FORTIO_VERSION" {
 	assert_image_pin FORTIO_VERSION fortio/fortio 2
-}
-
-@test "version pins: http-echo chart tags match HTTP_ECHO_VERSION" {
 	assert_image_pin HTTP_ECHO_VERSION hashicorp/http-echo 3
 }

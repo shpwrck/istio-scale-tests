@@ -89,8 +89,12 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE            Run config of KEY=value lines (config/options.env keys; see
-                           tests/dataplane/README.md, "Run config").
+Checks that every target answers (reach-<RUN_ID>.tsv), then runs fortio load from the source
+context's client pod against the local and each remote server at every QPS level, one TSV
+row per target and level (status OK, UNREACHABLE, FAILED, PERCENTILE_MISSING,
+ERROR_RATE_HIGH or QPS_SHORTFALL).
+
+  --config FILE            Run config of KEY=value lines (config/options.env keys).
                            Precedence: flag > --config > environment > default.
   --source-context CTX     Kube context for the fortio client (required).
   --remote-contexts CSV    Remote cluster contexts (comma-separated).
@@ -100,70 +104,27 @@ Usage: $(basename "$0") [options]
   --connections N          Concurrent connections (default: $CONNECTIONS).
   --settle SEC             Seconds to sleep before probing (default: $SETTLE_SEC).
   --warmup-duration SEC    Envoy upstream warmup duration, 0 to disable (default: $WARMUP_DURATION).
-  --min-qps-ratio R        Tag a row QPS_SHORTFALL when actual QPS < R x target QPS;
-                           a decimal in (0,1] (default: $MIN_QPS_RATIO).
-  --on-unreachable POLICY  warn: record a remote the reach check cannot reach and go
-                           on; fail: stop before any load when a remote is
-                           UNREACHABLE or UNKNOWN, exit 3 (default: $ON_UNREACHABLE).
-  --reach-requests N       Requests per target in the reach check; 0 turns it off
-                           (default: $REACH_REQUESTS).
+  --min-qps-ratio R        QPS_SHORTFALL below R x target QPS, R in (0,1] (default: $MIN_QPS_RATIO).
+  --on-unreachable POLICY  warn, or fail: stop before any load, exit 3 (default: $ON_UNREACHABLE).
+  --reach-requests N       Requests per target in the reach check; 0 = off (default: $REACH_REQUESTS).
   --output-dir DIR         Results directory (default: ${DATAPLANE_RESULTS_DIR}).
-  --tuning-baseline STR    Live tuning-baseline levers for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
-  --sidecar-egress-hosts STR  Live root-Sidecar egress hosts for the TSV preamble
-                           (default: unknown; the sweep queries + threads this).
+  --tuning-baseline STR    Tuning levers for the preamble (default: unknown; a sweep sets it).
+  --sidecar-egress-hosts STR  Root Sidecar egress hosts for the preamble (default: unknown;
+                           a sweep sets it).
   --dry-run                Show plan without executing.
   -h, --help               Show this help.
 
-Reach check: after the settle and before the warmup, the client sends
---reach-requests requests to every target and writes reach-<RUN_ID>.tsv
-(reach_status REACHABLE, DEGRADED, UNREACHABLE or UNKNOWN per target, re-checked
-up to REACH_ATTEMPTS times). An UNREACHABLE remote skips its warmup and load.
+Environment (config/options.env describes each): DATAPLANE_TEST_NAMESPACE and the flags'
+DATAPLANE_* keys, DATAPLANE_MIN_PCT_200 (ERROR_RATE_HIGH below it; default $MIN_PCT_200),
+DATAPLANE_RESULTS_DIR (relative to the repo root), REACH_REQUESTS, REACH_QPS,
+REACH_HTTP_TIMEOUT_SEC, REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC,
+REACH_ON_UNREACHABLE, METRICS_SCRAPE_TIMEOUT, FANOUT_*, ISTIOD_DIAG_*, TEST_PLATFORM,
+PLATFORM_READ_TIMEOUT, PLATFORM_READ_PARALLEL; FORTIO_VERSION (config/versions.env).
+Environment only: ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC.
 
-istiod restarts are detected on every context by port-forwarding each Running
-istiod pod before and after the load runs (process_start_time_seconds or a
-changed pod set -> istiod_restarted=1 on every row).
+Exit codes: 0 the rows were written; 1 an error; 3 --on-unreachable fail stopped the run.
 
-Row status (TSV column 'status'), first match wins:
-  UNREACHABLE         the reach check got no HTTP 200 from this remote; no load ran
-  FAILED              the fortio exec failed
-  PERCENTILE_MISSING  p50/p90/p99/p99.9 missing from the fortio JSON
-  ERROR_RATE_HIGH     share of HTTP 200s below DATAPLANE_MIN_PCT_200 (default: $MIN_PCT_200),
-                      or no responses at all
-  QPS_SHORTFALL       actual QPS below --min-qps-ratio x target QPS (target not delivered)
-  OK
-The report counts only OK rows with istiod_restarted=0 as valid. The console line
-of each row also shows ret_codes (HTTP code=count; -1 is a socket error).
-Under --on-unreachable fail a stopped run also writes one STOPPED_UNREACHABLE row
-(target_class=na), so the report says why the local baseline is missing.
-
-The load runs in the fortio client pod, not in the kubectl exec that starts it. A load
-whose exec failed (a FAILED row, or a failed warmup) may run on there, so the probe
-waits until its --duration (--warmup-duration for the warmup) and 5 s more have passed
-before going on, unless the client pod is gone (deleted, or evicted and Failed: then no
-load runs). When the probe ends during a load (a stop, Ctrl-C), it deletes the client
-pod, so the load ends with it; the pod's Deployment starts a new one, which a sweep
-started right after waits for (its setup 001 waits until the Deployments are Available).
-Run by hand, the probe loads only a Ready client pod that is not being deleted, and
-stops when there is none: run 001, or wait until the new pod is Ready.
-
-Exit status: 0, 1 on an error, 3 when --on-unreachable fail stopped the run.
-
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
-  DATAPLANE_TEST_NAMESPACE, DATAPLANE_QPS_LEVELS, DATAPLANE_DURATION_SEC,
-  DATAPLANE_NUM_CONNECTIONS, DATAPLANE_SETTLE_SEC, DATAPLANE_WARMUP_DURATION_SEC,
-  DATAPLANE_MIN_QPS_RATIO, DATAPLANE_MIN_PCT_200,
-  REACH_REQUESTS, REACH_QPS, REACH_HTTP_TIMEOUT_SEC, REACH_DETAIL_TIMEOUT_SEC,
-  REACH_ATTEMPTS, REACH_RETRY_SEC,
-  REACH_ON_UNREACHABLE,
-  FORTIO_VERSION, METRICS_SCRAPE_TIMEOUT (istiod /metrics curl timeout, default 30),
-  DATAPLANE_RESULTS_DIR (--output-dir; relative to the repo root).
+See tests/dataplane/README.md.
 EOF
 }
 
@@ -304,10 +265,9 @@ TSV_FILE="${OUTPUT_DIR}/latency-${RUN_ID}.tsv"
 REACH_TSV="${OUTPUT_DIR}/reach-${RUN_ID}.tsv"
 
 # Resolve metadata for preamble.
-# harness_read (tests/lib/common.sh): HARNESS_SHA (a harness with uncommitted changes reads
-# <describe>-dirty.<8hex>) and HARNESS_CONTENT_KEY from one read; this probe's own results
-# do not count.
-harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
+# harness_sha (tests/lib/common.sh): a harness with uncommitted changes reads
+# <describe>-dirty.<8hex>; this probe's own results do not count.
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 FORTIO_IMAGE="${FORTIO_IMAGE_REPO}:${FORTIO_TAG}"
 
 if ((DRY_RUN)); then
@@ -395,7 +355,6 @@ trap cleanup_all EXIT
 	echo "# RUN_ID=${RUN_ID}"
 	echo "# DATE=$(date -u -Iseconds)"
 	echo "# HARNESS_SHA=${HARNESS_SHA}"
-	echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 	istio_version_kv | sed 's/^/# /'
 	echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 	echo "# FORTIO_IMAGE=${FORTIO_IMAGE}"
@@ -506,8 +465,8 @@ declare -A REACH_STATUS=() REACH_PCT=()
 for rctx in "${ALL_CTXS[@]}"; do REACH_STATUS["$rctx"]=UNCHECKED; REACH_PCT["$rctx"]=N/A; done
 if ((REACH_REQUESTS > 0)); then
 	echo "Checking reachability of every target (${REACH_REQUESTS} requests each; details on stderr)..."
-	if reach_write_header "$REACH_TSV" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
-		"HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}" "SUITE=dataplane" \
+	if reach_write_header "$REACH_TSV" --contexts "$(IFS=,; echo "${ALL_CTXS[*]}")" "RUN_ID=${RUN_ID}" "HARNESS_SHA=${HARNESS_SHA}" \
+		"SUITE=dataplane" \
 		"NAMESPACE=${NS}" "ON_UNREACHABLE=${ON_UNREACHABLE}" \
 		&& reach_check_all "$REACH_TSV" "$RUN_ID" "$RUN_ID" "$MESH_SIZE" "$NS" "$CLIENT_POD" \
 			"$URL_TEMPLATE" "$SOURCE_CTX" "$REMOTE_CONTEXTS_CSV" "${KUBECTL[@]}"; then

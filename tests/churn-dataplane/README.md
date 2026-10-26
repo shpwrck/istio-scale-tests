@@ -112,36 +112,21 @@ what it would do without changing the clusters.
 
 For each mesh size (default `1..N`; the first context is the source) the sweep deploys
 once, then for each rate and repetition resets the churn targets to base (after the
-first), runs the baseline and churn windows, and finally cleans up. It writes one TSV,
-`sweep-summary-<run-id>.md` and `sweep-charts-<run-id>.md` to
+first) and settles `--inter-combo-settle` (15 s, also the gap between mesh sizes), runs the
+baseline and churn windows, and finally cleans up. A rate is whole scale operations per second;
+`0` runs the churn window on a steady mesh, a check that it reports what the baseline does. It
+writes one TSV, `sweep-summary-<run-id>.md` and `sweep-charts-<run-id>.md` to
 `tests/churn-dataplane/results/sweep-<run-id>/`. More than 64 combinations needs
 `--force-large-matrix`.
 
-Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition, such as
-another live run that holds the sweep dir, named with its PID in `.sweep.lock`, or an unexpected
-error); `130`, `143` or `129` it was interrupted (Ctrl-C, SIGTERM, SIGHUP; `sweep-outcome.txt` says
-when and by which signal; a signal sent to the sweep's process alone stops the running step and
-every process under it first, `SWEEP_STOP_GRACE_SEC` (30 s) before SIGKILL; a `kill -INT` or
-`kill -HUP` skips the processes of a sweep in a terminal's foreground, so stop such a sweep from
-elsewhere with SIGTERM; without a `ps` that lists start times or Linux's `/proc`, only the step's
-own process is stopped; see the top-level README); `3` the reachability gate stopped it
-(`--on-unreachable fail`, below; the reports are written); `4` it finished and wrote its reports,
-but some combinations failed (`SETUP_FAILED`, `RESET_FAILED` or `PROBE_FAILED` rows), or the Istio
-version, active revision or generation of the Istio CR or its active IstioRevision changed during
-the sweep (read again before the reports), or that check failed, or its harness (a file under
-`tests/`, `config/`, `charts/` or `terraform/`, `HARNESS_SHA`) changed during the sweep (read again
-before its steps, by each step and at its end). The last line on stderr says how many, by reason;
-`3` wins over `4`. `sweep-outcome.txt` in the sweep dir and the end of the markdown summary keep the
-outcome. From the sweep's start until it writes its outcome, `sweep-outcome.txt` holds a
-not-finished record (`EXIT=unfinished`, `STARTED_AT`, `RUN_ID`, `HARNESS_SHA`,
-`HARNESS_CONTENT_KEY`, and what to do), so a report of a sweep that died, or still runs, or (with
-when and by which signal) was interrupted says "this sweep has not finished" in every format (json
-`sweep_outcome`: `"exit": null`, `"unfinished": true`; a finished one reads `"unfinished": false`;
-one that stopped on an error after its start records the stop and its reason instead, `STOPPED=1`
-and `CUT_SHORT=1`, see the top-level README): when no sweep runs any more, run the sweep again into
-a new dir (a churn-dataplane sweep has no `--resume`); the rows already in the dir cover only the
-cells it finished. Proxies connected on another Istio version than their istiod at the start
-(`ISTIO_PROXY_VERSIONS`) are a note of the outcome, never a failure.
+Exit codes: `0` every combination ran; `1` the sweep stopped (a bad flag or precondition, or an
+unexpected error); `3` the reachability gate stopped it (`--on-unreachable fail`, below; the reports
+are written); `4` it finished and wrote its reports, but some combinations failed (`SETUP_FAILED`,
+`RESET_FAILED` or `PROBE_FAILED` rows), or it recorded a problem; `130`, `143` or `129` it was
+interrupted. `3` wins over `4`. What each records in `sweep-outcome.txt`, and the problems every
+sweep checks: [How a sweep ends](../../README.md#how-a-sweep-ends). When a sweep did not finish and
+no sweep runs any more, run `006-cleanup.sh --contexts <the sweep's members> --wait-deletion`, then
+run the sweep again into a new dir; the rows already in the dir cover only the cells it finished.
 
 ## Remote reachability
 
@@ -217,19 +202,9 @@ averaged: the report shows the worst bucket range a valid run's p99 hit (e.g. `5
 `overflow (N runs)` when N runs had their p99 in the `+Inf` bucket; csv and json carry it as
 `churn_convergence_p99_worst` and `churn_convergence_overflow_runs`. JSON row values are numbers,
 with `null` for `N/A`. Every format carries the inputs' preamble, each key merged over the files
-(`HARNESS_SHA`: the harness that measured the rows), and `REPORT_HARNESS_SHA` (json and frontmatter
-`report_harness_sha`), the harness the report itself ran on: a report made again later, or from
-another checkout, may count rows by other rules. The results dir it reads never counts as a change
-to that harness. `HARNESS_CONTENT_KEY` (json and frontmatter `harness_content_key`; `unknown` for a
-TSV written before it) is the content key of the harness files the rows ran on: inputs whose
-`HARNESS_SHA` differs but that share one key differ only in git describe (a commit or tag that left
-the harness files as they were), not in the harness. Each row also records the harness its probe ran
-(`harness_sha`; a sweep's TSV preamble keeps the sweep's start): when a TSV's rows record more than
-one, or another than its preamble's `HARNESS_SHA` (the harness, or only the commit name git
-describe gives, changed during the sweep: rows record no content key to tell the two apart),
-`HARNESS_SHA` reads `mixed:`, `HARNESS_CONTENT_KEY` adds `unknown` (a row records no key), and a
-warning in every format (json `data_warnings`) names the combos whose baseline and churn rows ran
-different harnesses (their `Δp99` pairs the two). md and charts start with a YAML frontmatter of
+(`HARNESS_SHA`: the harness that measured the rows; `mixed:<a>,<b>` when the inputs ran on more
+than one, with a warning in every format, json `data_warnings`). Each row also records the harness
+its probe ran (`harness_sha`). md and charts start with a YAML frontmatter of
 those keys, lowercase as in the json `metadata`.
 
 ### Comparing with earlier sweeps
@@ -242,30 +217,17 @@ validity stricter. To compare against those sweeps without the stricter rule, se
 `COEXEC_MIN_PCT_200=0`. Their TSVs have no `MIN_PCT_200` line and no reach file, so the
 report shows `unknown` and "no reachability data".
 
-Every TSV preamble also carries the platform record
-([`tests/lib/platform.sh`](../lib/platform.sh)): `PLATFORM`, `TEST_PLATFORM` and, per member, the
-platform it serves, the mesh operator, istiod and gateway proxy (ingress and east-west) builds,
-istiod's settings, the nodes' provider and any tuning profile objects (`PLATFORM_BY_CONTEXT`,
-`MESH_OPERATOR_BY_CONTEXT`, `ISTIOD_IMAGE_BY_CONTEXT`, `PROXY_IMAGE_BY_CONTEXT`,
-`NODE_PROVIDER_BY_CONTEXT`, `ISTIOD_ENV_BY_CONTEXT`: a digest of istiod's discovery container env
-without `CLUSTER_ID`; `TUNING_OBJECTS_BY_CONTEXT`: `none` outside a tuning run), read before the
-baseline window (a sweep reads it once for all its combos and hands it to them in
-`platform-record.txt` in the sweep dir, and reads it again after the last one: a build, istiod
-setting, tuning lever, tuning profile object, Kubernetes version or the source member's count of
-Running istiod pods (`ISTIOD_REPLICAS`, recorded at a probe's start) that changed in between is
-written to `platform-drift.txt` there, as is what that read could not compare). An image carries
-the digest its pods run (`@unknown` when none has started: not read, never another build); `none`
-means no such pod. The sweep's reach file records every member the sweep covers. `005` prints the
-record in every format, with a warning in the report itself (the top-level `warnings` array in json,
-empty without one) when its inputs differ, a value could not be read in some of them, the sweep's
-record changed or a tuning profile's objects were in place (an operator that differs only in its
-state is not a difference). On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node
-provider could not be read, every format also warns that the cross-cluster path runs (or may run)
-through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer) on the host the
-kind clusters share, so at mesh sizes above 1 latency under churn is not a cloud load balancer's;
-k3d (`k3s://`) and minikube clusters that share one host are not detected. Sweeps recorded before
-the record have none of these lines (the suite supported only OpenShift with OSSM then), and the
-report reads their values as `unknown`.
+Every TSV preamble also carries the [platform record](../../README.md#the-platform-record),
+read before the baseline window (a sweep reads it once for all its combos, and again after the last
+one). `005` prints it in every format, with a warning in the report itself (the top-level `warnings`
+array in json, empty without one) when its inputs differ or a value could not be read in some of
+them. On kind nodes (`NODE_PROVIDER_BY_CONTEXT`), or when a member's node provider could not be
+read, every format also warns that the cross-cluster path runs (or may run) through
+cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer) on the host the kind
+clusters share, so at mesh sizes above 1 latency under churn is not a cloud load balancer's; k3d
+(`k3s://`) and minikube clusters that share one host are not detected. Sweeps recorded before the
+record have none of these lines (the suite supported only OpenShift with OSSM then), and the report
+reads their values as `unknown`.
 
 ## Run config (`--config FILE`)
 

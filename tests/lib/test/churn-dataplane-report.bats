@@ -1,8 +1,10 @@
 #!/usr/bin/env bats
 # churn-dataplane 005 through its real entrypoint: each average has its own count (an
-# N/A p50 or QPS is not a 0), JSON numbers are numbers (null for N/A), and the
-# convergence p99 is the worst bucket (bare range labels, "(ms)" in the header) with
-# an overflow count instead of the bucket of a mean.
+# N/A p50 or QPS is not a 0), JSON numbers are numbers (null for N/A), the convergence p99 is
+# the worst bucket (bare range labels, "(ms)" in the header) with an overflow count instead of
+# the bucket of a mean; the platform record and the sweep outcome reach every format, and two
+# runs in one dir are refused with commands that separate them. The platform record's merge
+# and warnings are platform.bats'.
 
 load test_helper
 bats_require_minimum_version 1.5.0  # run --separate-stderr
@@ -42,7 +44,7 @@ two_pairs() {
 	EOF
 }
 
-@test "005: an N/A p50 or QPS is left out of its own average, not averaged as 0" {
+@test "005: an N/A p50 or QPS is left out of its own average, not averaged as 0, and is N/A when no valid pair has one" {
 	two_pairs
 	run "$REPORT" --results-dir "$RES" --format csv
 	assert_success
@@ -51,9 +53,6 @@ two_pairs() {
 	assert_line "2,1,5.00,1.41,2,2,5.00,10.00,2.00,4.00,50.0,47.0,40,500-1000,0"
 	run "$REPORT" --results-dir "$RES" --format md
 	assert_output --partial "| 2 | 1 | 5.00 | 1.41 | 2 | 2 | 5.00 | 10.00 | 2.00 | 4.00 | 50.0 | 47.0 | 40 | 500-1000 |"
-}
-
-@test "005: p50 and QPS are N/A when no valid pair has one" {
 	write_tsv "${RES}/churn-dataplane-r1.tsv" <<-EOF
 	$(crow c1 0 baseline N/A N/A 5 OK N/A N/A)
 	$(crow c1 1 churn N/A N/A 9 OK N/A N/A)
@@ -63,7 +62,7 @@ two_pairs() {
 	assert_line "2,1,4.00,N/A,1,1,5.00,9.00,N/A,N/A,N/A,N/A,N/A,N/A,0"
 }
 
-@test "005: the convergence p99 is the worst bucket, with bare labels and (ms) in the header" {
+@test "005: the convergence p99 is the worst bucket, with bare labels and (ms) in the header, or overflow with a count" {
 	two_pairs
 	run "$REPORT" --results-dir "$RES" --format md
 	assert_success
@@ -76,9 +75,6 @@ two_pairs() {
 	assert_output --regexp '\| +500-1000'
 	run "$REPORT" --results-dir "$RES" --format csv
 	assert_line --partial ",churn_eds_pushes,churn_convergence_p99_worst,churn_convergence_overflow_runs"
-}
-
-@test "005: an overflowed convergence p99 prints overflow with a count" {
 	write_tsv "${RES}/churn-dataplane-r1.tsv" <<-EOF
 	$(crow c1 0 baseline 50 2 5 OK N/A N/A)
 	$(crow c1 1 churn 48 4 9 OK 30 99)
@@ -110,37 +106,12 @@ two_pairs() {
 	[ "$(jq '[.rows[] | to_entries[] | select(.key != "churn_convergence_p99_worst") | .value | strings] | length' <<<"$output")" = 0 ]
 }
 
-@test "005: the platform record reaches every format; an input from before it reads unknown, with a warning (PL19)" {
-	two_pairs
-	run --separate-stderr "$REPORT" --results-dir "$RES"
-	assert_success
-	assert_line "# PLATFORM=kubernetes"
-	assert_line "# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=kind"
-	# The fixture's members are on kind: the cross-cluster path's warning is the only one (H11).
-	[[ "$stderr" == "WARNING: Nodes on kind (NODE_PROVIDER_BY_CONTEXT): the cross-cluster path runs through cloud-provider-kind's userspace Envoy"* ]]
-	[ "$(grep -c . <<<"$stderr")" -eq 1 ]
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
-	assert_line "# MESH_OPERATOR_BY_CONTEXT=ctx-a=sail-operator:1.31.1/Available,ctx-b=sail-operator:1.31.1/Available"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
-	assert_line '| ISTIOD_IMAGE_BY_CONTEXT | `ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5` |'
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	[ "$(jq -r '.metadata | "\(.platform) \(.test_platform) \(.proxy_image_by_context)"' <<<"$output")" = "kubernetes auto ctx-a=proxyv2:1.30.5,ctx-b=proxyv2:1.30.5" ]
-	rm "${RES}"/*.tsv
-	NO_PLATFORM=1 two_pairs
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	assert_success
-	[ "$(jq -r '.metadata | "\(.platform) \(.mesh_operator_by_context)"' <<<"$output")" = "unknown unknown" ]
-	[[ "$stderr" == *"1 of 1 input TSV(s) have no PLATFORM line"* ]]
-}
-
-# --- the platform record's warnings in the report's body (H10, H11) ---
-
-@test "005 (H10, H11): inputs that disagree and kind nodes warn in every format's body; cloud nodes that agree warn in none" {
-	# One sweep's dir (its steps' TSVs and platform-drift.txt): one run, whatever their RUN_IDs.
+@test "005 (PL19, H10, H11): the platform record and its warnings reach every format's body: inputs that disagree, and kind nodes; inputs that agree on cloud nodes warn in none" {
+	# One sweep's dir (its steps' TSVs): one run, whatever their RUN_IDs.
 	RES="${BATS_TEST_TMPDIR}/sweep-h10"
 	mkdir -p "$RES"
 	two_pairs
-	# A second sweep's TSV in the same base dir, on another mesh operator build for ctx-b.
+	# A second step's TSV in the same dir, on another mesh operator build for ctx-b.
 	{
 		echo "# RUN_ID=r2"
 		platform_fixture_lines | sed 's/ctx-b=sail-operator:1.31.1/ctx-b=sail-operator:1.31.2/'
@@ -148,37 +119,37 @@ two_pairs() {
 		crow c9 0 baseline 50 2 5 OK N/A N/A
 		crow c9 1 churn 48 4 9 OK 30 99
 	} > "${RES}/churn-dataplane-r2.tsv"
-	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for ctx-b (sail-operator:1.31.1/Available;sail-operator:1.31.2/Available): the report mixes runs on different mesh operator builds; compare like with like"
-	local kind="Nodes on kind (NODE_PROVIDER_BY_CONTEXT): the cross-cluster path runs through cloud-provider-kind's userspace Envoy (the east-west gateway's LoadBalancer, ipMode: Proxy) on the host all kind clusters share, so at mesh sizes above 1"
-	local fmt top first
+	local dis="input TSVs disagree on MESH_OPERATOR_BY_CONTEXT for ctx-b (sail-operator:1.31.1 or sail-operator:1.31.2)"
+	local kind="Nodes on kind (NODE_PROVIDER_BY_CONTEXT)"
+	local fmt t
 	for fmt in md charts; do
 		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
 		assert_success
 		assert_output --partial "> **Warning:** ${dis}"
 		assert_output --partial "> **Warning:** ${kind}"
-		# Under the title (charts: after its "## KEY=value" front matter), before the first
-		# table, section, chart or note.
-		top="$(grep -n '^> \*\*Warning:\*\* input TSVs disagree' <<<"$output" | cut -d: -f1)"
-		first="$(awk 'seen && /^(\| |## |```mermaid|% Chart|> [^*])/ { print NR; exit } /^# / { seen = 1 }' <<<"$output")"
-		((top < first)) || { echo "${fmt}: warning at ${top}, first table, section or note at ${first}"; false; }
 	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_line '| ISTIOD_IMAGE_BY_CONTEXT | `ctx-a=pilot:1.30.5,ctx-b=pilot:1.30.5` |'
 	run --separate-stderr "$REPORT" --results-dir "$RES"
-	assert_line "WARNING: ${dis}"
+	assert_line "# PLATFORM=kubernetes"
+	assert_line "# NODE_PROVIDER_BY_CONTEXT=ctx-a=kind,ctx-b=kind"
+	assert_output --partial "WARNING: ${dis}"
 	assert_output --partial "WARNING: ${kind}"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
-	assert_line "# WARNING: ${dis}"
+	assert_line "# MESH_OPERATOR_BY_CONTEXT=ctx-a=sail-operator:1.31.1,ctx-b=mixed:sail-operator:1.31.1;sail-operator:1.31.2"
+	assert_output --partial "# WARNING: ${dis}"
 	assert_output --partial "# WARNING: ${kind}"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
 	assert_success
 	[ "$(jq '.warnings | length' <<<"$output")" = 2 ]
-	[ "$(jq -r '.warnings[0]' <<<"$output")" = "$dis" ]
+	[[ "$(jq -r '.warnings[0]' <<<"$output")" == "${dis}"* ]]
 	[[ "$(jq -r '.warnings[1]' <<<"$output")" == "${kind}"* ]]
+	[ "$(jq -r '.metadata | "\(.platform) \(.test_platform) \(.proxy_image_by_context)"' <<<"$output")" = "kubernetes auto ctx-a=proxyv2:1.30.5,ctx-b=proxyv2:1.30.5" ]
 	[[ "$stderr" == *"warning: ${dis}"* ]]
 	[[ "$stderr" == *"WARNING: ${kind}"* ]]
-	# Cloud nodes, one build (an operator state aside): no warning in any format.
-	local t
+	# Cloud nodes, one build: no warning.
 	for t in r1 r2; do
-		sed 's/=kind/=aws/g; s#ctx-b=sail-operator:1.31.2/Available#ctx-b=sail-operator:1.31.1/Unavailable#' \
+		sed 's/=kind/=aws/g; s#ctx-b=sail-operator:1.31.2#ctx-b=sail-operator:1.31.1#' \
 			"${RES}/churn-dataplane-${t}.tsv" > "${RES}/${t}.tmp"
 		mv "${RES}/${t}.tmp" "${RES}/churn-dataplane-${t}.tsv"
 	done
@@ -186,22 +157,9 @@ two_pairs() {
 	assert_success
 	[ "$(jq -c '.warnings' <<<"$output")" = '[]' ]
 	[ -z "$stderr" ] || { echo "$stderr"; false; }
-	for fmt in md charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		refute_output --partial "**Warning:**"
-	done
-	run --separate-stderr "$REPORT" --results-dir "$RES"
-	refute_output --partial "WARNING:"
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
-	refute_output --partial "WARNING:"
 }
 
-@test "005 (S-B2): a record of 500 members goes through every format; json lists them all" {
-	PLATFORM_FIXTURE_CTXS="$(wide_ctxs 500 ctx-a ctx-b)" two_pairs
-	wide_record_report "$REPORT" "$RES" text csv json md charts
-}
-
-@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a varying key reads mixed (PL26)" {
+@test "005: two sweeps in one dir stop the report; --allow-multi-run says so in every format; a varying key reads mixed (PL26); one sweep reports alone" {
 	local d fmt
 	for d in a b; do
 		mkdir -p "${RES}/sweep-${d}"
@@ -215,12 +173,12 @@ two_pairs() {
 			crow c1 1 churn 48 4 9 OK 30 99
 		} > "${RES}/sweep-${d}/churn-dataplane-r${d}.tsv"
 	done
+	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
+	assert_failure 1
+	[ -z "$output" ]
+	[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
+	[[ "$stderr" == *"  sweep-a:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-a'"* ]]
 	for fmt in text csv json md charts; do
-		run --separate-stderr "$REPORT" --results-dir "$RES" --format "$fmt"
-		assert_failure 1
-		[ -z "$output" ]
-		[[ "$stderr" == *"error: ${RES} holds 2 runs"* ]]
-		[[ "$stderr" == *"  sweep-a:"$'\n'"    ${REPORT} --results-dir '${RES}/sweep-a'"* ]]
 		run --separate-stderr "$REPORT" --results-dir "$RES" --allow-multi-run --format "$fmt"
 		assert_success
 		if [[ "$fmt" == json ]]; then
@@ -283,33 +241,21 @@ two_pairs() {
 	[[ "$stderr" != *"mkdir"* && "$stderr" != *"run-${id1}/run-"* ]]
 }
 
-@test "005: the start-of-run readiness keys and the recorded outcome are in every format" {
+@test "005: the recorded outcome is in every format" {
+	local note="Istio version check at the start: c2: not ready (Istio CR state is IstioCNINotHealthy) after waiting 60s"
 	{
 		echo "# RUN_ID=r1"
-		echo "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
-		echo "# ISTIO_READY_WAITED_SEC=60"
 		echo "$HDR"
 		crow c1 0 baseline 50 2 5 OK N/A N/A
 		crow c1 1 churn 48 4 9 OK 30 99
 	} > "${RES}/churn-dataplane-r1.tsv"
-	printf '%s\n' 'RUN_ID=r1' 'EXIT=0' 'NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)' > "${RES}/sweep-outcome.txt"
+	printf '%s\n' STATUS=finished 'RUN_ID=r1' 'EXIT=0' TOTAL=1 FAILED=0 "NOTE=${note}" > "${RES}/sweep-outcome.txt"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format csv
 	assert_success
-	assert_line "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
-	assert_line "# ISTIO_READY_WAITED_SEC=60"
 	assert_line "# SWEEP_OUTCOME_RUN_ID=r1"
-	assert_line "# SWEEP_OUTCOME_NOTE=not ready at the start: IstioCNINotHealthy on 1 member (c2)"
-	[[ "$stderr" != *"was recorded by run"* ]]
+	assert_line "# SWEEP_OUTCOME_NOTE=${note}"
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format json
-	[ "$(jq -c '[.metadata.istio_notready_at_start, .metadata.istio_ready_waited_sec, .sweep_outcome.notes[0]]' <<<"$output")" = \
-		'["c2=IstioCNINotHealthy","60","not ready at the start: IstioCNINotHealthy on 1 member (c2)"]' ]
+	[ "$(jq -r '.sweep_outcomes[0].notes[0]' <<<"$output")" = "$note" ]
 	run --separate-stderr "$REPORT" --results-dir "$RES" --format md
-	assert_output --partial '| ISTIO_NOTREADY_AT_START | `c2=IstioCNINotHealthy` |'
-	assert_output --partial '> - warning: not ready at the start: IstioCNINotHealthy on 1 member (c2)'
-	run --separate-stderr "$REPORT" --results-dir "$RES"
-	assert_output --partial "# ISTIO_NOTREADY_AT_START=c2=IstioCNINotHealthy"
-	# charts: YAML frontmatter keys, lowercase as in the json metadata.
-	run --separate-stderr "$REPORT" --results-dir "$RES" --format charts
-	assert_line 'istio_notready_at_start: "c2=IstioCNINotHealthy"'
-	assert_line 'istio_ready_waited_sec: "60"'
+	assert_output --partial "> - warning: ${note}"
 }

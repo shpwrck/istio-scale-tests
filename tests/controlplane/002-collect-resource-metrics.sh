@@ -95,91 +95,55 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE        Run config of KEY=value lines (config/options.env keys; see
-                       tests/controlplane/README.md, "Run config").
+Scrapes istiod on every context over one window and appends a row per istiod pod to
+controlplane-<RUN_ID>.tsv. The workload flags only tag the rows: they must match what 001
+deployed.
+
+  --config FILE        Run config of KEY=value lines (config/options.env keys).
                        Precedence: flag > --config > environment > default.
   --contexts CSV       Kube contexts to scrape (default: \$SETUP_CONTEXTS).
-  --mesh-size N        Metadata tag for TSV output (default: the number of contexts;
-                       at most that, as the reports expect a row per member).
-  --service-count N    Metadata tag for TSV output (default: $SERVICE_COUNT).
-  --replicas N         Metadata tag for TSV output (default: $REPLICAS).
-  --namespace-count N  Metadata tag for TSV output (default: $NAMESPACE_COUNT).
-  --sidecar-scoping M  Metadata tag: none|namespace|wide|explicit (default: $SIDECAR_SCOPING).
-  --traffic-config M   Metadata tag: none|vsdr (default: $TRAFFIC_CONFIG). Must match
-                       what 001 deployed.
-  --vsdr-every N       Metadata tag: 001's --vsdr-every (default: $VSDR_EVERY). With
-                       --service-count it sets the vsdr_services column.
-  --vsdr-subsets N     Metadata tag: 001's --vsdr-subsets (default: $VSDR_SUBSETS).
+  --mesh-size N        Tag, at most the number of contexts (default: that number).
+  --service-count N    Tag (default: $SERVICE_COUNT).
+  --replicas N         Tag (default: $REPLICAS).
+  --namespace-count N  Tag (default: $NAMESPACE_COUNT).
+  --sidecar-scoping M  Tag: none, namespace, wide or explicit (default: $SIDECAR_SCOPING).
+  --traffic-config M   Tag: none or vsdr (default: $TRAFFIC_CONFIG).
+  --vsdr-every N       Tag: 001's --vsdr-every (default: $VSDR_EVERY).
+  --vsdr-subsets N     Tag: 001's --vsdr-subsets (default: $VSDR_SUBSETS).
 
-  Namespace scaling (growth mode; metadata tags, they must match what 001 deployed):
-  --services-per-namespace K  Services per namespace (default: $SERVICES_PER_NAMESPACE; 0 =
-                       legacy layout). K > 0 also reads the gateway and root-cert columns
-                       and the sampled sidecars' Envoy memory.
-  --workload-mode M    pods|config-only (default: $WORKLOAD_MODE).
-  --measurement-pods M config-only measurement pods (default: $MEASUREMENT_PODS).
-  --outside-namespaces X  Namespaces outside the mesh present in the window (default:
-                       $OUTSIDE_NAMESPACES).
-  --outside-mode M     none|unlabeled|labeled (default: $OUTSIDE_MODE).
-  --window-kind K      deploy|grow|probe|outside|traffic: what the window measured
-                       (default: $WINDOW_KIND). deploy = a full deploy (the legacy sweep
-                       and --growth fresh); grow = namespaces added to a series; probe = one
-                       probe namespace onboarded; outside = outside namespaces applied;
-                       traffic = only the VirtualServices/DestinationRules, applied after
-                       the workloads were Ready (003 --vsdr-apply split; none cells: an
-                       idle window over the same workloads).
-  --series ID          Growth series id: the config-dump sampler draws only from its
-                       pods.
+  Namespace scaling (growth mode):
+  --services-per-namespace K  Tag; K > 0 also reads the growth-only columns (default: $SERVICES_PER_NAMESPACE).
+  --workload-mode M    Tag: pods or config-only (default: $WORKLOAD_MODE).
+  --measurement-pods M Tag: config-only measurement pods (default: $MEASUREMENT_PODS).
+  --outside-namespaces X  Tag: namespaces outside the mesh (default: $OUTSIDE_NAMESPACES).
+  --outside-mode M     Tag: none, unlabeled or labeled (default: $OUTSIDE_MODE).
+  --window-kind K      Tag: deploy, grow, probe, outside or traffic (default: $WINDOW_KIND).
+  --series ID          Growth series: /config_dump samples only its pods (default: none).
 
   --config-dump-samples N  Random pods per cluster to exec /config_dump on
                        (default: $CONFIG_DUMP_SAMPLES; 0 disables).
-  --settle SEC         Delta-window length (seconds) between baseline and
-                       final scrape (default: $SETTLE_SEC). Must match the
-                       settle time used by the calling orchestrator.
+  --settle SEC         Window length; with --phase final, the one recorded (default: $SETTLE_SEC).
   --output-dir DIR     Results directory (default: ${CONTROLPLANE_RESULTS_DIR}).
-  --run-id ID          Reuse an existing sweep RUN_ID (writes into sweep-<ID>/). The
-                       report keys a growth series by RUN_ID, mesh size, K and workload,
-                       so give a second series of the same mesh size and K its own ID.
-  --watch              Loop continuously (delta window = --interval).
-  --interval SEC       Seconds between scrapes in watch mode (default: 15).
-  --phase PHASE        Orchestration phase, one of:
-                         combined  baseline + settle + final + emit (default,
-                                   for standalone use)
-                         baseline  scrape baseline metrics only, write to
-                                   --state-dir, exit without emitting a row.
-                                   No settle; caller (003) should invoke 001
-                                   AFTER this so the deploy storm lands inside
-                                   the scrape window.
-                         final     scrape final metrics, read baseline from
-                                   --state-dir, compute deltas, emit one row.
-  --state-dir DIR      Required for --phase baseline (must be empty/writable)
-                       and --phase final (must contain a prior baseline's
-                       output). Used to ferry baseline metrics across the
-                       deploy step in split-phase mode. Ignored for combined.
-  --dry-run            Show what would be scraped without connecting.
+  --run-id ID          Use this RUN_ID (a sweep passes its own; default: a new one).
+  --watch              Loop: one row per --interval window until stopped.
+  --interval SEC       Window length in watch mode (default: 15).
+  --phase PHASE        combined (default; baseline, settle, final), baseline (scrape to
+                       --state-dir, no row) or final (read the baseline, write the rows).
+  --state-dir DIR      Required with --phase baseline (an empty dir) and final (its baseline).
+  --dry-run            Show what would be scraped; contact no cluster.
   -h, --help           Show this help.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  SETUP_CONTEXTS, CONTROLPLANE_SERVICE_COUNT, CONTROLPLANE_REPLICAS_PER_SERVICE,
-  CONTROLPLANE_NAMESPACE_COUNT, CONTROLPLANE_SIDECAR_SCOPING,
-  CONTROLPLANE_TRAFFIC_CONFIG, CONTROLPLANE_VSDR_EVERY, CONTROLPLANE_VSDR_SUBSETS,
-  CONTROLPLANE_CONFIG_DUMP_SAMPLES, CONTROLPLANE_SETTLE_SEC (--settle),
-  CONTROLPLANE_RESULTS_DIR (--output-dir; relative to the repo root),
-  CONTROLPLANE_SERVICES_PER_NAMESPACE, CONTROLPLANE_WORKLOAD_MODE,
-  CONTROLPLANE_MEASUREMENT_PODS, CONTROLPLANE_OUTSIDE_NAMESPACES, CONTROLPLANE_OUTSIDE_MODE.
-  CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT (default 10), CONTROLPLANE_PROXY_CHECK_MIN_DIFF
-  (default 2): proxy_check warns when a cluster's connected proxies (pilot_xds summed
-  over its istiod pods) and its Running sidecar pods differ by more than
-  max(tolerance % of the sidecar pods, min diff). A warning only; rows are kept.
-  ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions are read at once.
+Environment (config/options.env describes each): SETUP_CONTEXTS, the flags' CONTROLPLANE_*
+keys, CONTROLPLANE_SETTLE_SEC, CONTROLPLANE_RESULTS_DIR (relative to the repo root),
+CONTROLPLANE_CONFIG_DUMP_TIMEOUT_S, CONTROLPLANE_PROXY_CHECK_TOLERANCE_PCT,
+CONTROLPLANE_PROXY_CHECK_MIN_DIFF, CONTROLPLANE_LEFTOVER_NS_WARN, SCALE_SIZING_MODE and
+SCALE_TARGET_FRACTION (recorded), METRICS_SCRAPE_TIMEOUT, FANOUT_*, CAP_*, ISTIOD_DIAG_*,
+TEST_PLATFORM, PLATFORM_READ_TIMEOUT, PLATFORM_READ_PARALLEL. Environment only:
+ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC. A live run needs GNU timeout (gtimeout).
 
-Requires GNU timeout for a live run (it bounds each config-dump and Envoy-stats exec;
-on macOS: brew install coreutils, which installs gtimeout). Without it a live run
-stops at startup; --dry-run does not need it.
+Exit codes: 0 the rows were written (or the plan shown); 1 an error.
+
+See tests/controlplane/README.md.
 EOF
 }
 
@@ -406,12 +370,9 @@ if [[ -n "$RUN_ID_OVERRIDE" ]]; then
 else
 	RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
-# The harness (PL2): <describe>, or <describe>-dirty.<8hex> for uncommitted changes, and the
-# content key of its files (HARNESS_CONTENT_KEY), from one read; when (UTC) for the
-# HARNESS_CHANGED_AT line a window may write (harness_change_line).
-HARNESS_SHA="" HARNESS_CONTENT_KEY=""
-harness_read HARNESS_SHA HARNESS_CONTENT_KEY --exclude "$OUTPUT_DIR"
-HARNESS_READ_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# The harness (PL2: harness_sha): <describe>, or <describe>-dirty.<8hex> for uncommitted
+# changes; this probe's own results do not count.
+HARNESS_SHA="$(harness_sha --exclude "$OUTPUT_DIR")"
 
 echo "[002] RUN_ID=$RUN_ID  SETTLE_SEC=$SETTLE_SEC  HARNESS_SHA=$HARNESS_SHA"
 echo "[002] Contexts: ${CONTEXTS[*]}  Mesh: $MESH_SIZE  Services: $SERVICE_COUNT  Replicas: $REPLICAS  Namespaces: $NAMESPACE_COUNT  Scoping: $SIDECAR_SCOPING  ConfigDumpSamples: $CONFIG_DUMP_SAMPLES"
@@ -440,10 +401,8 @@ istio_version_resolve "$(IFS=,; echo "${CONTEXTS[*]}")" 0 "${KUBECTL[@]}"
 KUBE_VERSIONS_CSV="$(probe_kube_versions "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
 
 # The platform record (tests/lib/platform.sh), before any scrape: inherited from 003, else read
-# here. --phase baseline keeps it in the state dir, so --phase final reads nothing in its window.
-[[ "$PHASE" != final ]] || platform_probe_load "${STATE_DIR}/platform-record.tsv"
+# here, by each phase (read-only API GETs, like the version reads above).
 platform_probe "$(IFS=,; echo "${CONTEXTS[*]}")"
-[[ "$PHASE" != baseline ]] || platform_probe_save "${STATE_DIR}/platform-record.tsv"
 
 # Source context's node allocatable + istiod limits for the preamble (read-only;
 # `unknown` on failure). Skipped when no preamble is written: --phase baseline, or a TSV
@@ -497,7 +456,6 @@ if [[ "$PHASE" != baseline && ! -f "$TSV_FILE" ]]; then
 		echo "# CONTROLPLANE_INFRA_SCHEMA=2"
 		istio_version_kv | sed 's/^/# /'
 		echo "# HARNESS_SHA=${HARNESS_SHA}"
-		echo "# HARNESS_CONTENT_KEY=${HARNESS_CONTENT_KEY}"
 		echo "# KUBE_VERSIONS=${KUBE_VERSIONS_CSV}"
 		echo "# SETTLE_SEC=${SETTLE_SEC}"
 		echo "# RUN_ID=${RUN_ID}"
@@ -1458,46 +1416,6 @@ collect_growth_for_ctx() {
 	echo "  Cluster ${ctx}: gateways $(kv_get pods "$kv") (clusters max ${cl}; Envoy allocated max ${mem} Mi, physical max ${phy} Mi; container working set max ${ws} Mi), istio-ca-root-cert ConfigMaps ${rc}, leftover test namespaces ${left}"
 }
 
-# harness_change_line: the "# HARNESS_CHANGED_AT=<UTC Z> HARNESS_SHA=<v> HARNESS_CONTENT_KEY=<k>"
-# line a window writes before its rows when they ran other harness files than the TSV's
-# last record of them: its preamble's HARNESS_SHA and HARNESS_CONTENT_KEY, then each
-# "# RESUMED_AT=" and "# HARNESS_CHANGED_AT=" line. A sweep's TSV keeps the preamble of its
-# start, so without it the rows of a file edited (or a checkout) during the sweep would be
-# credited to the start's harness; controlplane_attempts reads the line as a boundary of the
-# rows' provenance. Compared by content key (harness_same: a commit or tag that left the
-# harness files as they were is no change), by HARNESS_SHA when either key is unknown. A
-# final phase whose baseline (its read in --state-dir) ran other files than it did spans
-# both: its rows go to the baseline's when that differs from the record (and HCL_AFTER, a
-# second line the window writes after its rows, records the final's, which the next
-# window's rows are compared with), else to the final's. Prints nothing when they match;
-# warns when it prints a line.
-HCL_AFTER=""
-harness_change_line() {
-	local rec_s rec_k s="$HARNESS_SHA" k="$HARNESS_CONTENT_KEY" t="$HARNESS_READ_AT" bs="" bk="" bt=""
-	HCL_AFTER=""
-	IFS=$'\t' read -r rec_s rec_k < <(awk '
-		function lv(k,    p, v) { if (!(p = index($0, " " k "="))) return "unknown"; v = substr($0, p + length(k) + 2); sub(/ .*/, "", v); return (v == "" ? "unknown" : v) }
-		/^timestamp\t/ { hdr = 1; next }
-		!/^#/ { next }
-		!hdr && index($0, "# HARNESS_SHA=") == 1 { s = substr($0, 15) }
-		!hdr && index($0, "# HARNESS_CONTENT_KEY=") == 1 { k = substr($0, 23) }
-		index($0, "# RESUMED_AT=") == 1 || index($0, "# HARNESS_CHANGED_AT=") == 1 { s = lv("HARNESS_SHA"); k = lv("HARNESS_CONTENT_KEY") }
-		END { printf "%s\t%s\n", (s == "" ? "unknown" : s), (k == "" ? "unknown" : k) }' "$TSV_FILE" 2>/dev/null) || true
-	if [[ "$PHASE" == final && -f "${STATE_DIR}/harness" ]]; then
-		IFS=$'\t' read -r bs bk bt < "${STATE_DIR}/harness" || true
-		if [[ -n "$bs" && -n "$bk" ]] && ! harness_same "$bs" "$bk" "$s" "$k"; then
-			echo "warning: [002] this window's baseline ran other harness files (HARNESS_SHA=${bs}) than its final scrape (HARNESS_SHA=${s}): a harness file was edited, or a checkout ran, during the window; the TSV records both" >&2
-			if ! harness_same "$bs" "$bk" "${rec_s:-unknown}" "${rec_k:-unknown}"; then
-				HCL_AFTER="$(printf '# HARNESS_CHANGED_AT=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s' "$t" "$s" "$k")"
-				s="$bs" k="$bk" t="${bt:-$t}"
-			fi
-		fi
-	fi
-	harness_same "$s" "$k" "${rec_s:-unknown}" "${rec_k:-unknown}" && return 0
-	echo "warning: [002] these rows ran other harness files than ${TSV_FILE##*/} records (HARNESS_SHA=${rec_s:-unknown}, HARNESS_CONTENT_KEY=${rec_k:-unknown}; now HARNESS_SHA=${s}, HARNESS_CONTENT_KEY=${k}): a HARNESS_CHANGED_AT line before them records it" >&2
-	printf '# HARNESS_CHANGED_AT=%s HARNESS_SHA=%s HARNESS_CONTENT_KEY=%s\n' "$t" "$s" "$k"
-}
-
 # ---------------------------------------------------------------------------
 # Main scrape_window: baseline + final + deltas + emit TSV rows.
 # ---------------------------------------------------------------------------
@@ -1831,16 +1749,14 @@ scrape_window() {
 		local cap_fields="${CAP_CACHE[$dctx]}"; cap_fields="${cap_fields// /$'\t'}"
 		echo -e "${ts}\t${dctx}\t${MESH_SIZE}\t${SERVICE_COUNT}\t${REPLICAS}\t${NAMESPACE_COUNT}\t${SIDECAR_SCOPING}\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\tN/A\t${window_sec}\t${total_skew_ms}\t${settle_input_sec}\tunknown\tN/A\tN/A\tN/A\t${cap_fields}\t$(cluster_fields "$dctx")\t$(traffic_na_fields)\t$(growth_na_fields)" >> "$rows_file"
 	done
-	# One write: a HARNESS_CHANGED_AT line when these rows ran other harness files than the
-	# TSV records, then an ISTIOD_NOT_READY line when an istiod pod was Running but not Ready
-	# at the baseline (<member>=<pod>, one entry per pod, comma-separated: its rows may
-	# include a replica that took no new proxy connection), then an ISTIOD_NOT_READY_AT_END
-	# line in the same form for the scraped pods not Ready at the window's end, then a
-	# WINDOW_ROWS line (each member's row count, and after a / the replicas its istiod
-	# Deployment wanted at the baseline, when read: a report tells a write that was cut from a
-	# member with fewer istiod replicas, CP_CELL_AWK, and a member that ran the cell on fewer
-	# pods than it wants), then the rows, then the final phase's HARNESS_CHANGED_AT line when
-	# it ran other files than the rows are credited to (HCL_AFTER).
+	# One write: an ISTIOD_NOT_READY line when an istiod pod was Running but not Ready at the
+	# baseline (<member>=<pod>, one entry per pod, comma-separated: its rows may include a
+	# replica that took no new proxy connection), then an ISTIOD_NOT_READY_AT_END line in the
+	# same form for the scraped pods not Ready at the window's end, then a WINDOW_ROWS line
+	# (each member's row count, and after a / the replicas its istiod Deployment wanted at the
+	# baseline, when read: a report tells a write that was cut from a member with fewer istiod
+	# replicas, CP_CELL_AWK, and a member that ran the cell on fewer pods than it wants), then
+	# the rows.
 	local win_file="${TMP_DIR}/window" wr_spec="" nr_line="" nre_line="" nrp
 	for ctx in "${!ISTIOD_SPEC[@]}"; do wr_spec+="${ctx}"$'\t'"${ISTIOD_SPEC[$ctx]}"$'\n'; done
 	for ctx in "${CONTEXTS[@]}"; do
@@ -1849,7 +1765,6 @@ scrape_window() {
 	done
 	if [[ -s "$rows_file" ]]; then
 		{
-			harness_change_line
 			[[ -z "$nr_line" ]] || printf '# ISTIOD_NOT_READY=%s\n' "$nr_line"
 			[[ -z "$nre_line" ]] || printf '# ISTIOD_NOT_READY_AT_END=%s\n' "$nre_line"
 			WR_SPEC="$wr_spec" awk -F'\t' '
@@ -1857,7 +1772,6 @@ scrape_window() {
 				{ if (!($2 in n)) o[++k] = $2; n[$2]++ }
 				END { printf "# WINDOW_ROWS="; for (i = 1; i <= k; i++) printf "%s%s=%d%s", (i > 1 ? "," : ""), o[i], n[o[i]], ((o[i] in sp) ? "/" sp[o[i]] : ""); print "" }' "$rows_file"
 			cat "$rows_file"
-			[[ -z "$HCL_AFTER" ]] || printf '%s\n' "$HCL_AFTER"
 		} > "$win_file" || die "could not write the window's rows to ${win_file}"
 		# A write cut short (a full disk, a step killed while it appended) leaves the TSV's
 		# last line without its newline: end it, so these lines do not merge onto it.
@@ -1903,10 +1817,6 @@ elif [[ "$PHASE" == baseline ]]; then
 	echo ""
 	echo "=== Baseline scrape only (phase=baseline) ==="
 	echo "  Writing baseline metrics to $STATE_DIR"
-	# The baseline's harness, for the final's rows (harness_change_line).
-	rm -f "${STATE_DIR}/harness"
-	printf '%s\t%s\t%s\n' "$HARNESS_SHA" "$HARNESS_CONTENT_KEY" "$HARNESS_READ_AT" > "${STATE_DIR}/harness" \
-		|| echo "warning: could not write ${STATE_DIR}/harness: the final phase credits its rows to its own harness only" >&2
 	scrape_all_parallel "${STATE_DIR}/baseline" >/dev/null
 	echo "  Baseline complete. Caller should now deploy workloads, settle, and"
 	echo "  invoke this script again with --phase final --state-dir $STATE_DIR"

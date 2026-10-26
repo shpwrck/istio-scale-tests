@@ -26,7 +26,7 @@ source "${ROOT}/tests/lib/common.sh"
 # Report the failing line on an unexpected abort. Per-combo failures are handled
 # below and recorded as row statuses.
 # sweep_err_trap prints the FATAL line and keeps it as the stop reason a sweep that
-# aborts after its start records (sweep_outcome_on_exit in the EXIT trap).
+# aborts after its start records (the EXIT trap sweep_start sets).
 trap 'sweep_err_trap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # shellcheck disable=SC1091
 source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines, config_snapshot
@@ -81,18 +81,20 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") [options]
 
-  --config FILE             Run config of KEY=value lines (config/options.env keys; see
-                            tests/churn-dataplane/README.md, "Run config"). The steps the
-                            sweep runs inherit it. Precedence: flag > --config >
-                            environment > default.
+For each mesh size: 001 deploys; for each churn rate and repetition, the churn targets are
+reset to base, 002 runs the baseline window and 003 the churn window; 006 cleans up. Then
+the reports, in sweep-<RUN_ID>/ under the output dir.
+
+  --config FILE             Run config of KEY=value lines (config/options.env keys); the
+                            steps inherit it. Precedence: flag > --config > environment >
+                            default.
   --contexts CSV            All available cluster contexts (default: \$SETUP_CONTEXTS).
   --mesh-sizes CSV          Mesh-size dimension (default: ${mesh_sizes_default}).
-  --churn-rates CSV         Churn rate dimension, "deployment scale ops/s" (default: $CHURN_RATES_CSV).
+  --churn-rates CSV         Churn rates, scale ops/s; 0 = a steady mesh (default: $CHURN_RATES_CSV).
   --baseline-duration SEC   Baseline-phase fortio duration (default: $BASELINE_DURATION).
   --churn-duration SEC      Churn-phase fortio + churn duration (default: $CHURN_DURATION).
   --settle-sec N            Pre-window settle delay (default: $SETTLE_SEC).
-  --inter-combo-settle N    Settle gap in seconds (default: $INTER_COMBO_SETTLE_SEC), used between
-                            mesh-sizes and after each reset-to-base between churn rates.
+  --inter-combo-settle N    Settle between mesh sizes and after each reset (default: $INTER_COMBO_SETTLE_SEC).
   --qps N                   Target QPS for both phases (default: $QPS).
   --connections N           Concurrent fortio connections (default: $CONNECTIONS).
   --deployment-count N      Churn-target Deployments per cluster (default: $CHURN_DEPLOYMENT_COUNT_OPT).
@@ -100,77 +102,28 @@ Usage: $(basename "$0") [options]
   --scale-to N              Scale-up replica count, above --base-replicas (default: $CHURN_SCALE_TO_OPT).
   --seed N                  Seed for the deterministic churn order (default: $CHURN_SEED).
   --repetitions N           Probe repetitions per combination (default: $REPETITIONS).
-  --output-dir DIR          Top-level results directory (default: ${COEXEC_RESULTS_DIR}).
-  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC). Also sets
-                            001's wait for the previous mesh-size's namespace to go away,
-                            which is otherwise COEXEC_SETUP_NS_WAIT_SEC (default: $SETUP_NS_WAIT_SEC).
-  --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE). Under
-                            fail, a remote that is UNREACHABLE or UNKNOWN before a baseline
-                            records REMOTE_UNREACHABLE rows for that combo and stops the
-                            sweep after the mesh size's cleanup (exit 3).
-  --reach-requests N        Reach-check requests per target, passed to 002; 0 turns the
-                            check off (default: $REACH_REQUESTS).
+  --output-dir DIR          Results base directory (default: ${COEXEC_RESULTS_DIR}).
+  --ns-delete-timeout SEC   Max wait for namespace deletion (default: $NS_DELETE_TIMEOUT_SEC); also
+                            001's wait for the previous one (else COEXEC_SETUP_NS_WAIT_SEC).
+  --on-unreachable POLICY   warn or fail, passed to 002 (default: $ON_UNREACHABLE).
+  --reach-requests N        Reach-check requests per target (002); 0 = off (default: $REACH_REQUESTS).
   --force-large-matrix      Allow more than $MATRIX_CAP combinations.
   --dry-run                 Print plan only; do not touch clusters.
   -h, --help                Show this help.
 
-Note: \`--churn-rates 0\` (or a CSV element with value 0) is accepted and runs
-the churn phase against a steady mesh — useful as a sanity check that the
-churn phase reports the same numbers as the baseline phase. Rates < 0 are
-rejected.
+Environment (config/options.env describes each): SETUP_CONTEXTS, COEXEC_MESH_SIZES,
+COEXEC_CHURN_RATES and the other COEXEC_* keys the steps read, CHURN_DEPLOYMENT_COUNT,
+CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS, REACH_* (read by 002), FANOUT_*,
+METRICS_SCRAPE_TIMEOUT, ISTIOD_DIAG_*, TEST_PLATFORM (${TEST_PLATFORM:-auto}), PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}),
+PLATFORM_READ_PARALLEL (${PLATFORM_READ_PARALLEL}).
+Environment only: COEXEC_TEST_NAMESPACE, ISTIO_VERSION_CHECK, ISTIO_VERSION_READY_WAIT_SEC,
+SWEEP_STOP_GRACE_SEC.
 
-Environment:
-  ISTIO_VERSION_CHECK (fail, the default, or warn): stop before any change, or warn and
-  record what the mesh runs, when a member's active IstioRevision version is not
-  ISTIO_VERSION. ISTIO_VERSION_READY_WAIT_SEC / ISTIO_VERSION_READY_POLL_SEC (60 / 5): how
-  long, and how often, to read again a member whose istiod or IstioCNI is not ready, or
-  whose istiod is rolling out; a rollout still running after the wait reads as unknown.
-  SETUP_CONTEXTS, COEXEC_CHURN_RATES, COEXEC_BASELINE_DURATION_SEC,
-  COEXEC_CHURN_DURATION_SEC, COEXEC_SETTLE_SEC, COEXEC_INTER_COMBO_SETTLE_SEC,
-  COEXEC_QPS, COEXEC_NUM_CONNECTIONS, COEXEC_CHURN_SEED, COEXEC_REPETITIONS,
-  COEXEC_NS_DELETE_TIMEOUT_SEC, COEXEC_SETUP_NS_WAIT_SEC, CHURN_DEPLOYMENT_COUNT,
-  CHURN_BASE_REPLICAS, CHURN_SCALE_TO_REPLICAS, COEXEC_MIN_PCT_200 (read by 002/003),
-  REACH_ON_UNREACHABLE, REACH_REQUESTS, and REACH_QPS, REACH_HTTP_TIMEOUT_SEC,
-  REACH_DETAIL_TIMEOUT_SEC, REACH_ATTEMPTS, REACH_RETRY_SEC (read by 002).
-  COEXEC_MESH_SIZES (--mesh-sizes), COEXEC_RESULTS_DIR (--output-dir; relative to the
-  repo root), COEXEC_WAIT_TIMEOUT_SEC and COEXEC_SERVICE_PORT (read by
-  001), COEXEC_CLEANUP_GRACE_SEC (read by 006). The sweep checks every numeric one of
-  them, and the flags that set them, before the first setup, --dry-run included.
-$(platform_help_lines all)
-  HARNESS_SHA_CHECK_SEC (60): seconds between the sweep's harness reads (0: before every
-  step); SWEEP_STOP_GRACE_SEC (30): how long a signalled sweep waits for its step's
-  processes before SIGKILL; ISTIO_PROXY_READ_PARALLEL (20): members whose proxy versions
-  are read at once. Environment only (config/options.env).
+Exit codes: 0 every combination ran; 1 stopped (a bad flag or precondition, an error);
+3 --on-unreachable fail stopped it; 4 failed cells or a problem (sweep-outcome.txt);
+129, 130, 143 a signal.
 
-Exit codes:
-  0  every cell (mesh size x churn rate x repetition) ran; rows with a non-OK status
-     are measurement outcomes, counted in the report's n_total and left out of n_valid
-  1  the sweep stopped: a bad flag or precondition (or another live run holds the
-     sweep dir: .sweep.lock names its PID), or an unexpected error; after its start,
-     sweep-outcome.txt records the stop and its reason (STOPPED=1, STOP_REASON,
-     CUT_SHORT=1)
-  3  --on-unreachable fail stopped the sweep (the reports are written)
-  4  the sweep finished and wrote its reports, but N cells failed (setup, churn-target
-     reset or a probe exited non-zero; stderr ends with "N of M cells failed" by
-     reason), or the Istio version, the active revision or the generation of the Istio
-     CR or its active IstioRevision changed during the sweep (read again at its end),
-     or that end-of-sweep check failed, or the harness (a file under tests/, config/,
-     charts/ or terraform/) changed during the sweep (HARNESS_SHA read again before
-     its steps, by each step and at its end); the outcome is also in
-     sweep-outcome.txt and the markdown report
-  129/130/143  interrupted (SIGHUP, Ctrl-C, SIGTERM): sweep-outcome.txt stays "not
-     finished" and says when and by which signal (ENDED_AT, ENDED_SIGNAL). A signal
-     sent to the sweep's process alone (kill <pid>, kill -INT <pid>) reaches the step
-     that runs (001, 002, 003, 006) and every process under it at once; any still running
-     SWEEP_STOP_GRACE_SEC later get SIGKILL, and the lock is released after them. For a
-     sweep in a terminal's foreground, a kill -INT or -HUP skips the processes in that
-     foreground (a Ctrl-C reaches them itself): they get SIGKILL with no cleanup, so
-     stop such a sweep from elsewhere with SIGTERM. The sweep's own commands between
-     steps (a settle wait, the Istio version and proxy reads, the end-of-sweep recheck)
-     finish first, each bounded. Stopping the step's tree needs a ps that lists start
-     times (procps, or macOS's), or Linux's /proc in its place: without either, the
-     sweep warns at its start (a --dry-run too), and a stop reaches only the step's own
-     process.
+See tests/churn-dataplane/README.md.
 EOF
 }
 
@@ -248,6 +201,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 platform_validate
+sweep_settings_check
 reach_msg="$(reach_validate "$ON_UNREACHABLE")" || die "$reach_msg"
 is_ratio "$MIN_PCT_200" || [[ "$MIN_PCT_200" =~ ^0(\.0+)?$ ]] \
 	|| die "COEXEC_MIN_PCT_200 must be 0 (rule off) or a decimal in (0,1]; got '$MIN_PCT_200'"
@@ -322,10 +276,13 @@ fi
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SWEEP_DIR="${OUTPUT_DIR}/sweep-${RUN_ID}"
 TSV_FILE="${SWEEP_DIR}/churn-dataplane-${RUN_ID}.tsv"
-# The harness at the sweep's start; its results under the output dir do not count
-# (harness_sha_for_sweep exports that dir, so each step records the harness it runs). A
-# harness that changes during the sweep is a problem in its outcome (exit 4).
-harness_sha_for_sweep "$OUTPUT_DIR"
+# The harness at the sweep's start; its results under the output dir do not count, for
+# its steps either (HARNESS_SHA_EXCLUDE). sweep_finish reads it again: a harness that
+# changed during the sweep is a problem in its outcome (exit 4).
+HARNESS_SHA_EXCLUDE="$OUTPUT_DIR"
+[[ "$HARNESS_SHA_EXCLUDE" == /* ]] || HARNESS_SHA_EXCLUDE="${PWD%/}/${HARNESS_SHA_EXCLUDE}"
+export HARNESS_SHA_EXCLUDE
+HARNESS_SHA="$(harness_sha)"
 
 echo "=========================================="
 echo "  churn-dataplane co-exec sweep"
@@ -386,22 +343,17 @@ platform_start_warnings "$(IFS=,; echo "${CONTEXTS[*]}")"
 if ! ((DRY_RUN)); then
 	mkdir -p "$SWEEP_DIR"
 	config_snapshot "$SWEEP_DIR" "$RUN_ID"
-	# A sweep that ends before its outcome (die, an unexpected abort, Ctrl-C) says how in
-	# that record: stopped with its reason, or interrupted (sweep_outcome_on_exit). Set before
-	# sweep_outcome_start, whose signal traps then run it (sweep_trap_signals).
-	trap 'sweep_outcome_on_exit "$?" || true' EXIT
-	# sweep-outcome.txt says "not finished" until sweep_outcome replaces it at the end,
-	# so the reports of a sweep that died say so.
-	sweep_outcome_start "$SWEEP_DIR" "$RUN_ID" --next "if it died, run the sweep again into a new dir (a churn-dataplane sweep has no --resume); the rows in this dir cover only the cells it finished"
-	# The cleanup a step cut short by SIGKILL left undone (console only: _sweep_kill_hint).
+	# The cleanup the console names when the sweep ends before its end.
 	SWEEP_CLEANUP_CMD="./tests/churn-dataplane/006-cleanup.sh --contexts $(IFS=,; echo "${CONTEXTS[*]}") --wait-deletion"
+	# sweep-outcome.txt says the sweep runs until sweep_finish writes its outcome; one that
+	# ends before (die, an unexpected abort, Ctrl-C) records how (tests/lib/common.sh).
+	sweep_start "$SWEEP_DIR" "$RUN_ID"
 	ALL_CTXS_CSV="$(IFS=,; echo "${CONTEXTS[*]}")"
 	KUBE_VERSIONS_CSV="$(probe_kube_versions "$ALL_CTXS_CSV" "${KUBECTL[@]}")"
 	ISTIOD_REPLICAS="$(fanout_preflight_istiod "${CONTEXTS[0]}" "${KUBECTL[@]}")"
 	write_preamble "churn-dataplane co-exec test" "$TSV_FILE" \
 		"RUN_ID=$RUN_ID" \
 		"HARNESS_SHA=$HARNESS_SHA" \
-		"HARNESS_CONTENT_KEY=$HARNESS_CONTENT_KEY" \
 		"${IV_KV[@]}" \
 		"KUBE_VERSIONS=$KUBE_VERSIONS_CSV" \
 		"TUNING_BASELINE=$TUNING_BASELINE" \
@@ -699,17 +651,22 @@ if ((DRY_RUN)); then
 	echo "Dry-run complete. Planned ${MATRIX_SIZE} combinations." >&2
 	exit 0
 fi
-# A build that changed during the sweep goes to its reports (tests/lib/platform.sh).
-platform_drift_check "$SWEEP_DIR" "$(IFS=,; echo "${CONTEXTS[*]}")"
+# The platform record again: a build or istiod setting that changed during the sweep is a
+# problem of its outcome (tests/lib/platform.sh).
+platform_drift_check "$(IFS=,; echo "${CONTEXTS[*]}")"
 
 echo "=========================================="
 echo "Sweep finished: $TSV_FILE"
-# The Istio version again, after the last window and before the reports (read-only).
-IV_END=()
-istio_version_recheck IV_END ${KUBECTL[@]+"${KUBECTL[@]}"}
-# The outcome is written after the reports: they say so (the markdown gets a line
-# that sweep_outcome --md replaces).
-export _SWEEP_OUTCOME_PENDING=1
+# The Istio version again, after the last window and before the reports (read-only): a
+# change is a problem of the outcome, a member it cannot confirm a note.
+istio_version_recheck ${KUBECTL[@]+"${KUBECTL[@]}"}
+# The outcome first (sweep-outcome.txt, which the reports read): how many cells failed.
+# Exit 3 (the reach gate stopped the sweep) wins over 4 (some cells failed, or the Istio
+# version changed under the sweep).
+outcome_rc=0 stop_args=()
+((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE" --stop-reason "the reachability gate (--on-unreachable fail) found an unreachable remote; later mesh sizes did not run")
+sweep_finish ${stop_args[@]+"${stop_args[@]}"} \
+	"$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 echo "Running 005-report-results.sh..."
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR"
 
@@ -721,13 +678,6 @@ CHARTS_FILE="${SWEEP_DIR}/sweep-charts-${RUN_ID}.md"
 "$SCRIPT_DIR/005-report-results.sh" --results-dir "$SWEEP_DIR" --format charts > "$CHARTS_FILE"
 echo "Charts written to $CHARTS_FILE"
 
-# The reports are written; now say how many cells failed (also in
-# sweep-outcome.txt and the markdown summary). Exit 3 (the reach gate stopped the
-# sweep) wins over 4 (some cells failed, or the Istio version changed under the sweep).
-outcome_rc=0 stop_args=()
-((REACH_GATE_STOP == 0)) || stop_args=(--stopped "$REACH_EXIT_CODE" --stop-reason "the reachability gate (--on-unreachable fail) found an unreachable remote; later mesh sizes did not run")
-sweep_outcome ${stop_args[@]+"${stop_args[@]}"} ${IV_END[@]+"${IV_END[@]}"} --run-id "$RUN_ID" --record "$SWEEP_DIR" --md "$MD_FILE" \
-	"$MATRIX_SIZE" ${FAILED_CELLS[@]+"${FAILED_CELLS[@]}"} || outcome_rc=$?
 if ((REACH_GATE_STOP)); then
 	echo "Sweep stopped early by the reachability gate (--on-unreachable fail); see Remote coverage in $MD_FILE" >&2
 	exit "$REACH_EXIT_CODE"

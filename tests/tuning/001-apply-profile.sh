@@ -4,10 +4,11 @@
 # needs to undo exactly those changes, and the members' Istio CR and IstioRevision
 # generations once the apply settled (istio-generations-applied), which 002 compares
 # before its revert. A new apply clears what an earlier apply and its revert left in the
-# state dir (revert-started, istio-edited-during-pass, istio-generations-unchecked,
-# istio-generations-applied). First it puts a marker ConfigMap on each member
+# state dir (revert-started, istio-edited-during-pass, istio-generations-applied). First it
+# puts a marker ConfigMap on each member
 # (tuning.py marker) that names the profile and holds that member's Istio CR revert patch:
-# every platform record shows it, and 005-cleanup.sh can undo the profile from it alone.
+# a tuning run refuses to start and every other sweep warns while it is there, and
+# 005-cleanup.sh can undo the profile from it alone.
 # Refuses while any member holds a profile's objects already (a profile left applied).
 #
 # Does not pause Argo CD; use 006-gitops-pause.sh (or 003-run-tuning-sweep.sh).
@@ -42,15 +43,11 @@ usage() {
 	cat <<EOF
 Usage: $(basename "$0") --profile NAME|PATH [options]
 
-Apply a tuning profile: patch the Istio CR and apply the profile's resources. Saves what
-002-revert-profile.sh needs, and the members' Istio CR and IstioRevision generations once
-the apply settled (istio-generations-applied; a member it could not read is a warning).
-A new apply clears what an earlier apply and its revert left in the state dir
-(revert-started, istio-edited-during-pass, istio-generations-unchecked,
-istio-generations-applied). First it puts a marker ConfigMap on each member that names the
-profile and holds the patch that restores that member's Istio CR (002-revert-profile.sh
-deletes it last). It refuses to start while a member holds a profile's objects or marker
-already: a profile left applied, which ./tests/tuning/005-cleanup.sh undoes.
+Apply a tuning profile: put its marker ConfigMap on each member, patch the Istio CR, apply
+the profile's resources, then check them. Saves in the state dir what 002-revert-profile.sh
+needs, with the members' Istio CR and IstioRevision generations once the apply settled.
+Refuses to start while a member holds a profile's objects or marker already (undo those
+with ./tests/tuning/005-cleanup.sh).
 
 Options:
   --profile NAME|PATH    Profile name (e.g. 01-push-throttling) or YAML path (required).
@@ -63,11 +60,13 @@ Options:
   --dry-run              Print the patch and resources; do not touch clusters.
   -h, --help             Show this help.
 
-Environment:
-$(platform_help_lines reads)
+Environment (config/options.env describes each): SETUP_CONTEXTS, TUNING_ROLLOUT_TIMEOUT,
+TEST_PLATFORM, PLATFORM_READ_TIMEOUT (${PLATFORM_READ_TIMEOUT}), PLATFORM_READ_PARALLEL
+(${PLATFORM_READ_PARALLEL}). Requires python3 with PyYAML.
 
-Exit status: 0 applied and verified, 1 error, 2 applied but verification failed.
-Requires python3 with PyYAML.
+Exit codes: 0 applied and verified; 1 an error; 2 applied, but the checks failed.
+
+See tests/tuning/README.md.
 EOF
 }
 
@@ -114,8 +113,6 @@ python3 -I -c 'import yaml' 2>/dev/null \
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 python3 -I "$HELPER" load "$PROFILE" "$WORK"
-# Under a sweep, a profile file changed for this read reaches its outcome (harness_read).
-harness_read _hs _hk
 HAS_PATCH=0
 [[ "$(<"$WORK/patch.json")" != "{}" ]] && HAS_PATCH=1
 HAS_RESOURCES=0
@@ -188,8 +185,7 @@ done
 # Record state before mutating so an interrupted apply can still be reverted. A revert's
 # markers, and the generations recorded after an earlier apply in this state dir, do not
 # belong to this one.
-rm -f "${STATE_DIR}/revert-started" "${STATE_DIR}/istio-edited-during-pass" \
-	"${STATE_DIR}/istio-generations-unchecked" "${STATE_DIR}/istio-generations-applied"
+rm -f "${STATE_DIR}/revert-started" "${STATE_DIR}/istio-edited-during-pass" "${STATE_DIR}/istio-generations-applied"
 cp "$WORK/patch.json" "${STATE_DIR}/patch.json"
 cp "$WORK/resources.yaml" "${STATE_DIR}/applied-resources.yaml"
 (IFS=,; echo "${CONTEXTS[*]}") >"${STATE_DIR}/contexts"
@@ -197,15 +193,6 @@ echo "$PROFILE_NAME" >"${STATE_DIR}/active-profile"
 
 # The marker on every member before any change (002-revert-profile.sh deletes it last).
 read -r MARKER_KIND MARKER_NAME MARKER_NS < <(python3 -I "$HELPER" resources "${STATE_DIR}/marker-$(ctx_key "${CONTEXTS[0]}").json")
-# The objects the profile puts on every member, as the platform record names them: tuning 004
-# checks that each pass's record holds them all.
-{
-	echo "${MARKER_KIND}/${MARKER_NS}/${MARKER_NAME}"
-	for line in ${RES_LINES[@]+"${RES_LINES[@]}"}; do
-		read -r kind name ns <<<"$line"
-		echo "${kind}/${ns}/${name}"
-	done
-} >"${STATE_DIR}/objects"
 for ctx in "${CONTEXTS[@]}"; do
 	echo "--- ${ctx}: marking ${PROFILE_NAME} applied (${MARKER_KIND} ${MARKER_NS}/${MARKER_NAME}) ---"
 	"${KUBECTL[@]}" --context="$ctx" apply --server-side --field-manager=tuning-profile \
@@ -237,12 +224,10 @@ fi
 # The generations this apply left (the patch raises the Istio CR's, and Sail the active
 # IstioRevision's): 002 reads them again before its revert, and a member whose generation
 # moved in between had its Istio CR edited by something else during the pass. A member
-# whose read failed is recorded as unknown, which 002 cannot compare: say so now.
+# read as unknown is not compared there.
 GENS_APPLIED="$(istio_generations_read "$(IFS=,; echo "${CONTEXTS[*]}")" "${KUBECTL[@]}")"
-if ! printf '%s\n' "$GENS_APPLIED" >"${STATE_DIR}/istio-generations-applied"; then
-	echo "warn: could not write ${STATE_DIR}/istio-generations-applied; 002 cannot check that nothing else edited the Istio CR during the pass" >&2
-elif [[ "$GENS_APPLIED" == *unknown* ]]; then
-	echo "warn: the Istio CR generations of a member could not be read after the apply settled (${GENS_APPLIED}): 002 cannot check that member for an edit during the pass, and says so (istio-generations-unchecked)" >&2
+if ! printf '%s\n' "$GENS_APPLIED" >"${STATE_DIR}/istio-generations-applied" || [[ "$GENS_APPLIED" == *unknown* ]]; then
+	echo "warn: could not record every member's Istio CR generations after the apply settled (${GENS_APPLIED}): 002 cannot check those members for an edit during the pass" >&2
 fi
 
 REVERT_HINT="Revert: ./tests/tuning/002-revert-profile.sh --state-dir ${STATE_DIR}"

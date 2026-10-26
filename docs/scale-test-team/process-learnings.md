@@ -1,11 +1,13 @@
 # Process Learnings (PL Catalog)
 
-This is the carry-forward catalog every implementer brief draws from. New PLs are appended after each cycle when a reviewer surfaces a failure mode the existing list didn't cover.
+This is the carry-forward catalog every implementer brief draws from. A PL is appended after a cycle when a reviewer surfaced a failure mode the list didn't cover and that met the substantive rule ([README](README.md)): a wrong or mislabeled number in a report, a documented command that fails, or red CI.
 
 Each entry:
 - **Catalog line** — one-line label suitable for citing in a brief ("PL1 delta-window scraping")
 - **Why** — what failure mode this prevents
-- **How to preempt** — concrete code/structure guidance for the implementer
+- **How to preempt** — the least code or structure that applies the lesson
+
+Code comments cite PL numbers, so a PL is never renumbered and its heading never deleted. A PL whose subject was removed, or that prescribed machinery the campaign does not need, is **retired**: its body is one line saying why, plus the one sentence that still holds, if any. Briefs never cite a retired PL. The 2026-10 editing pass (PR #110) retired PL55 to PL60, PL62 and PL63 and rewrote the PLs that prescribed the machinery it removed; PL64 is its lesson, and its review added PL65 and PL66.
 
 ## Observation labels
 
@@ -44,19 +46,16 @@ its findings log was removed once every finding was fixed or superseded.
 
 **Why:** Without provenance metadata, a TSV row 3 months later is uninterpretable. "Was this an Istio 1.27 run or 1.28? Same harness commit as last week or a hacked-up branch?"
 
-**How to preempt:** Every TSV-writing script emits a preamble block:
+**How to preempt:** Every TSV-writing script emits a preamble block, through the shared emitters (PL36):
 ```
-# RUN_ID=<timestamp + $$>
-# HARNESS_SHA=$(harness_sha)   # git describe --always --abbrev=7; a dirty tree: <describe>-dirty.<8hex>
-# ISTIO_VERSION=<each member's active IstioRevision .spec.version, read live once per run
-#                (istio_version_resolve / istio_version_kv); never the pin passed off as live>
-# ISTIO_VERSION_PIN=<from config/versions.env>   ISTIO_VERSION_SOURCE=<live | pin under --dry-run>
-# ISTIO_VERSION_BY_CONTEXT=<ctx=version,... ; unknown where a member could not be read>
-# KUBE_VERSIONS[ctx]=<per-context, concurrent probes, --request-timeout=5s>
-# SETTLE_SEC=<value>
-# (any other knob that affects the result)
+# RUN_ID=<UTC timestamp>-<$$>
+# HARNESS_SHA=<git describe --always --abbrev=7>[-dirty.<8hex>] (harness_sha, tests/lib/common.sh)
+# ISTIO_VERSION=<the version the members run, read live>        ISTIO_VERSION_PIN=<config/versions.env>
+# KUBE_VERSIONS=<ctx=version,...; unreachable or unknown where a read failed>
+# SETTLE_SEC=<value>   (and every other knob that affects the result)
+# (the run config and the platform record: config_preamble_lines, platform_preamble_lines)
 ```
-Use `date -u -Iseconds` (UTC) for timestamps. `HARNESS_SHA` must carry `-dirty` so a hacked-up working tree is visible, and the `.<8hex>` after it (`harness_sha` in `tests/lib/common.sh`: a hash of the harness's uncommitted content, tracked and untracked, from git alone; submodules never count, and `git describe --dirty` is not used, since it fails when a submodule's gitdir is gone) so two different hacked-up trees on one commit never read the same. The harness is `tests/`, `config/`, `charts/` and `terraform/` (`HARNESS_PATHS`): an untracked campaign note under `docs/` must not dirty every run. Pin every git setting that changes the hash (`core.autocrlf`, `core.fileMode`, `core.attributesFile`, the system attributes), so one tree reads one value for every operator; a run's own results dir is passed as `--exclude`. A sweep exports that dir (`HARNESS_SHA_EXCLUDE`), never its value: each step records the live tree, and the sweep reads it again before its steps (throttled, `HARNESS_SHA_CHECK_SEC`) and at its end, so a harness edited, checked out or pulled during a sweep is a problem in its outcome (exit 4), never recorded nowhere.
+Use UTC timestamps. `-dirty.<8hex>` marks a change git lists under `tests/`, `config/`, `charts/` or `terraform/` (submodules, an untracked note under `docs/` and the run's own results dir never count); the hex hashes the change itself, so two different edits are two harnesses. A sweep reads `HARNESS_SHA` at its start and at its end; a change is a problem in its outcome (exit 4). `ISTIO_VERSION` is read live (`istio_version_resolve` / `istio_version_kv`), never the pin passed off as the live value; a value that could not be read is `unknown`.
 
 ## PL3 — Wall-clock window distinct from operator settle
 
@@ -143,7 +142,7 @@ Report aggregator filters BOTH `1` and `unknown` from numeric averages and surfa
 
 **Why:** Operators need to see both "how many samples did we attempt" and "how many survived the filters". A report that silently drops poisoned rows hides the failure rate.
 
-**How to preempt:** The aggregator counts `n_total` (all rows for the cell) and `n_valid` (rows passing the filters: `restarted=0`, `status=OK`, `overflow=0`, etc.). Both columns appear in every output format. A markdown footnote fires when `n_total > n_valid` for any cell.
+**How to preempt:** The aggregator counts `n_total` (all rows for the cell) and `n_valid` (rows passing the filters: `restarted=0`, `status=OK`, `overflow=0`, etc.). Both columns appear in every output format, and the report's body says so when a cell has `n_total > n_valid`.
 
 ## PL16 — Bash/awk-only deterministic seeded shuffle (no `shuf`)
 
@@ -153,7 +152,7 @@ Report aggregator filters BOTH `1` and `unknown` from numeric averages and surfa
 
 ## PL17 — Sample-count column format: `got/attempted`
 
-**Why:** When a column records partial successes, recording only `got` is indistinguishable from "configured low" — operators can't tell whether 2 of 3 samples failed or whether `--samples 1` was passed.
+**Why:** When a column records partial successes, recording only `got` is indistinguishable from "configured low" — operators can't tell whether 2 of 3 samples failed or whether `--config-dump-samples 1` was passed.
 
 **How to preempt:** Format as `<got>/<attempted>` consistently across code, TSV, README, and report. Document the order; an inverted order in the README would be worse than no docs.
 
@@ -165,14 +164,14 @@ Report aggregator filters BOTH `1` and `unknown` from numeric averages and surfa
 
 ## PL19 — Report metadata propagation to all 4 output formats
 
-**Why:** The TSV preamble (PL2) is provenance gold. If the report drops it, downstream consumers reading the report alone can't reconstruct what was measured.
+**Why:** The TSV preamble (PL2) is provenance gold, and the sweep's record (`sweep-outcome.txt`) says whether the run behind the numbers finished, failed cells or recorded a problem. If the report drops either, a reader of the report alone can't reconstruct what was measured, or learn that the run failed.
 
-**How to preempt:** The report (`004` or `005`) reads the first TSV's preamble lines and emits them as:
+**How to preempt:** The report (`004` or `005`) carries every preamble key forward, not just `RUN_ID` and `HARNESS_SHA` (several inputs: PL26):
 - `text` / `csv` — `# KEY=VALUE` lines above the data
 - `markdown` — YAML frontmatter (`---\nKEY: VALUE\n---`)
 - `json` — top-level `metadata` object alongside `results` array
 
-When there are 5+ preamble fields, propagate ALL of them, not just `RUN_ID` and `HARNESS_SHA`.
+and prints each input dir's sweep record in every format (`sweep_outcome_lines`, `tests/lib/common.sh`).
 
 Pass a string field to awk through `ENVIRON` (`K="$v" awk '... ENVIRON["K"] ...'`), never `awk -v k="$v"`: `-v` processes backslash escapes, so a value with a `\` reaches awk changed (`\t` becomes a tab, `\\` one backslash, a lone trailing `\` a warning) and the report prints another value than the TSV holds. Quote it for JSON with the one lib escaper, `JSON_STR_AWK` (`function js(x)` in `tests/lib/common.sh`, `awk "${JSON_STR_AWK} ..."`), not a local copy (`tests/lib/verify.sh` flags copies). Round 3 found the `-v` form in three JSON writers.
 
@@ -206,7 +205,7 @@ Pass a string field to awk through `ENVIRON` (`K="$v" awk '... ENVIRON["K"] ...'
 
 **How to preempt:** Split the probe into `--phase baseline | final` with a `--state-dir` to ferry baseline files across the setup step. The orchestrator calls `baseline` *before* `001`, then `001`, then sleeps settle, then `final`. The wall-clock window now spans the entire deploy + settle.
 
-(PL24 was added after the homelab CPU-spike data on PR #2 — see `controlplane-test/README.md` "What Gets Measured" for the resulting orchestration.)
+(PL24 was added after the homelab CPU-spike data on PR #2 — see `tests/controlplane/README.md` "What it measures" for the resulting orchestration.)
 
 ## PL25 — Drop snapshots that read idle
 
@@ -221,10 +220,10 @@ Pass a string field to awk through `ENVIRON` (`K="$v" awk '... ENVIRON["K"] ...'
 **Why:** PL19 propagates the TSV preamble into all four report formats, but when a sweep feeds N per-iteration TSVs into one report, the naive "last-value-wins per key" aggregation collapses per-iteration scalars (`RUN_ID`, `DATE`, `MESH_SIZE`, `REMOTES`, `KUBE_VERSIONS`) to whichever input file sorted last. The resulting frontmatter advertises *one* iteration's identity (e.g. `MESH_SIZE: 2`) while the report body summarises the whole sweep (e.g. comparison table listing sizes 1, 2, 4, 8). Operators reading the report file detached from its directory are actively misled about provenance.
 
 **How to preempt:** Classify preamble keys into two partitions before propagation:
-- **Sweep-level scalars** — values that must be identical across every input TSV in a coherent run (`SWEEP_RUN_ID`, `HARNESS_SHA`, `ISTIO_VERSION`, sweep-wide knobs like `SETTLE_SEC`/`TIMEOUT_SEC`/`ITERATIONS`). Rendered as scalars at the top of the metadata block.
-- **Per-iteration values** — keys whose values legitimately vary across the N input TSVs (`RUN_ID`, `DATE`, `MESH_SIZE`, per-iteration `REMOTES`/`KUBE_VERSIONS`). Rendered as a sequence (`iterations:` YAML block for markdown/text, `# iterations:` comment block for CSV, `"iterations":[...]` array for JSON) with one entry per input TSV. A single-input report still renders a one-element sequence so the schema is uniform.
+- **Sweep-level scalars** — values every input TSV of one run must share (`SWEEP_RUN_ID`, `HARNESS_SHA`, `ISTIO_VERSION`, sweep-wide knobs like `SETTLE_SEC`/`TIMEOUT_SEC`/`ITERATIONS`), rendered as scalars at the top of the metadata block. When the inputs disagree, the value reads `mixed:<a>,<b>` and the report warns; never last-wins.
+- **Per-iteration values** — keys that legitimately vary across the N inputs (`RUN_ID`, `DATE`, `MESH_SIZE`, per-iteration `REMOTES`/`KUBE_VERSIONS`), rendered as a sequence with one entry per input TSV (`iterations:` in markdown/text, `# iterations:` in CSV, `"iterations":[...]` in JSON); a single-input report renders a one-element sequence.
 
-The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → TSV preamble (probe omits the line when the flag is unset so standalone runs stay clean) and the report emits it as the first scalar key. The classification predicate (sweep-level keys must be homogeneous across inputs) is a correctness invariant — implementers should consider a stderr warning when a sweep-level key actually varies across inputs, since silent last-wins on a key the operator marked sweep-level is the same failure mode in miniature.
+The sweep threads its `SWEEP_RUN_ID` into every TSV it writes (a standalone probe omits the line) and the report emits it as the first scalar key. The `mixed` value and its warning are the whole check.
 
 (PL26 was added after PR for issue #11: the propagation sweep was refactored to use the report script for markdown summary; round-1 reviewers (usability + reproducibility) caught that PL19 propagation alone is insufficient when N TSVs feed one report.)
 
@@ -240,7 +239,7 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 **Why:** When a probe scrapes a single istiod (`svc/istiod` port-forward → one replica), every metric is read from one pod. The moment the control plane is pinned to N replicas and the probe fans out (scrapes every istiod pod), aggregation acquires a SECOND axis — across pods — and metrics split into classes that aggregate differently. Summing the wrong class silently N×'s or undercounts a value. Specifically: `connected_proxies` (`pilot_xds`) is per-replica (each proxy holds exactly one istiod connection) and must **sum across replicas**, while `pilot_services` (and any mesh-global registry gauge) is **identical on every replica** and must be treated **invariant (max/any), NOT summed** — summing it 5×'s the service count and breaks any "services delta ≥ 1" clean-check. Compounding trap: PL12's `extract_gauge` returns the *last* matching line, not a within-pod sum across label permutations — so a naive `fanout_gauge_sum` built on it is a double no-op (wrong within-pod, then summed across pods).
 
-**How to preempt:** Provide an `extract_gauge_sum` that accumulates `$NF` across all name-anchored permutations within a pod (don't reuse `extract_gauge`, which is last-match). Then classify each gauge: SUM-across-pods (`connected_proxies`) vs INVARIANT/max-across-pods (`pilot_services`). Counters always sum across pods (each event emitted by one replica). Histograms sum per-bucket counts across pods *before* computing deltas/quantiles (never average per-pod quantiles). Restart detection fires on ANY pod restart OR pod-set change. Unit-test the sum-vs-invariant distinction with fixtures carrying MULTIPLE label permutations per pod (e.g. `pilot_xds{type=ads}`+`{type=grpc}`) so the within-pod axis is actually exercised, plus a regression test documenting that plain `extract_gauge` is NOT a sum.
+**How to preempt:** Provide an `extract_gauge_sum` that accumulates `$NF` across all name-anchored permutations within a pod (don't reuse `extract_gauge`, which is last-match). Then classify each gauge: SUM-across-pods (`connected_proxies`) vs INVARIANT/max-across-pods (`pilot_services`). Counters always sum across pods (each event emitted by one replica). Histograms sum per-bucket counts across pods *before* computing deltas/quantiles (never average per-pod quantiles). Restart detection fires on ANY pod restart OR pod-set change. Unit-test the sum-vs-invariant distinction once, with fixtures carrying MULTIPLE label permutations per pod (e.g. `pilot_xds{type=ads}`+`{type=grpc}`) so the within-pod axis is actually exercised.
 
 (PL28 was added after the istiod-fanout PR: round-1 measurement + istio reviewers caught that the cross-pod gauge sum was built on `extract_gauge`'s last-match behaviour and that `pilot_services` would be 5×'d if summed like `pilot_xds`.)
 
@@ -272,7 +271,7 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 **Why:** A multi-hour sweep orchestrator runs a sequence of step scripts per combo (`001-setup`, the `002` probe, `005`/`006` cleanup, and for tuning `001-apply-profile`/`002-revert-profile`). Each is a bare `"$SCRIPT_DIR/0NN-….sh"` call under `set -euo pipefail`, so a single non-zero exit aborts the *entire* sweep at that combo — and because reports run only *after* the loop, an abort at combo 50/200 discards all 49 completed combos of overnight data. Hardening only the *probe* call (the obvious one) leaves the others live: at scale (~50 port-forwards, hundreds of combos) the **setup/deploy** step (`helm template|apply` + label-selector `kubectl wait` timeouts) is the *most probable* per-combo failure, more likely than the probe.
 
-**How to preempt:** Wrap every per-combo step `if ! "$SCRIPT_DIR/0NN-….sh" …; then warn; <record the failure visibly>; cleanup; settle; continue; fi`. "Record visibly" = emit a status row (`SETUP_FAILED`/`PROBE_FAILED`, counted in `n_total`, excluded from `n_valid` per PL15) for emit-row suites, or a placeholder row / marker file for log-and-continue suites (so a fully-crashed combo is not silently *absent* from the report — indistinguishable from never-planned). On a setup-failure path, also tear down anything the success path would (e.g. a background metrics poller started before the step) before `continue`. Degraded rows carry N/A numerics + `restarted=unknown` (PL13); a baseline-phase failure must still bucket into the **real** `(axis…)` cell, and the orchestrator must pre-create the TSV preamble before the first step so a first-combo failure can't strip run provenance (PL2/PL19). Reserve `die` for whole-run preconditions only (bad args, missing tools, zero istiod across ALL contexts).
+**How to preempt:** Start every per-combo step through `sweep_step` (PL45) and guard it: `if ! sweep_step "$SCRIPT_DIR/0NN-….sh" …; then warn; <placeholder row>; FAILED_CELLS+=(<STATUS>); cleanup; settle; continue; fi`. The placeholder row goes into the cell's **real** `(axis…)` bucket with its status (`SETUP_FAILED`/`PROBE_FAILED`: in `n_total`, not `n_valid`, PL15), N/A numerics and `restarted=unknown` (PL13), so a crashed combo is never silently *absent* from the report (indistinguishable from never-planned). Pass the failed statuses to `sweep_finish`: the sweep's record names them, every report prints it (PL19) and the sweep exits 4. On a setup-failure path, also stop what the success path would (e.g. a background metrics poller started before the step) before `continue`. Write the TSV preamble before the first step (PL36), so a first-combo failure keeps the run's provenance. Reserve `die` for whole-run preconditions only (bad args, missing tools, zero istiod across ALL contexts).
 
 (PL32 was added after the O6 fault-tolerance cycle: round-1 wrapped the probe calls but the scale lens found `001-setup` bare in all 5 orchestrators — the likeliest sweep-killer — plus a fully-crashed mesh size vanishing from the report and a baseline-failure mis-bucketing to a phantom cell; later rounds wrapped setup + tuning apply/revert and added placeholder rows. Lesson: harden the *whole per-combo step sequence*, not just the headline call.)
 
@@ -306,7 +305,7 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 **Why:** To make provenance survive a first-combo failure (PL2/PL26 rationale), an orchestrator may **pre-create** the shared output file before the loop (here `003-run-sweep.sh:precreate_tsv_preamble` writes the TSV preamble up front). But the per-combo collector that *normally* writes that preamble guards its block on `! -f` (here `002`: "only write the preamble if the file doesn't exist yet"). The two interact destructively: once the pre-create runs, the collector's richer initialization is **skipped entirely**, so any key the pre-creator forgot is *never* written — not by the pre-creator (it didn't know about it) and not by the collector (its `! -f` guard short-circuited). The failure is invisible: the file exists, has a valid header, rows append fine, and only a *downstream reader* (`004`'s `preamble_get`) surfaces the gap as `unknown` — far from the cause, looking like a read bug or a metrics-availability problem rather than a write-path omission. In O9 this dropped five capacity-provenance lines (`NODE_ALLOC_*`, `ISTIOD_*_LIMIT`, `SCALE_TARGET_FRACTION`), hollowing out the entire "Achieved scale vs capacity" block on a sweep that read every value fine.
 
-**How to preempt:** When more than one code path can create the same artifact and one of them guards on existence (`! -f`, `if not exists`, create-once), treat the writers as a **contract**: they must emit the *identical* key/field set, or the guard turns an optimization into silent data loss. (1) Factor the preamble/header emission into **one shared function** both callers invoke, so a new key can't be added to one writer and missed by the other. (2) If they must stay separate, add a test that **diffs the key set** the two writers produce (grep `^# [A-Z_]*=` from each, assert equality) — symmetry is the invariant, not any single key. (3) Make the downstream reader **loud about missing-but-expected** provenance: a required key resolving to `unknown` should be distinguishable from "legitimately N/A," ideally with a one-line diagnostic pointing at the write path, so the next occurrence is debugged at the source not the symptom. (4) When you add a key to the collector's preamble, grep for every *other* place that writes that preamble (the pre-create, any failed-row emitter) and add it there too — the `! -f` guard guarantees only the *first* writer's content reaches the file.
+**How to preempt:** When more than one code path writes the same artifact (a pre-creator, a `! -f`-guarded collector, a placeholder-row emitter), every one of them emits each preamble block through **one shared function** (`infra_preamble_lines`, `config_preamble_lines`, `platform_preamble_lines`, `istio_version_kv`), so a key added there reaches every writer and the key sets cannot differ; no test of their symmetry is then needed. Never write a key inline in one writer only. A writer that could not read a key writes `unknown`, never leaves the key out, so a reader can tell "not read" from "not written".
 
 (PL36 was added after the O9 capacity-legibility fast-follow (#45): the 2026-06-04 clean pass reported `node allocatable: unknown / istiod limit: unknown` despite the reads succeeding, because `003`'s resilience pre-create omitted the capacity lines `002` would have written and `002`'s `! -f` guard then skipped its whole preamble block. Fixed by writing the capacity lines in the pre-creator too, recording `SCALE_SIZING_MODE` for downstream reproducibility, and the reproducibility reviewer flagging the residual `ISTIO_VERSION` vs `ISTIO_VERSION_TAG` / `CONTROLPLANE_SCHEMA` asymmetry between the two writers as the same class of latent gap.)
 
@@ -316,7 +315,7 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 **How to preempt:** A slow teardown of a shared resource must **delay** the next iteration, never **destroy** its data. (1) Put a **PL4 poll-until-gone precondition in the setup script itself** (not just the orchestrator): before applying, wait — bounded, reusing the same timeout knob the cleanup uses — for any pre-existing instance of the shared resource to fully disappear on **every** target context. Then a slow teardown becomes a delayed-but-successful setup; only a teardown that *never* completes within the bound degrades to a (now-rare) legitimate `SETUP_FAILED`. Keeping the wait in setup means a manual setup after a manual async cleanup benefits too. (2) Attack the teardown duration at its real dominator so the bound is rarely hit — for a namespace full of **sidecar-injected** pods, pre-delete the workload pods with a **short grace period** before deleting the namespace so istio-proxy drain doesn't serialize into minutes (a *speedup*, best-effort, never a correctness gate — the authoritative `--wait-deletion` poll stays). (3) Treat the cleanup bound and the setup-wait bound as the **same contract** (thread one `--ns-delete-timeout`/`COEXEC_*` value to both) so an operator override applies symmetrically. (4) Watch the tail: with both bounds equal, the worst case is cleanup-exhaust **plus** setup-wait-exhaust on the same iteration (~2× the bound wasted) — acceptable against the data it saves, but if the largest sizes routinely hit it, that is a real teardown-capacity wall, not a setup bug, and should read as such in the report.
 
-(PL37 was added after the churn-dataplane cleanup-cascade cycle: the O8 deploy-once-per-mesh-size refactor moved cleanup from per-rate to per-mesh-size, and the per-mesh-size namespace (fortio + deployment-count×scale-to sidecar pods) exceeded the 180s `NS_DELETE_TIMEOUT` at scale → `CLEANUP_TIMEOUT` → the next mesh-size's `001` applied into the `Terminating` namespace → all-combos `SETUP_FAILED`, oscillating odd/even. Fixed by a PL4 poll-until-gone wait inside `001` before apply (`--ns-wait-timeout`/`COEXEC_SETUP_NS_WAIT_SEC`), a short-grace pod fast-drain in `006` before the namespace delete (`COEXEC_CLEANUP_GRACE_SEC`), and raising the shared bound 180→240. All six reviewers APPROVEd round 1; the scale + istio lenses confirmed the cascade was genuinely closed (the 5s grace "sticks" across the namespace-GC delete and the `--wait-deletion` poll remains the authoritative endpoint-withdrawal gate). The chart-level `terminationGracePeriodSeconds` was punted to preserve churn-phase EDS-withdrawal comparability with already-collected sweeps.)
+(PL37 was added after the churn-dataplane cleanup-cascade cycle: the O8 deploy-once-per-mesh-size refactor moved cleanup from per-rate to per-mesh-size, and the per-mesh-size namespace (fortio + deployment-count×scale-to sidecar pods) exceeded the 180s `COEXEC_NS_DELETE_TIMEOUT_SEC` at scale → `CLEANUP_TIMEOUT` → the next mesh-size's `001` applied into the `Terminating` namespace → all-combos `SETUP_FAILED`, oscillating odd/even. Fixed by a PL4 poll-until-gone wait inside `001` before apply (`--ns-wait-timeout`/`COEXEC_SETUP_NS_WAIT_SEC`), a short-grace pod fast-drain in `006` before the namespace delete (`COEXEC_CLEANUP_GRACE_SEC`), and raising the shared bound 180→240. All six reviewers APPROVEd round 1; the scale + istio lenses confirmed the cascade was genuinely closed (the 5s grace "sticks" across the namespace-GC delete and the `--wait-deletion` poll remains the authoritative endpoint-withdrawal gate). The chart-level `terminationGracePeriodSeconds` was punted to preserve churn-phase EDS-withdrawal comparability with already-collected sweeps.)
 
 ## PL38 — A mesh-wide root `Sidecar` egress silently narrows the injected GATEWAYS too; exempt them or sever cross-cluster gateway routing
 
@@ -328,9 +327,9 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 ## PL39 — Chart-baked, GitOps-deployed mesh config is invisible to `HARNESS_SHA` provenance; live-query the resolved state into the preamble
 
-**Why:** PL2 records a run's provenance from the harness git tree (`HARNESS_SHA`: `git describe`, plus `-dirty.<8hex>`, a hash of the uncommitted content). That captures probe/script state — but a **mesh configuration baked into a Helm chart and deployed by GitOps (ArgoCD) is reconciled independently of the probe scripts**. So a toggleable mesh lever (here `tuningBaseline.{sidecar,discoverySelectors,telemetryFiltering,accessLogFiltering}` + the Sidecar egress graph) can be flipped via an Argo override, a `--set`, or a live edit and produce a run with an **identical `HARNESS_SHA` but a materially different mesh** — invisible in provenance, and two such runs silently non-comparable. The chart *default* is the wrong thing to record: the deployed state can diverge from it, which is exactly the case the provenance must catch.
+**Why:** PL2 records a run's provenance from the harness git tree (`HARNESS_SHA`: `git describe`, plus `-dirty.<8hex>` with uncommitted changes). That captures probe/script state — but a **mesh configuration baked into a Helm chart and deployed by GitOps (ArgoCD) is reconciled independently of the probe scripts**. So a toggleable mesh lever (here `tuningBaseline.{sidecar,discoverySelectors,telemetryFiltering,accessLogFiltering}` + the Sidecar egress graph) can be flipped via an Argo override, a `--set`, or a live edit and produce a run with an **identical `HARNESS_SHA` but a materially different mesh** — invisible in provenance, and two such runs silently non-comparable. The chart *default* is the wrong thing to record: the deployed state can diverge from it, which is exactly the case the provenance must catch.
 
-**How to preempt:** For any mesh behavior that lives outside the harness git tree (chart-baked + GitOps/operator-reconciled), emit a preamble field **live-queried from the cluster**, not read from chart defaults: query the actually-applied resources (the `Sidecar`/`Telemetry` CRs, `meshConfig.discoverySelectors` on the Istio CR, the live egress hosts) per source context, once per sweep (outside the measurement window, `!DRY_RUN`-gated, bounded with `--request-timeout`), degrading to `unknown` on failure (never a false `off` — `unknown` means non-comparable, mirroring `istiod_restarted`'s `0|1|unknown`). Then propagate it like any preamble key: through ALL report formats (PL19), classified sweep-level-scalar vs per-iteration (PL26), with identical key sets across every writer (PL36). Apply it to **every** suite that runs against the configured mesh, not just the primary one — a partial roll-out reintroduces the gap for the omitted suites.
+**How to preempt:** For any mesh behavior that lives outside the harness git tree (chart-baked + GitOps/operator-reconciled), record the state **live-queried from the cluster**, not chart defaults: query the actually-applied resources (the `Sidecar`/`Telemetry` CRs, `meshConfig.discoverySelectors` on the Istio CR, the live egress hosts) once per sweep, before its first window (`!DRY_RUN`-gated, bounded with `--request-timeout`), and write `unknown` on failure, never a false `off` (`unknown` means non-comparable, like `istiod_restarted`'s `0|1|unknown`). Then propagate it like any preamble key: from every writer through the shared emitters (PL36), into ALL report formats (PL19), as `mixed` with a warning when inputs disagree (PL26). Apply it to **every** suite that runs against the configured mesh, not just the primary one — a partial roll-out reintroduces the gap for the omitted suites. Read it once per sweep, not again per step or per pass.
 
 (PL39 was added after the 20c/10k pretune-baseline cycle: round-1 reproducibility caught that the `tuningBaseline.*` toggles changed measurable mesh behavior but appeared in no preamble — a GitOps override would be invisible under an unchanged `HARNESS_SHA`; round-2 added a live-queried `TUNING_BASELINE`/`SIDECAR_EGRESS_HOSTS` preamble pair, and round-3 extended it from controlplane-only to all five suites after reproducibility flagged the partial roll-out.)
 
@@ -338,14 +337,14 @@ The sweep orchestrator threads a `SWEEP_RUN_ID` from the wrapper → probe → T
 
 **Why:** An orchestrator commonly adds an *optional, best-effort* step (campaign-end scale-envelope generation, a nice-to-have artifact) guarded by `do_it 2>/dev/null || warn "skipped"`, intending "if it fails, warn and carry on — the real data is already safe." But if `do_it` is a sourced lib function (or sub-script) that calls `die` (→ `exit 1`) on its OWN error paths, under `set -euo pipefail` that `exit` propagates out and aborts the WHOLE orchestrator *before* the `|| warn` can run. So two things are simultaneously true and both invisible: (a) the `|| warn` "graceful" branch is **unreachable dead code**, and (b) a step the author believed was non-fatal silently becomes a **whole-sweep killer** at the very end of a multi-hour run. Compounding it, the `2>/dev/null` that was meant to keep the optional step quiet **hides the specific `die` reason** on exactly the path (headline-artifact generation failed) where the operator most needs a clue — they get a generic, possibly-wrong warning instead.
 
-**How to preempt:** Run any best-effort/optional sub-step that may `die` internally inside a **subshell**, and capture its stderr instead of discarding it:
+**How to preempt:** Run any best-effort/optional sub-step that may `die` internally inside a **subshell**, and print its stderr instead of discarding it:
 ```
 if ! ( run_optional_step ) 2>"$err"; then
     warn "optional step failed (primary data is safe above):"
     sed 's/^/  /' "$err" >&2     # surface the SPECIFIC die reason
 fi
 ```
-The subshell contains the `die`'s `exit` so the orchestrator continues; capturing+echoing stderr preserves the real cause. This is the in-process twin of PL32: PL32 wraps per-combo *step scripts* so one failure doesn't kill the sweep; PL40 says an *optional in-process* `die` needs the same containment, and that an unreachable warn path is a silent correctness gap (the feature reads as "best-effort" but is actually fatal). Verify like PL33 — introduce a live failure (point the step at a missing results dir) and confirm the run CONTINUES with the specific reason printed, not that it aborts.
+The subshell contains the `die`'s `exit` so the orchestrator continues (the in-process twin of PL32). Only a step no report number depends on may be best-effort (the campaign scale envelope, rendered after the reports). A step whose failure would leave a number wrong or missing is not optional: it is a failed cell (PL32) or a `sweep_problem` in the sweep's outcome (exit 4), never a warning alone. Verify once by hand: point the step at a missing results dir and confirm the run continues with the reason printed.
 
 (PL40 was added after the report-hardening cycle: round-1 usability flagged that `003-run-sweep.sh` swallowed `render_scale_envelope` stderr with `2>/dev/null`; fixing it revealed the deeper bug — `render_scale_envelope` calls `die` internally, so without the subshell wrap the "best-effort" warning branch was dead code and a failed envelope render would have aborted the whole sweep after all combos completed. Fixed by subshell-isolating the render and echoing the captured stderr.)
 
@@ -353,7 +352,7 @@ The subshell contains the `die`'s `exit` so the orchestrator continues; capturin
 
 **Why:** When a value is centralized into one tunable (here: replacing hardcoded `curl --max-time 5` with a shared `METRICS_SCRAPE_TIMEOUT`), the obvious targets are the shared-lib helpers (`tests/lib/metrics.sh`, `preamble.sh`, `fanout.sh`). But a suite often has its OWN copy of the same operation that does not go through the lib — controlplane's **primary** TSV-feeding scrape lives in `tests/controlplane/002-collect-resource-metrics.sh` (`scrape_one_context`) with its own `curl --max-time 10`, plus a peak-poller scrape and a readiness probe with yet other ceilings. Fixing only the lib helpers leaves the suite-that-matters's hot path on the old hardcoded value, so the change ships looking complete (lib routed, `verify.sh` green, "ONE place to tune" claimed) while the exact failure it targets — an MB-class 10k `/metrics` body dropped by a too-small ceiling — is still live on the primary path. The "single lever" claim is then actively false: the tree has 4 uncoordinated ceilings.
 
-**How to preempt:** Before declaring a centralization sweep done, **grep the whole tree for the operation, not just the lib** — e.g. `grep -rnE 'curl.*\/metrics|--max-time'` across `tests/` — and for EACH hit decide: routed through the shared knob, or *deliberately* distinct (and if distinct, add a one-line comment saying why, e.g. a body-discarding `-o /dev/null` liveness probe that must fail fast). Enumerate the matches against the files that exist (the PL33 discipline, applied to a manual refactor instead of a lint glob). A suite-local duplicate of a shared operation is the default place this leaks; check every `0NN-*.sh` that does the operation directly, not only `tests/lib/`.
+**How to preempt:** Before declaring a centralization done, **grep the whole tree for the operation, not just the lib** — e.g. `grep -rnE 'curl.*/metrics|--max-time' tests/` — and route each hit through the one knob or helper, or give it a one-line comment saying why it differs (e.g. a body-discarding `-o /dev/null` liveness probe that must fail fast). A suite-local duplicate of a shared operation in a `0NN-*.sh` is the default place this leaks. The same holds for a rule two scripts must apply alike (a sweep that counts its cells and the report that reads them): it lives in one shared function both call, never in two copies kept in step.
 
 (PL41 was added after the metrics-timeout/ns-wait calibration cycle: round-1 routed `metrics.sh`/`preamble.sh`/`fanout.sh` through the new `METRICS_SCRAPE_TIMEOUT` but the scale lens caught that controlplane's primary `scrape_one_context` body scrape (and the peak poller) still hardcoded `--max-time 10/3`, leaving the headline 10k-body-drop unfixed on the suite that feeds the campaign's resource numbers; round-2 routed both body fetches through the knob and documented the readiness probe's deliberately-short ceiling.)
 
@@ -388,27 +387,27 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 
 (PL44 was added after the same cycle's round-4 usability review.)
 
-## PL45 — A sweep's signal trap waits for its foreground step: run steps in the background, exec them, and stop the step's whole tree
+## PL45 — A sweep's signal trap waits for its foreground step: run steps in the background, in a process group of their own, and stop that group
 
-**Why:** Bash runs a trap only after the foreground command returns. A `kill -TERM <sweep pid>` (a CI timeout, a scheduler, `kill` from another terminal) therefore waited for the running step, which can be a cell of an hour: the sweep did not stop, and its stop record was written only after the step's results were. Ctrl-C hides most of the problem (SIGINT goes to the whole process group, step included), but not all: a command under GNU `timeout` sits in a process group of its own, so it never gets the Ctrl-C, and the step, which did, can die before the sweep reads its tree, so the command runs on, orphaned. Running the step in the background and `wait`ing for it lets the trap run at once, but a forwarded signal reaches only the process the shell started: a wrapper subshell or a pipeline stage passes it on to nobody, a shell function cannot be started that way at all, and the step's own children (in-flight kubectl, per-member `( ... ) &` workers, commands under `timeout`) run on after the sweep exits and releases its lock. Two more gaps: a SIGINT or SIGHUP sent to the PID alone of a sweep in a terminal's foreground cannot be told from a Ctrl-C or a closed terminal, whose signal the foreground group already got, so the sweep does not send it again there, and those processes get only the SIGKILL after the grace; and a host without a `ps` that lists start times (busybox, ubi-minimal, distroless) cannot walk the tree with `ps`, and its stop then guessed the terminal's foreground from stdin.
+**Why:** Bash runs a trap only after the foreground command returns. A `kill -TERM <sweep pid>` (a CI timeout, a scheduler, `kill` from another terminal) therefore waited for the running step, which can be a cell of an hour: the sweep did not stop, and its stop record was written only after the step's results were. Running the step in the background and `wait`ing for it lets the trap run at once, but a signal sent to the step's PID alone reaches no one else: the step's own children (in-flight kubectl, per-member `( ... ) &` workers, commands under `timeout`) ran on after the sweep exited and released its lock.
 
-**How to preempt:** Start each step through `sweep_step` (`tests/lib/common.sh`): `( trap - INT QUIT; exec "$@" ) &` plus `wait`, so the signal reaches the step itself and SIGINT keeps its default there; pass a script, never a function or a pipeline. On HUP, INT or TERM the sweep stops the step's whole tree before it ends (`_sweep_step_stop`): a `ps -A` walk (Linux and macOS), or `/proc/<pid>/stat` where `ps` does not work (Linux: ppid, pgrp, tpgid and start time are fields 4, 5, 8 and 22), never a process group (it would take the step out of the terminal's foreground), each process frozen (SIGSTOP) until no new one appears, then sent the signal (Ctrl-C's and a hangup's are not sent again to the terminal's foreground group, which got them already; the console line counts the processes signalled and skipped) and resumed; what still runs `SWEEP_STOP_GRACE_SEC` later gets SIGKILL, so the sweep never hangs; the EXIT trap, and the lock's removal, run after the tree is gone (a second signal kills it at once: `sweep_step_kill`). Keep the grace above every step's exit-time cleanup bound (30 s default; propagation 002's canary unlabel at exit is bounded at 5 s per request, two requests per labeled pod; the fortio client pod's delete, at 5 s per request), and name the suite's cleanup command in the SIGKILL warning (`SWEEP_CLEANUP_CMD`). Run bounded commands through `run_timeout`, which passes `--foreground` so they stay in the sweep's process group (on expiry `timeout` then signals the command alone: fine for `kubectl exec`, which starts no children). Help and READMEs say: to stop a sweep that holds a terminal from elsewhere, send SIGTERM (`kill <pid>`); and which of the sweep's own commands between steps (settle, Istio reads, end recheck) finish first. Without a working `ps` or `/proc` (`_sweep_ps_works`), the sweep warns at its start, once, also on a `--dry-run` (`_sweep_ps_check`, from `sweep_settings_check` and `sweep_trap_signals`), and a stop signals the step's own PID (SIGINT and SIGHUP only when stdin is not a terminal: there, it says the signal is not sent again) with a watchdog that SIGKILLs it after the grace, so `wait` stays bounded; a second, different signal stops the first watchdog before it starts its own, and `sweep_step_kill` stops any that is left. The orchestrator-step lint (`tests/lib/lint-bare-scrape.sh`) reads through a `sweep_step` prefix, so a step started this way still needs its `|| { ...; continue; }` guard (PL32). Prove it with bats through the real sweep: a stub step that sends SIGTERM to the sweep's process alone and then waits must not finish its wait, the record must name SIGTERM, and the stub and every child it started must be gone when the sweep returns; for SIGINT, run the sweep under `set -m` in `bash -c` so the signal reaches it (a background job in bats ignores SIGINT).
+**How to preempt:** Start each step through `sweep_step` (`tests/lib/common.sh`): a background job in a process group of its own (stdin `/dev/null`) that the sweep `wait`s for, so the trap runs at once; pass a script, never a function or a pipeline, and guard the call (PL32). On HUP, INT or TERM the sweep sends SIGTERM to the step's process group (the step and everything it started), then SIGKILL to what still runs `SWEEP_STOP_GRACE_SEC` later, so it never hangs; its EXIT trap records `interrupted` with the signal and prints the suite's cleanup command (`SWEEP_CLEANUP_CMD`). Keep the grace (30 s default) above every step's exit-time cleanup bound, and run bounded commands through `run_timeout`, whose `--foreground` keeps them in the step's group. One bats test proves it: a stub step that starts a child and sleeps; a SIGTERM to the sweep leaves no process of the step's group and records `interrupted`.
 
-(PL45 was added after carry-over round 2: the scale lens found in round 1 that a SIGTERM to a sweep waited for its step, as the sweeps' help said; round 2 forwarded it through `sweep_step`, round 3 stops the step's whole tree; in round 3 the scale lens found the terminal-foreground skip, the `timeout` group, the missing-`ps` hang and a grace equal to a cleanup bound, which round 4 documents or closes; round 5 reads `/proc` where `ps` does not work and stops a leftover watchdog.)
+(PL45 was added after carry-over round 2: the scale lens found in round 1 that a SIGTERM to a sweep waited for its step, as the sweeps' help said; rounds 2 to 5 forwarded the signal, then stopped the step's whole tree through `ps` and `/proc` walks and process freezes; the 2026-10 editing pass replaced all of that with the step's own process group.)
 
 ## PL46 — A `! cmd` in the middle of a bats test never fails it
 
 **Why:** bats runs each test under `set -e` plus an ERR trap, and bash exempts a command negated with `!` from both, so `! grep -q '^PROBLEM=' "$rec"` in the middle of a test passes whatever grep finds; only the test's last command sets its status. The same holds in a loop (only the last pass counts), an `if` body and a `{ }` group. 52 such assertions in 15 bats files proved nothing.
 
-**How to preempt:** Write `! cmd || false` (keeps `$output` and `$status`) or `run ! cmd` (bats 1.5+; overwrites them); bats-assert's `refute`, `refute_output` and `refute_line` fail properly. `tests/lib/lint-bats-negation.sh` (`tests/lib/verify.sh` step 7) flags a line that starts with `! ` in a test, setup or helper body when it is not the block's last command and does not end in `|| false` (or `|| return`, `|| exit`, `|| fail`, `|| { ...; false; }`). The same exemption covers every command but the last of an `a && b` list, so `[ -e f ] && [ ! -s f ]` passes when `f` is missing: write two assertions.
+**How to preempt:** A convention, not a lint: write `! cmd || false` (keeps `$output` and `$status`) or `run ! cmd` (bats 1.5+; overwrites them); bats-assert's `refute`, `refute_output` and `refute_line` fail properly. The same exemption covers every command but the last of an `a && b` list, so `[ -e f ] && [ ! -s f ]` passes when `f` is missing: write two assertions. The conventions reviewer checks new tests for it.
 
-(PL46 was added after carry-over round 5: a review found the mid-test negations; once converted to `|| false` all 52 still passed, every negated grep reading a file that exists, and the lint keeps new ones out. The 19 mid-test `[ ] && [ ]` assertions found with them were split into one assertion per line, and also still pass.)
+(PL46 was added after carry-over round 5: a review found the mid-test negations; once converted to `|| false` all 52 still passed, every negated grep reading a file that exists. The 19 mid-test `[ ] && [ ]` assertions found with them were split into one assertion per line, and also still pass. The lint added then was dropped in the 2026-10 editing pass; the convention stays.)
 
 ## PL47 — A new deployment axis goes into every result's provenance in the same change
 
-**Why:** Making the harness run on two platforms (Kubernetes with the Sail operator, OpenShift with OSSM, on kind or cloud nodes) turned "which platform and mesh build produced this row" into a hidden variable. Round 1 of the de-Red-Hat cycle found that only the gateway-api check recorded the operator build: every other TSV and report would have averaged kind and cloud, Sail and OSSM runs without a trace, and a resumed sweep would have credited new rows to the build it started on.
+**Why:** Making the harness run on two platforms (Kubernetes with the Sail operator, OpenShift with OSSM, on kind or cloud nodes) turned "which platform and mesh build produced this row" into a hidden variable. Round 1 of the de-Red-Hat cycle found that only the gateway-api check recorded the operator build: every other TSV and report would have averaged kind and cloud, Sail and OSSM runs without a trace.
 
-**How to preempt:** When a change adds an axis results depend on (platform, operator, node provider, mesh build), add it to the shared provenance emitter in that change (`tests/lib/platform.sh`), read it live before any measurement window, and write it from every TSV writer and placeholder (`config-suites.bats` checks the pairing). Every report merges it over its inputs and warns in its body when they differ; a `--resume` compares it with the record the sweep started with and refuses a definite change; a long sweep re-reads it at the end. Values that cannot be read are `unknown`, never a guess.
+**How to preempt:** When a change adds an axis results depend on (platform, operator, node provider, mesh build), add it to the platform record (`tests/lib/platform.sh`) in that change: read live, once per member, before any measurement window; written by every TSV writer and placeholder through `platform_preamble_lines` (PL36); merged in every report, with a warning in its body when the inputs differ; and read again at a sweep's end, where a change is a problem in its outcome (exit 4). A value that cannot be read is `unknown`, never a guess.
 
 (PL47 to PL54 were added after the de-Red-Hat cycle: rounds 1 to 4.)
 
@@ -456,64 +455,70 @@ A NO may accept a late success (an answer with the workload's text proves the pa
 
 ## PL55 — A value that grows with the fleet never rides the arguments or the environment
 
-**Why:** The platform record (one line per member) was exported for a sweep's steps, and the json reports passed it to jq with `--argjson` and to awk in an environment variable. Linux refuses to start any command whose arguments or environment hold a single string over 128 KiB (MAX_ARG_STRLEN), which the record passes at about 400 members: every command a sweep step started, `kubectl` included, would have failed with "Argument list too long", and the three json reports did fail at 500 members. The same record made the reports quadratic: six TSVs of 500 members took minutes (a scan per member lookup, a fork per member).
-
-**How to preempt:** Hand anything sized by the fleet to child processes in a file (the sweep's `platform-record.txt`; jq `--slurpfile` from a process substitution; awk `getline` from a file), never `export` it, and index it once (an associative array) instead of scanning it per member. Test every entrypoint with a record of 500 members (`wide_ctxs` in `tests/lib/test/test_helper.bash`): each report in every format, and a sweep step that reads the shared record.
+Retired (2026-10 editing pass): written for a fleet of 400 to 500 members, where the campaign has 20. Still true: Linux refuses to start a command whose single argument or environment string exceeds 128 KiB.
 
 ## PL56 — A message about a fleet names what differs, five at most, with a count
 
-**Why:** Warnings and notes that printed whole per-member values hid the change they were about: a 40 KB line of 500 `member=build` pairs in the tuning comparison for the one member on another build, and two 90-character lever strings in a drift warning for the one lever that changed.
-
-**How to preempt:** Print only the members or levers that differ from the reference, the first five by name and then "and N more", with both values; keep the full values in the TSV. Test each such message at 500 members.
+Retired (2026-10 editing pass): its five-member caps are not needed at the campaign's 20 members. Still holds: a warning names what differs (the members and both values), not every member's value.
 
 (PL55 and PL56 were added after the same cycle's round 5.)
 
 ## PL57 — A change made only through a patch leaves nothing to find; put a labelled marker on first and take it off last
 
-**Why:** The platform record found a tuning profile's objects by their label, but three of the four profiles only patch the Istio CR (istiod's env), which carries no label. A tuning run killed before its revert left those settings in place with nothing a record, a sweep or the cleanup could see: every later sweep measured the profile's configuration as the charts', and `005-cleanup.sh` could undo it only from the killed run's own state directory.
-
-**How to preempt:** When a tool changes shared state in place (a patch, an annotation, a setting), first put a labelled object on every target that names the change and holds what undoes it, and remove it last, only once the undo checks out. Records and cleanups then find it with the change's other objects in one label query, from any checkout, and the tool's own entry points can refuse to start over it.
+Retired (2026-10 editing pass): it made a labelled marker the rule for every in-place change, more than the campaign needs. Still holds: a tuning run killed before its revert leaves its profile applied, and `tests/tuning/005-cleanup.sh` must undo it before the next sweep.
 
 ## PL58 — A check that a run held nothing foreign also checks that it held all of its own
 
-**Why:** Tuning 004 read a pass as `own` when no member held another profile's objects and some member held one of its own. A profile reverted during a pass (by hand, by a cleanup from another shell, or an Argo CD sync that put istiod's env back) still read `own`, and the comparison credited the profile with figures measured without it.
-
-**How to preempt:** Check both directions from the run's own record of what it applied (`state/objects`, `state/patch.json`): nothing it should not have, and every object it should have on every member, with the settings it sets differing from the baseline's. Read the record again after the window, so a change during it shows as `mixed` or `missing`, never as the run's.
+Retired (2026-10 editing pass): the tuning-objects record key it compared in both directions is gone.
 
 ## PL59 — A cleanup that cannot see a record says what it did not check
 
-**Why:** `005-cleanup.sh` restored the members from their profile markers, found no Argo CD pause record under its results directory (the killed run wrote it in another checkout), and printed "Cleanup complete": the deny window stayed on the hub and the Istio CR Applications stopped syncing, with nothing saying so.
-
-**How to preempt:** When a cleanup finds state whose record is missing, find the rest by value where it can (`006-gitops-pause.sh --clear` matches the window `--pause` builds) and otherwise say which part it did not check and the command that does; never end on an unqualified "complete".
+Retired (2026-10 editing pass): finding another checkout's records by value is more than the campaign needs. Still holds: a cleanup that skipped a part names that part and the command that does it, instead of an unqualified "complete".
 
 (PL57 to PL59 were added after the same cycle's round 6.)
 
 ## PL60 — A check moved from the run to each of its parts needs a reader in each part's report
 
-**Why:** Tuning 003 came to read each pass's record again after its probes and write what changed to the pass's `platform-drift.txt`, but 004 took only the record's keys from it: a Kubernetes version, a tuning lever or an istiod limit that changed during a pass was written down and shown nowhere in the comparison, and the drift check's own warning spoke of "the sweep" and of the controlplane report's window-peak percentages, which a pass's comparison does not show.
-
-**How to preempt:** When a check that ran once per run starts running once per part (a pass, a combo), give every kind of finding it writes a reader in that part's report, worded for the part (`platform_drift_changes`, read per pass; the drift check's `pass` wording), and test that a change of each kind reaches the report.
+Retired (2026-10 editing pass): the per-pass drift file it gave a reader is gone.
 
 ## PL61 — A value that was not read is not known, never another value; one that holds two values is mixed
 
 **Why:** Tuning 004 compared each member's istiod settings with the baseline's, so a member whose istiod could not be read (`unknown`) read as other settings, and a pass whose TSVs disagree on a build read as another build than the baseline's: a profile could be credited with, or blamed for, a difference nobody had seen.
 
-**How to preempt:** Before comparing, split each side into its definite values and the rest. An unread or unrecorded value (`unknown`, `unreachable`, a digest `@unknown`) makes the comparison not known, with a warning that names the members. A member with two values from two reads (a `mixed:` merge of inputs that disagree, or a value that changed during the run) reads `mixed` with its own warning and is still compared value by value: it matches the other side when one of its values is that side's, and differs when none is. A member whose pods run two builds at once (`+`-joined) is one value for the build comparison, which so keeps a rollout caught midway loud; only the istiod settings row compares each pod's digest, so one istiod pod on the baseline's settings still shows a profile that was not in effect there. Test each with one member of several and with all of them.
+**How to preempt:** An unread value (`unknown`, `unreachable`, a digest `@unknown`) is not a value: a comparison with it is not known (say so, naming the members), never `same` or `differs`, and never filled with a default. A merge of inputs that disagree reads `mixed:<a>,<b>` and warns (PL26). One test per rule.
 
 (PL60 and PL61 were added after the same cycle's round 7.)
 
 ## PL62 — A read moved into each part makes each part its own reference; compare the parts with each other
 
-**Why:** Tuning 003 came to read each pass's tuning levers and istiod limits before its probe, and the read after the probe compared the pass with its own start, while 004 checked those values only within each pass. A root Sidecar removed between the baseline and a profile pass, or an istiod CPU limit doubled, was then compared with nothing: the table read `same` and credited the profile with the change, which the earlier read once per sweep had caught.
-
-**How to preempt:** When a value read once per run comes to be read once per part, compare each part's value with the reference part's, member by member, unless the part's own record shows that it set the value on purpose (a tuning profile's `state/objects` and `state/patch.json`), and then say so in a note. Test a change between two parts that no part's record explains, and one that a part's record does.
+Retired (2026-10 editing pass): the per-pass reads and comparisons of tuning levers, istiod limits and replica counts are gone.
 
 (PL62 was added after the same cycle's round 8.)
 
 ## PL63 — A capped list of a fleet names the members that matter most first
 
-**Why:** Tuning 004's notes named five members in the order they first appeared, so six members whose istiod replica count changed during a pass, and then six that a side did not read, hid the one that differed from the baseline: no line of the report named it. Ranking the members that differ ahead of those whose count changed still left them in one group with those not read, and it took two rounds to find both.
-
-**How to preempt:** Rank what a capped message lists by what it tells the reader (differs, then not known, then only mixed), cap after ranking, and say how many are left out ("and 1 more member" in the singular). Test six members of each lower rank ahead of one that differs, in the unit and end to end.
+Retired (2026-10 editing pass): capped, ranked member lists are not needed at the campaign's 20 members.
 
 (PL63 was added after the same cycle's round 14.)
+
+## PL64 — Guard the number, not the bookkeeping
+
+**Why:** Each review round of PRs #107 and #109 turned a theoretical gap into a check, a state and tests, until the checks of checks outweighed the measurements (1,331 tests, 62-minute CI) and the harness grew too large to operate without AI.
+
+**How to preempt:** Name the wrong or mislabeled number a check prevents before writing it; prefer failing loudly (stop the run, or a problem in its outcome) over recording one more state; one rule, one test; when a check needs a check, delete the first one or make it simpler.
+
+(PL64 was added by the 2026-10 editing pass, PR #110, which retired PL55 to PL60, PL62 and PL63; reviews now apply the substantive rule in [README](README.md).)
+
+## PL65 — A wait polls the rule its check applies; a terminating pod has ended
+
+**Why:** The Istio version check waited with `kubectl wait --for=condition=Ready` on the Istio CR, which Sail sets while istiod's old pods are still terminating: the wait returned at once, the check that followed found the member not ready and stopped the run, which said it had waited 60 s. The platform record had the mirror fault: its image and env reads counted terminating pods, so the tail of a rollout read as a second image and a drift problem in the sweep's outcome.
+
+**How to preempt:** Re-read and re-apply the check's own rule until it holds or one deadline passes, never a condition of another object that seems to mean the same. A read of what a workload runs leaves out pods with a `deletionTimestamp`.
+
+## PL66 — A command a run prints for later works from the state its exit leaves
+
+**Why:** Tuning 003's `clean up with:` line began with `006-gitops-pause.sh --resume --state-file`, but the sweep's EXIT trap had already resumed Argo CD and deleted that record, so the first command of the pasted line exited 1.
+
+**How to preempt:** Print only commands that are safe to run after the trap ran (they find what is left, or nothing to do), and test the line against what a stopped sweep leaves.
+
+(PL65 and PL66 were added after rounds 1 and 2 of the editing pass's review.)
