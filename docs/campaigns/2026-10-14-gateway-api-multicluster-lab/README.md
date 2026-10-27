@@ -1,6 +1,6 @@
 # 2026-10-14 lab run of the Gateway API multicluster ingress check
 
-The first live run of [`tests/gateway-api/`](../../misc_tests/gateway-api/README.md) (now `misc_tests/gateway-api/`) (backlog task 8). It
+The first live run of [`tests/gateway-api/`](../../../misc_tests/gateway-api/README.md) (now `misc_tests/gateway-api/`) (backlog task 8). It
 asks whether Gateway API (HTTPRoute) needs the backend Service, or its namespace, on every mesh
 member so that a request entering any member's ingress reaches a workload that runs on one member.
 This is a functional check, not a scale run.
@@ -8,7 +8,7 @@ This is a functional check, not a scale run.
 ## Rig
 
 - Two mesh members and an ACM hub `<acm-hub-ctx>` running Argo CD (not a mesh member). See
-  [`docs/runbooks/existing-cluster-lab/`](../runbooks/existing-cluster-lab/README.md).
+  [`docs/runbooks/existing-cluster-lab/`](../../runbooks/existing-cluster-lab/README.md).
   - `<mesh-b-ctx>` ran the echo workload: the "workload member".
   - `<mesh-a-ctx>` did not run it: the "other member", whose ingress is the cross-cluster test.
 - Single-node OpenShift 4.21 on bare metal, MetalLB for LoadBalancer Services.

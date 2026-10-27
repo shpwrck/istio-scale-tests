@@ -38,7 +38,7 @@ hours (`--dry-run` prints the matrix and a capacity check).
 
 Compare cells along one axis at a time: the question is how a number grows as one setting grows.
 For scale, the June 2026 ten-cluster ROSA run measured per-proxy configuration of 3.9 MiB without
-scoping and 0.5 MiB with it ([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)).
+scoping and 0.5 MiB with it ([record](../../docs/campaigns/2026-06-04-clean-pass/README.md)).
 A cell whose istiod restarted is counted in `n_total` but not averaged; [Outputs](#outputs) has
 every column and status, and [Reading results](../../docs/reading-results.md) the checks that
 apply to every suite.
@@ -441,7 +441,8 @@ object of the series `controlplane-test.series=<ID>` (without `--series` the nam
   (istiod must gain X x K Services). Each phase has an `outside` window and a probe per scoping,
   and the report checks the istiod Service count against both expectations (PL31).
 - **Memory stop guard.** Before each step, scoping switch and outside phase, `003` samples
-  every guard context: `--contexts` plus `SETUP_CONTEXTS` (or `CONTROLPLANE_MEM_GUARD_CONTEXTS`),
+  every guard context: `--contexts` plus `SETUP_CONTEXTS` when you set it, not
+  `config/versions.env`'s default (or `CONTROLPLANE_MEM_GUARD_CONTEXTS`),
   since every member ingests the Services through remote discovery and gateways keep `*/*`
   (PL38). A live sweep also adds every member the measured contexts' Istio remote secrets
   name (context names equal cluster names in the repo's kubeconfigs) and stops when a

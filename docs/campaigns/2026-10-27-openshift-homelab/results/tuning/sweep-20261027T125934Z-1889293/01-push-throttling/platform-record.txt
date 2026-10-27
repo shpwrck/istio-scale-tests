@@ -1,0 +1,2 @@
+<mesh-a-ctx>	openshift	servicemeshoperator3:3.4.3	istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7	istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109	none	0a5358173660
+<mesh-b-ctx>	openshift	servicemeshoperator3:3.4.3	istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7	istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109	none	0a5358173660

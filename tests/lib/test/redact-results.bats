@@ -475,6 +475,19 @@ _cp_run() {
 	grep -qx 'p99 12 ms on <ip>' "${out}/lone/summary.md"
 }
 
+@test "redact-results: a glossary that names a key in a code span (\`REMOTES\`: prose) teaches no member" {
+	local d="${RES}/prop" out="${BATS_TEST_TMPDIR}/copy"
+	mkdir -p "$d"
+	# The propagation report's glossary: the words after it are not contexts.
+	printf '# REMOTES=ci-b\n| `n_attempted` | From `ITERATIONS` and `REMOTES`: iterations for the P1 phases, rows for P2. |\nci-b answered.\n' > "${d}/sweep-summary.md"
+	run --separate-stderr "$REDACT" --out "$out" "$d"
+	assert_success
+	[[ "$stderr" == *"<mesh-a-ctx>"*"ci-b"* ]]
+	[[ "$stderr" != *"<mesh-b-ctx>"* ]]
+	grep -qx '| `n_attempted` | From `ITERATIONS` and `REMOTES`: iterations for the P1 phases, rows for P2. |' "${out}/prop/sweep-summary.md"
+	grep -qx '<mesh-a-ctx> answered.' "${out}/prop/sweep-summary.md"
+}
+
 @test "redact-results: --context and --hub-context split a comma list and refuse a name with a space or no name" {
 	local d="${RES}/s"
 	mkdir -p "$d"

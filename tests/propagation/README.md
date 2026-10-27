@@ -30,7 +30,7 @@ average, p50, p95, p99 and max per mesh size:
 Smaller is better. Look at how they change with mesh size: P2 and P3 growing with the number of
 members means cross-cluster propagation is the bottleneck. For scale, the June 2026 ten-cluster
 ROSA run measured P1 and P2 flat at about 2 seconds from 1 to 10 members
-([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)). Rows with a status other than
+([record](../../docs/campaigns/2026-06-04-clean-pass/README.md)). Rows with a status other than
 `OK` (a timeout, an istiod restart, a failed scrape) are counted in `n_total` but not averaged;
 [Outputs](#outputs) has the full list and [Reading results](../../docs/reading-results.md) the
 checks that apply to every suite.

@@ -3,9 +3,9 @@
 Open work for istio-scale-tests, moved here from GitHub issues (#84, #85, #86, #87, #88, #91) so
 it travels with the repo. Status reflects the backlog PR of 2026-10-13 (tasks 2, 3, 5, 6 and 7),
 validated on the existing-cluster lab
-([`docs/campaigns/2026-10-13-lab-backlog-validation.md`](docs/campaigns/2026-10-13-lab-backlog-validation.md)),
+([`docs/campaigns/2026-10-13-lab-backlog-validation/README.md`](docs/campaigns/2026-10-13-lab-backlog-validation/README.md)),
 and the ROSA validation window of 2026-10-14 (tasks 1, 3, 4, 6), which also queued the fixes in
-section 9 ([`docs/campaigns/2026-10-14-rosa-validation.md`](docs/campaigns/2026-10-14-rosa-validation.md)).
+section 9 ([`docs/campaigns/2026-10-14-rosa-validation/README.md`](docs/campaigns/2026-10-14-rosa-validation/README.md)).
 A second ROSA window on 2026-10-16 validated those fixes (section 9, "Validated on ROSA").
 The original issue texts are in the appendix.
 
@@ -237,7 +237,7 @@ but not the Service (S7 vs S7b), with a `Hostname` backendRef or a classic Virtu
 ([`misc_tests/gateway-api/README.md`](misc_tests/gateway-api/README.md)).
 
 **Validated:** on the lab, 2026-10-14: 22 of 22 rows matched
-([`docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`](docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)).
+([`docs/campaigns/2026-10-14-gateway-api-multicluster-lab/README.md`](docs/campaigns/2026-10-14-gateway-api-multicluster-lab/README.md)).
 Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded, so a remote-only backend
 routes but keeps its Application Degraded; a Service on every member avoids that.
 
@@ -247,13 +247,13 @@ LoadBalancer IP).
 ## 9. Fixes from the 2026-10-14 ROSA window
 
 The window found 17 issues
-([campaign record, "Issues found"](docs/campaigns/2026-10-14-rosa-validation.md#issues-found));
+([campaign record, "Issues found"](docs/campaigns/2026-10-14-rosa-validation/README.md#issues-found));
 they reduce to the 12 items below (11 open, 9.12 done). Each item names where the fix lands, the
 proposed fix, how to accept it, and where it can be tested: **offline** (bats, `--dry-run`,
 `helm template`), the **lab** (powered off again since 2026-10-14, after task 8's run; power-on
 steps in [`docs/runbooks/existing-cluster-lab/README.md`](docs/runbooks/existing-cluster-lab/README.md)),
 or **ROSA** (the next window). The window's raw data (needed to calibrate 9.4 and to analyze 9.11)
-is listed in the record's ["Raw data"](docs/campaigns/2026-10-14-rosa-validation.md#raw-data).
+is listed in the record's ["Raw data"](docs/campaigns/2026-10-14-rosa-validation/README.md#raw-data).
 
 **Suggested PRs and order:**
 - **A** = 9.1 and **B** = 9.2: independent of everything else.
@@ -872,7 +872,7 @@ The scale suites deploy **bare `Service` objects + sidecar injection** plus the 
 
 Real production meshes carry VS/DR per service (routing, retries, timeouts, subsets, outlier detection, connection pools). These are config istiod must **compute into Envoy config, cache (mesh-wide in multi-primary), and push via xDS** — so they materially increase control-plane load.
 
-In the **2026-06-22 20c/10k campaign** (`docs/campaigns/2026-06-22-20c-10k-10k-results.md`), istiod sat at **~19% of its 16Gi mem limit and ~3% CPU** at 10,000 Services. That headroom is **optimistic relative to a fully-configured production mesh** — a mesh with VS/DR at the same Service count consumes more istiod memory/CPU and slows convergence. The campaign measures **Service-object scale, not configured-mesh config scale**, and the customer brief notes this as a boundary.
+In the **2026-06-22 20c/10k campaign** (`docs/campaigns/2026-06-22-20c-10k-10k/README.md`), istiod sat at **~19% of its 16Gi mem limit and ~3% CPU** at 10,000 Services. That headroom is **optimistic relative to a fully-configured production mesh** — a mesh with VS/DR at the same Service count consumes more istiod memory/CPU and slows convergence. The campaign measures **Service-object scale, not configured-mesh config scale**, and the customer brief notes this as a boundary.
 
 #### Proposal
 

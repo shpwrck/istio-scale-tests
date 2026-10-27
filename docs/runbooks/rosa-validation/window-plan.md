@@ -9,7 +9,7 @@ us-east-2. Context names are placeholders: `<acm-hub-ctx>` is `cluster-001`, and
 ## Corrections from the 2026-10-14 window
 
 This plan ran on 2026-10-14
-([record](../../campaigns/2026-10-14-rosa-validation.md)). Read the plan below with these
+([record](../../campaigns/2026-10-14-rosa-validation/README.md)). Read the plan below with these
 corrections; the fixes behind them are queued in [`BACKLOG.md`](../../../BACKLOG.md), section 9.
 
 **Since 2026-10-16 the harness and platform do most of this themselves** (BACKLOG 9.1-9.11):
@@ -1001,7 +1001,7 @@ T0+17:45 ([Fallback tiers](#fallback-tiers-b-and-a)).
   - the churn results;
   - `rosa-lb/`, with A0 and the pause state file;
   - any `istiod-diag-*` evidence, which stays out of git.
-- Write `docs/campaigns/<window-date>-rosa-validation.md` from `docs/campaigns/TEMPLATE.md`. Before
+- Write `docs/campaigns/<window-date>-rosa-validation/README.md` from `docs/campaigns/TEMPLATE.md`. Before
   quoting anything, write a redacted copy of each sweep dir with `tests/lib/redact-results.sh --out
   /tmp/redacted tests/<suite>/results/sweep-<RUN_ID>` (add `--hub-context <hub-ctx>`; see
   `docs/campaigns/README.md`) and quote from the copy. Its placeholders:

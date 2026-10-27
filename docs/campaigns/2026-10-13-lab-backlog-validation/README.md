@@ -1,13 +1,13 @@
 # 2026-10-13 lab validation of backlog tasks 2, 3, 5 and 6
 
-Live checks of the harness changes for backlog tasks 2, 3, 5 and 6 ([`BACKLOG.md`](../../BACKLOG.md))
+Live checks of the harness changes for backlog tasks 2, 3, 5 and 6 ([`BACKLOG.md`](../../../BACKLOG.md))
 on the existing-cluster lab, plus the experiments for task 3's two root-cause hypotheses.
 This is not a scale run. The lab proves the mechanisms; the absolute numbers are lab-sized.
 
 ## Rig
 
 - Two mesh members, `<mesh-a-ctx>` and `<mesh-b-ctx>`, and an ACM hub `<acm-hub-ctx>` running Argo CD
-  (not a mesh member). See [`docs/runbooks/existing-cluster-lab/`](../runbooks/existing-cluster-lab/README.md).
+  (not a mesh member). See [`docs/runbooks/existing-cluster-lab/`](../../runbooks/existing-cluster-lab/README.md).
 - Single-node OpenShift 4.21 on bare metal (19.5 CPU, about 93Gi, 250 pods per node), MetalLB for
   LoadBalancer Services (a two-address pool per member: ingress + east-west gateway).
 - OSSM 3.4 / Istio v1.30.5, multi-primary multi-network, shared root from the hub (ESO PushSecret,
@@ -132,7 +132,7 @@ DNS propagation, quota-late provisioning, and the 3-cluster partial-mesh pattern
 The campaign's 7-of-19 failure matches the CA race exactly, and the CA race is now prevented
 (PreSync hook) and detected (gate `ca=` check, reach check). The load-balancer hypothesis did not
 reproduce on MetalLB. Whether AWS load balancers add a failure mode of their own needs the ROSA
-window in [`docs/runbooks/rosa-validation/`](../runbooks/rosa-validation/README.md).
+window in [`docs/runbooks/rosa-validation/`](../../runbooks/rosa-validation/README.md).
 
 ## Fixed after this run
 

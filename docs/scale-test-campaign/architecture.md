@@ -11,7 +11,7 @@ Terraform default naming: the hub is `cluster-001` and the mesh members are
 `cluster-002 … cluster-021`.
 
 > This shape matches the recorded run in
-> [`docs/campaigns/2026-06-22-20c-10k-10k-results.md`](../campaigns/2026-06-22-20c-10k-10k-results.md).
+> [`docs/campaigns/2026-06-22-20c-10k-10k/README.md`](../campaigns/2026-06-22-20c-10k-10k/README.md).
 
 ## Diagram conventions
 

@@ -2,7 +2,7 @@
 
 > **Erratum (2026-10-16).** The controlplane `cpu_avg (m)` column is the peak of each window, not
 > its average, and the `(MB)` columns are MiB; churn-dataplane rows may overstate the churn they
-> saw. Details in the [results record](2026-06-04-clean-pass-results.md).
+> saw. Details in the [results record](README.md).
 
 ## Overview & Summary
 

@@ -1,6 +1,7 @@
 # Campaign summary — template
 
-Copy this into `YYYY-MM-DD-<slug>-results.md` at the start of a campaign write-up.
+Copy this into `YYYY-MM-DD-<slug>/README.md` at the start of a campaign write-up; put each
+suite's charts in `charts/<suite>.md` next to it ([layout](README.md#layout)).
 
 The **non-negotiable rule:** lead with the *Scale envelope* below before any
 per-metric findings. "Mesh size 1→10" is a cluster count, not a scale — it says nothing
@@ -114,7 +115,7 @@ The CAUTION/FAIL utilization bands are `SCALE_SLA_CAUTION_PCT` (default 75) and
 The controlplane report (`004-report-results.sh`) emits a one-line headline verdict in
 every format: `Customer SLA verdict: PASS|CAUTION|FAIL — <reason>`.
 
-For a filled-in example see [`2026-06-22-20c-10k-10k-results.md`](2026-06-22-20c-10k-10k-results.md).
+For a filled-in example see [`2026-06-22-20c-10k-10k/`](2026-06-22-20c-10k-10k/README.md).
 
 ---
 

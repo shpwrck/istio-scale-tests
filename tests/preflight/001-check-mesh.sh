@@ -184,6 +184,7 @@ done
 if t="$(timeout_cmd)"; then ok "$t (GNU coreutils)"; else fail "neither timeout nor gtimeout is on PATH" "install GNU coreutils (macOS: brew install coreutils)"; fi
 if command -v istioctl >/dev/null 2>&1; then
 	iv="$(istioctl version --remote=false --short 2>/dev/null | head -n 1 | tr -d '\r' || true)"
+	iv="${iv##*: }" # 1.30 prints "client version: 1.30.5"; older releases the bare version
 	if [[ "${iv#v}" == "${ISTIO_VERSION#v}" ]]; then
 		ok "istioctl ${iv}"
 	else

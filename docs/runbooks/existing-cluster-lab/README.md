@@ -176,7 +176,7 @@ find the Argo CD namespace from the hub (`openshift-gitops` here); `GWAPI_ARGOCD
      delete cascades.
 - Gateway API check:
   - Expected result, again on 2026-10-26: `22 MATCH, 0 DEVIATION, 0 UNKNOWN` and the two answers
-    recorded in `docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md`.
+    recorded in `docs/campaigns/2026-10-14-gateway-api-multicluster-lab/README.md`.
   - While deployed, both member Applications read Degraded by design: C1's backend does not exist,
     and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded.
   - After `fill | kubectl --context <acm-hub-ctx> delete -f -`, the finalizers remove everything

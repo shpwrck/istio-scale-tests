@@ -30,7 +30,7 @@ settle. Then clean up and write the report. Rough time with two members at the d
 
 Smaller is better; watch how the remote numbers grow with mesh size and intensity. For scale, the
 June 2026 ten-cluster ROSA run measured local convergence of 2.4 to 3.7 s and remote reach of 7.8
-to 12 s ([record](../../docs/campaigns/2026-06-04-clean-pass-results.md)). Rows with a status
+to 12 s ([record](../../docs/campaigns/2026-06-04-clean-pass/README.md)). Rows with a status
 other than `OK` are counted in `n_total` but not averaged; [What gets measured](#what-gets-measured)
 lists them, and [Reading results](../../docs/reading-results.md) the checks that apply to every
 suite.

@@ -1,10 +1,10 @@
 # 2026-10-14 ROSA validation window (backlog tasks 1, 3, 4, 6)
 
 One cost-capped window on ROSA HCP, run from the plan in
-[`docs/runbooks/rosa-validation/window-plan.md`](../runbooks/rosa-validation/window-plan.md) with
+[`docs/runbooks/rosa-validation/window-plan.md`](../../runbooks/rosa-validation/window-plan.md) with
 no cuts and three owner-approved extensions. It gave tasks 1 and 4 their first live runs, closed
 task 3's AWS load-balancer questions, and put first at-scale numbers on task 6. It also found 17
-issues; the fixes are queued in [`BACKLOG.md`](../../BACKLOG.md) (section 9). Raw data is not in
+issues; the fixes are queued in [`BACKLOG.md`](../../../BACKLOG.md) (section 9). Raw data is not in
 git; where it lives is under [Raw data](#raw-data).
 
 Contexts are placeholders: `<acm-hub-ctx>` is the ACM hub, `<mesh-a-ctx>`, `<mesh-b-ctx>` and
@@ -322,7 +322,7 @@ operator host only; an off-laptop copy is pending the owner's choice of destinat
 ## Reproduce
 
 Window worktree at `8150d4b`, inputs as in the runbook's Template map, then the phases in
-[`window-plan.md`](../runbooks/rosa-validation/window-plan.md) with the corrections listed at its
+[`window-plan.md`](../../runbooks/rosa-validation/window-plan.md) with the corrections listed at its
 top. Commands for the runs the plan did not have, all with `--contexts <mesh-a-ctx> --mesh-sizes 1`
 and `--mem-guard-contexts <mesh-a-ctx>,<mesh-b-ctx>,<mesh-c-ctx>`:
 

@@ -389,6 +389,9 @@ function learn(L,    s, k, lk, cls, pre, post, rest, sep, off, m, key, quoted, v
 		off += RSTART + RLENGTH - 1
 		s = rest
 		if (pre ~ /[A-Za-z0-9_.\/-]/) continue
+		# A key in a code span followed by a colon is prose that names the key (a report
+		# glossary: "`REMOTES`: iterations for the P1 phases"), not its value.
+		if (pre == "`" && sep == ":") continue
 		lk = lower(key)
 		cls = keyclass(lk)
 		if (cls == "") continue

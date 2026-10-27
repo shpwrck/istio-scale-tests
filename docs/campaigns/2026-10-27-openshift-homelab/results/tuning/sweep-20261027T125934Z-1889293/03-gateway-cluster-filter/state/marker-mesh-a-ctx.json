@@ -1,0 +1,17 @@
+{
+  "apiVersion": "v1",
+  "data": {
+    "applied-at": "2026-10-27T13:07:18Z",
+    "description": "Limit gateway clusters to hosts referenced by the gateway's VirtualServices (PILOT_FILTER_GATEWAY_CLUSTER_CONFIG). Smaller gateway config and pushes.",
+    "istio-revert.json": "{\"spec\": {\"values\": {\"pilot\": {\"env\": null}}}}",
+    "profile": "03-gateway-cluster-filter"
+  },
+  "kind": "ConfigMap",
+  "metadata": {
+    "labels": {
+      "istio-scale-tests/tuning-profile": "03-gateway-cluster-filter"
+    },
+    "name": "tuning-profile-03-gateway-cluster-filter",
+    "namespace": "istio-system"
+  }
+}

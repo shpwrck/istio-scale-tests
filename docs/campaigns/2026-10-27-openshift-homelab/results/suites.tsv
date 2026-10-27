@@ -1,0 +1,7 @@
+suite	status	exit	started_at	minutes	sweep_dir
+dataplane	OK	0	2026-10-27T12:19:16Z	13	dataplane/sweep-20261027T121916Z-1653682
+propagation	OK	0	2026-10-27T12:32:29Z	4	propagation/sweep-20261027T123230Z-1688793
+churn	OK	0	2026-10-27T12:36:13Z	9	churn/sweep-20261027T123613Z-1711540
+churn-dataplane	OK	0	2026-10-27T12:45:20Z	14	churn-dataplane/sweep-20261027T124520Z-1791026
+tuning	OK	0	2026-10-27T12:59:34Z	14	tuning/sweep-20261027T125934Z-1889293
+controlplane	OK	0	2026-10-27T13:13:15Z	56	controlplane/sweep-20261027T131315Z-1934118

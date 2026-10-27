@@ -1,0 +1,12 @@
+# SUITE=propagation
+# RUN_ID=20261027T125934Z-1889293
+# CONTEXTS=<mesh-a-ctx>,<mesh-b-ctx>
+# PASSES=baseline,01-push-throttling,02-xds-cache-off,03-gateway-cluster-filter,04-connection-pools
+# SETTLE_SEC=60
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=3/3,<mesh-b-ctx>=3/3
