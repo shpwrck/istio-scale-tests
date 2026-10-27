@@ -19,7 +19,7 @@ that leads with both answers.
 
 **Status:** confirmed in the lab on 2026-10-14 on OpenShift (OSSM 3.4.3): 22 of 22 rows matched
 the predictions below, and Argo CD marks every HTTPRoute with `ResolvedRefs=False` as Degraded
-([campaign record](../../docs/campaigns/2026-10-14-gateway-api-multicluster-lab.md)). Confirmed
+([campaign record](../../docs/campaigns/2026-10-14-gateway-api-multicluster-lab/README.md)). Confirmed
 again on 2026-10-18 on kind ([kind lab](../../docs/runbooks/kind-lab/README.md): upstream Istio
 1.30.5 through the Sail operator 1.31.1, Gateway API v1.6.1 standard channel): 22 of 22 rows
 matched.

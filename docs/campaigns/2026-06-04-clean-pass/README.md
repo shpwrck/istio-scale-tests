@@ -5,7 +5,7 @@
 > an average until commit `ed32c30` (PR 106), which renamed it `cpu_peak` and added a true average.
 > Config sizes reported as "MB" are MiB (3.9 MiB is about 4.1 MB); ratios such as the 87%
 > reduction are unaffected. The churn-dataplane rows may overstate the churn they saw (the driver
-> ran ops one after another and only slept when ahead). See [BACKLOG](../../BACKLOG.md) section 9,
+> ran ops one after another and only slept when ahead). See [BACKLOG](../../../BACKLOG.md) section 9,
 > "Status 2026-10-16".
 
 The **clean full-workload re-run** that an earlier reduced-workload pass (2026-06-02: istiod pinned to
@@ -13,9 +13,9 @@ The **clean full-workload re-run** that an earlier reduced-workload pass (2026-0
 **full workload** (controlplane 10×3, churn-dataplane 5×5) — enabled by fixing the O5 istiod
 CPU over-reservation that forced the workaround pass down to reduced sizing.
 
-Per-suite sweep tables: [`2026-06-04-clean-pass-sweep-detail.md`](2026-06-04-clean-pass-sweep-detail.md).
+Per-suite sweep tables: [`sweep-detail.md`](sweep-detail.md).
 Charts: [`charts/`](charts/) (propagation, churn, controlplane, dataplane, churn-dataplane).
-O-labels are defined in [`process-learnings.md`](../scale-test-team/process-learnings.md#observation-labels).
+O-labels are defined in [`process-learnings.md`](../../scale-test-team/process-learnings.md#observation-labels).
 
 ---
 

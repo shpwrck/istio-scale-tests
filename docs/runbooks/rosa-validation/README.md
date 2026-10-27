@@ -365,7 +365,7 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
   not; well above it (as on this account), the fixed pools alone cap EC2.
 - The orphaned ROSA classic roles and policies were removed on 2026-10-14 so the account holds only
   what the HCP path uses; they are recoverable from `~/.rosa-window/iam-backup/`.
-- Learned in the 2026-10-14 window (record: `docs/campaigns/2026-10-14-rosa-validation.md`; the
+- Learned in the 2026-10-14 window (record: `docs/campaigns/2026-10-14-rosa-validation/README.md`; the
   plan's top section lists the run-time corrections):
   - After the platform apply, an Application with no sync or health status means its cluster has no
     Argo CD controller shard; restart the `openshift-gitops-application-controller` pods (until
@@ -403,5 +403,5 @@ aws resourcegroupstaggingapi get-resources --tag-filters Key=purpose,Values=rosa
 7. Audit until every check is empty; disarm the timers and cancel the T0+9:15 phone alarm. If the
    alarm rings first, confirm the auto-teardown's result as in Verify and recover; a manual
    `003 --now` must start by T0+10:30.
-8. Write `docs/campaigns/<date>-rosa-validation.md` from the template with placeholders, update this
+8. Write `docs/campaigns/<date>-rosa-validation/README.md` from the template with placeholders, update this
    file's opening paragraph to the new state and commit it; check Cost Explorer at T+1 and T+2.

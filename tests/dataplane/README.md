@@ -27,7 +27,7 @@ local baseline is usable (`Local baseline: OK`); when it is not, there is nothin
 against. A row is left out of the averages when the client could not reach the requested rate
 (`QPS_SHORTFALL`: the server was saturated) or fewer than 99% of requests succeeded. For scale,
 the June 2026 ten-cluster ROSA run measured the cross-cluster hop at about 1 ms at p50 (2.4 to
-2.8 ms local, 2.8 to 3.6 ms remote; [record](../../docs/campaigns/2026-06-04-clean-pass-results.md)).
+2.8 ms local, 2.8 to 3.6 ms remote; [record](../../docs/campaigns/2026-06-04-clean-pass/README.md)).
 On kind the cross-cluster path runs through a local proxy on the same machine, so remote numbers
 there mean nothing. [Outputs](#outputs) has every column and status, and
 [Reading results](../../docs/reading-results.md) the checks that apply to every suite.

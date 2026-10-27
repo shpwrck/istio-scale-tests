@@ -5,7 +5,7 @@
 > - **istiod CPU.** The 3% figure (envelope, scale verdict and SLA checklist) is
 >   `istiod_cpu_pct_of_limit_max`: one `kubectl top` snapshot at each window's end, summed over
 >   the replicas, which misses bursts. Reports now use the window peak per replica (commit
->   `ed32c30`, PR 106; [BACKLOG](../../BACKLOG.md) section 9, "Status 2026-10-16").
+>   `ed32c30`, PR 106; [BACKLOG](../../../BACKLOG.md) section 9, "Status 2026-10-16").
 > - **East-west gateway memory was not measured.** At 10k Services the east-west gateways need
 >   about 1.4 GiB (1450 Mi allocated, more after bursts) against the 1Gi limit they ran with
 >   (BACKLOG 9.9), so some may have been OOM-killed (hypothesis H1, BACKLOG section 3). The
@@ -153,7 +153,7 @@ under a fully-loaded simultaneous data plane (the non-control-plane suites are i
 
 ## Findings & fixes (codified)
 
-- **[BLOCKER #1](../scale-test-team/process-learnings.md#observation-labels) (ArgoCD↔ACM OpenAPI) — resolved correctly.** The codified "disable `server-foundation`"
+- **[BLOCKER #1](../../scale-test-team/process-learnings.md#observation-labels) (ArgoCD↔ACM OpenAPI) — resolved correctly.** The codified "disable `server-foundation`"
   fix is *wrong*: `server-foundation` owns the managedcluster-import-controller, so disabling it breaks
   all spoke imports. MCE **2.11.3** is the genuinely-fixed build (the `cluster-lifecycle-api`
   UserPermission OpenAPI bug; upstream stolostron #56/#57, ACM-35283). We **enabled** server-foundation
