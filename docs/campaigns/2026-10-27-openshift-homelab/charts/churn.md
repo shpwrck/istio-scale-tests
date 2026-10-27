@@ -20,11 +20,22 @@ proxy_image_by_context: "<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a
 node_provider_by_context: "<mesh-a-ctx>=none,<mesh-b-ctx>=none"
 istiod_env_by_context: "<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772"
 kube_versions: "<mesh-a-ctx>=v1.34.8,<mesh-b-ctx>=v1.34.8"
-generated: 2026-10-27T12:45:16+00:00
+generated: 2026-10-27T15:00:02+00:00
 ---
 
 # Churn Convergence — Charts
 
-> **Note (2026-10-27 lab run):** the sample was too small for generated charts. With two members only mesh size 2 has remote data, and these charts plot against mesh size. The numbers are in the [record](../README.md).
+> The mesh-size charts require at least two mesh sizes with remote data (mesh >= 2).
 
-> Charts require at least two mesh sizes with remote data (mesh >= 2).
+% Convergence latency (ms) vs churn intensity at mesh size 2
+```mermaid
+xychart-beta
+    title "Convergence Latency vs Churn Intensity (Mesh Size 2)"
+    x-axis "Churn intensity (deployments)" [2, 5]
+    y-axis "Latency (ms)"
+    line [5600, 6566]
+    line [5580, 6526]
+    line [5666, 5340]
+```
+
+> Series order: **local avg**, **remote reach avg**, **remote EDS avg**. Charted by churn intensity because fewer than two mesh sizes have remote data.

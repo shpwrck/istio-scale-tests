@@ -41,11 +41,29 @@ iterations:
     REMOTES: "<mesh-b-ctx>"
     KUBE_VERSIONS: "<mesh-a-ctx>=v1.34.8,<mesh-b-ctx>=v1.34.8"
 tsv_columns: [23]
-generated: 2026-10-27T12:36:10+00:00
+generated: 2026-10-27T15:00:02+00:00
 ---
 
 # Endpoint Propagation Latency — Charts
 
-> **Note (2026-10-27 lab run):** the sample was too small for generated charts. With two members only mesh size 2 has remote data, and these charts plot against mesh size. The numbers are in the [record](../README.md).
+> The mesh-size charts require at least two mesh sizes with remote data (mesh >= 2); below, what this run can show.
 
-> Charts require at least two mesh sizes with remote data (mesh >= 2).
+```mermaid
+xychart-beta
+    title "P1 Local xDS Latency vs Mesh Size"
+    x-axis "Mesh Size" [1, 2]
+    y-axis "Latency (ms)"
+    line [737, 1173]
+```
+
+> Series: **P1 local xDS (wall)**, the mean over valid iterations; a mesh size with none is left out.
+
+```mermaid
+xychart-beta
+    title "Propagation Phases at Mesh Size 2"
+    x-axis ["P1 local xDS", "P2 remote EDS", "P3 remote sidecar"]
+    y-axis "Latency (ms)"
+    bar [1173, 1172, 1864]
+```
+
+> Means over valid samples (P1 per iteration, P2 and P3 per remote row) at the one mesh size with remote data.
