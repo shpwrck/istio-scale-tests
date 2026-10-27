@@ -264,6 +264,24 @@ _fake_kubectl() {
 	[ "${ports[*]}" = "$(( base + 1 ))" ]
 }
 
+@test "fanout_scrape_via_api: a complete body through the pod proxy path succeeds; an empty or short body, or a failed call, fails with an empty file" {
+	out="${BATS_TEST_TMPDIR}/via-api.metrics"
+	_api_kubectl() {
+		[[ " $* " == *" --context=ctx-a "* && " $* " == *" get --raw /api/v1/namespaces/istio-system/pods/istiod-a:15014/proxy/metrics "* ]] || return 1
+		cat "$API_BODY"
+	}
+	API_BODY="$POD0"
+	fanout_scrape_via_api ctx-a istiod-a "$out" _api_kubectl
+	cmp -s "$POD0" "$out"
+	API_BODY="${BATS_TEST_TMPDIR}/short"
+	echo short > "$API_BODY"
+	run fanout_scrape_via_api ctx-a istiod-a "$out" _api_kubectl
+	assert_failure
+	run fanout_scrape_via_api ctx-a istiod-b "$out" _api_kubectl
+	assert_failure
+	[ ! -s "$out" ]
+}
+
 @test "fanout port allocation: 5 pods x 10 contexts give 50 distinct ports above the 15014/15100 blocks, each context's block 5 wide at least" {
 	# local_port = FANOUT_PF_BASE + ctx*FANOUT_CTX_STRIDE + pod
 	declare -A seen=()

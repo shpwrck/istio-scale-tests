@@ -429,7 +429,17 @@ snapshot_istiod() {
 		else
 			fanout_record_podset "${ALL_CTXS[$i]}" "${ISTIOD_DIR}/${phase}-c${i}.podset" "${KUBECTL[@]}"
 		fi
-		fanout_scrape_all "$ISTIOD_DIR" "${phase}-c${i}" ${snap_ports[@]+"${snap_ports[@]}"} >/dev/null || true
+		fanout_scrape_all "$ISTIOD_DIR" "${phase}-c${i}" ${snap_ports[@]+"${snap_ports[@]}"} >/dev/null && continue
+		# A failed scrape is usually a dead port-forward: retry each such pod once
+		# through the API server, so one API blip does not leave the restart status unknown.
+		local j mf
+		for j in "${!snap_pods[@]}"; do
+			mf="${ISTIOD_DIR}/${phase}-c${i}-${j}.metrics"
+			fanout_body_complete "$mf" && continue
+			if fanout_scrape_via_api "${ALL_CTXS[$i]}" "${snap_pods[j]}" "$mf" "${KUBECTL[@]}"; then
+				echo "note: ${phase} istiod scrape of ${snap_pods[j]} on ${ALL_CTXS[$i]} failed on its port-forward; re-scraped through the API server" >&2
+			fi
+		done
 	done
 }
 
@@ -603,7 +613,8 @@ run_fortio() {
 		load_start_ns="$(now_ns)"
 		json_output=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps "$qps" -c "$CONNECTIONS" -t "${DURATION}s" -p '50,90,99,99.9' \
-			-json - -quiet "$target_url" 2>/dev/null) || {
+			-json - -quiet "$target_url" 2>/dev/null) && [[ -n "$json_output" ]] || {
+			# An exec that fails, or that exits 0 with no output (its stream dropped): no result.
 			echo "    FAILED"
 			# Nothing was measured: qps_actual and every latency are N/A, never 0.
 			printf '%s\t%s\t%s\t%s\t%s\tN/A\t%s\t%s\tN/A\tN/A\tN/A\tN/A\tN/A\tFAILED\tN/A\t%s\t%s\n' \
