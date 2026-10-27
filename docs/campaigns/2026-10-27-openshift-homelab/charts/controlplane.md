@@ -28,4 +28,6 @@ generated: 2026-10-27T14:09:14+00:00
 
 # Control-Plane Resource Scaling — Charts
 
+> **Note (2026-10-27 lab run):** no charts were generated. This profile runs namespace scaling only, at one mesh size, and the chart generator covers neither. The numbers are in the [record](../README.md) and the sweep's Namespace scaling section.
+
 > Charts cover the legacy layout only; growth cells (namespace scaling) are in the markdown report's Namespace scaling section.

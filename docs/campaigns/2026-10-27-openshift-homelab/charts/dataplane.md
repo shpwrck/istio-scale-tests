@@ -46,6 +46,8 @@ generated: "2026-10-27T12:32:26+00:00"
 
 # Data-Plane Latency — Charts
 
+> **Note (2026-10-27 lab run):** the sample was too small for the mesh-size chart. With two members only mesh size 2 has remote data, so only the QPS chart is generated. The numbers are in the [record](../README.md).
+
 > The mesh-size chart needs two mesh sizes with remote data; only the QPS chart is shown.
 
 ```mermaid

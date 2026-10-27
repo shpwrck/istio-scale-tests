@@ -46,4 +46,6 @@ generated: 2026-10-27T12:36:10+00:00
 
 # Endpoint Propagation Latency — Charts
 
+> **Note (2026-10-27 lab run):** the sample was too small for generated charts. With two members only mesh size 2 has remote data, and these charts plot against mesh size. The numbers are in the [record](../README.md).
+
 > Charts require at least two mesh sizes with remote data (mesh >= 2).
