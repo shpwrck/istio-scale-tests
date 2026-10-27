@@ -211,6 +211,10 @@ defaults; `--dry-run` prints the exact plan without touching a cluster.
 | [churn-dataplane](tests/churn-dataplane/README.md) | Does request latency get worse while the mesh is busy with endpoint churn? | `tests/churn-dataplane/004-run-sweep.sh` | ~20 min |
 | [tuning](tests/tuning/README.md) | Does an istiod or proxy tuning change make one of the suites above better or worse? | `tests/tuning/003-run-tuning-sweep.sh` | one suite run per profile, plus the baseline |
 
+To run several suites unattended (a night on ROSA, a full pass on kind), use a profile per
+environment: [tests/campaign](tests/campaign/README.md) runs the preflight, then each suite with
+the profile's sizes, and writes one report naming how each suite ended.
+
 A first run, end to end:
 
 ```bash

@@ -42,6 +42,8 @@
 /tests/churn/results/
 /tests/churn-dataplane/results/
 /tests/tuning/results/
+/tests/campaign/results/
+/tests/campaign/profiles/*.local/
 /misc_tests/gateway-api/results/
 
 # Terraform — state, workspace data, local plugins (keep **/.terraform.lock.hcl tracked)

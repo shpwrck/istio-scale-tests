@@ -48,7 +48,7 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              tests/*.sh|misc_tests/*|tests/*.bats|tests/*.py|tests/lib/test/*|tests/*/chart/*|tests/*/configs/*|tests/tuning/profiles/*|charts/*|terraform/*.sh|terraform/*.tf|terraform/*.hcl|config/*.env|.gitmodules|.shellcheckrc|.github/workflows/portability.yml)
+              tests/*.sh|misc_tests/*|tests/*.bats|tests/*.py|tests/lib/test/*|tests/*/chart/*|tests/*/configs/*|tests/tuning/profiles/*|tests/campaign/profiles/*|charts/*|terraform/*.sh|terraform/*.tf|terraform/*.hcl|config/*.env|.gitmodules|.shellcheckrc|.github/workflows/portability.yml)
                 relevant=true ;;
             esac
           done <<< "$changed"
