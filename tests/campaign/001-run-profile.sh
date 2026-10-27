@@ -210,6 +210,7 @@ suite_argv() {
 
 # with_config <file> <suite> <cmd>...: run <cmd> with the run config's keys in the
 # environment (for tuning, which takes no --config; its probes inherit them).
+# shellcheck disable=SC2329  # run through PREFIX
 with_config() {
 	local f="$1" s="$2"
 	shift 2
@@ -255,6 +256,7 @@ mkdir -p "$RUN_DIR"
 cp -R "$PROFILE_DIR" "${RUN_DIR}/profile"
 SUMMARY_TSV="${RUN_DIR}/suites.tsv"
 printf 'suite\tstatus\texit\tstarted_at\tminutes\tsweep_dir\n' >"$SUMMARY_TSV"
+# shellcheck disable=SC2034  # read by sweep_start's EXIT trap (tests/lib/common.sh)
 SWEEP_CLEANUP_CMD="the cleanup command each suite's console names in ${RUN_DIR#"${ROOT}"/}/<suite>/console.log"
 sweep_start "$RUN_DIR" "$RUN_ID" --unit suites
 START_EPOCH="$(date +%s)"
