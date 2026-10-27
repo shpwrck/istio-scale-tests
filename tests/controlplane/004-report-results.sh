@@ -2561,6 +2561,70 @@ report_json() {
 	}' <<<"$aggregated"
 }
 
+# growth_charts <aggregated>: namespace scaling as charts, from the probe-window fits of
+# scaling_records (the same points as the Namespace scaling table): per series, one chart
+# per metric over the namespace count N, a line per sidecar scoping. A scoping that lacks
+# a point at some N is left out of that chart (mermaid draws no gap) and named.
+growth_charts() {
+	local recs
+	recs="$(scaling_records "$1")" || return 0
+	awk -F'\t' '
+	BEGIN {
+		nm = split("heap_inuse_mi proxy_config_kib gateway_clusters gateway_mem_mi push_time_ms", order, " ")
+		label["heap_inuse_mi"] = "istiod heap in use (MiB)"
+		label["proxy_config_kib"] = "Per-proxy config (KiB)"
+		label["gateway_clusters"] = "Gateway clusters"
+		label["gateway_mem_mi"] = "Gateway memory (MiB)"
+		label["push_time_ms"] = "xDS push time (ms)"
+		for (i = 1; i <= nm; i++) want[order[i]] = 1
+	}
+	$1 == "FIT" && $4 == "probe" && ($5 in want) {
+		s = $2; m = $5; sc = $3
+		if (!(s in s_seen)) { s_seen[s] = 1; s_order[++ns] = s }
+		if (!((s, m, sc) in pts)) { k = ++nsc[s, m]; scs[s, m, k] = sc }
+		pts[s, m, sc] = $12
+		np = split($12, P, " ")
+		for (i = 1; i <= np; i++) { split(P[i], q, ":"); xs[s, m, q[1] + 0] = 1; val[s, m, sc, q[1] + 0] = q[2] }
+	}
+	END {
+		if (ns == 0) { print "> Namespace scaling: no probe-window fit to chart."; print ""; exit }
+		print "## Namespace scaling"
+		print ""
+		print "> Probe windows: the cost of one more namespace at N, a line per sidecar scoping (series order in the note under each chart). Points are the Namespace scaling table'"'"'s; a cell with no valid sample has no point."
+		print ""
+		for (a = 1; a <= ns; a++) {
+			s = s_order[a]
+			for (b = 1; b <= nm; b++) {
+				m = order[b]
+				if (!((s, m) in nsc)) continue
+				n = 0; delete X
+				for (key in xs) { split(key, kk, SUBSEP); if (kk[1] == s && kk[2] == m) X[++n] = kk[3] + 0 }
+				for (i = 2; i <= n; i++) { t = X[i]; j = i - 1; while (j >= 1 && X[j] > t) { X[j + 1] = X[j]; j-- } X[j + 1] = t }
+				if (n < 2) continue
+				nl = 0; lines = ""; left = ""
+				for (k = 1; k <= nsc[s, m]; k++) {
+					sc = scs[s, m, k]; ok = 1
+					for (i = 1; i <= n; i++) if (!((s, m, sc, X[i]) in val)) ok = 0
+					if (!ok) { left = left (left == "" ? "" : ", ") sc; continue }
+					# gateway_* do not depend on the scoping: one line is enough.
+					if (m ~ /^gateway_/ && nl > 0) continue
+					line = "    line ["
+					for (i = 1; i <= n; i++) line = line (i > 1 ? ", " : "") val[s, m, sc, X[i]]
+					lines = lines line "]\n"; names = (nl == 0 ? "" : names ", ") "**" sc "**"; nl++
+				}
+				if (nl == 0) continue
+				printf "```mermaid\nxychart-beta\n    title \"%s vs namespaces (%s)\"\n    x-axis \"Namespaces (N)\" [", label[m], s
+				for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? ", " : ""), X[i]
+				printf "]\n    y-axis \"%s\"\n%s```\n\n", label[m], lines
+				if (m ~ /^gateway_/) printf "> One line: the gateway keeps `*/*`, so its figure does not depend on the sidecar scoping.\n"
+				else printf "> Series order: %s.\n", names
+				if (left != "") printf "> Left out (a point missing at some N): %s.\n", left
+				print ""
+			}
+		}
+	}' <<<"$recs"
+}
+
 report_charts() {
 	local aggregated
 	aggregated=$(aggregate)
@@ -2624,9 +2688,12 @@ report_charts() {
 		else { print "0 0 0 none"; exit }
 		print p[1], p[2], p[3], note
 	}' <<<"$aggregated")
+	if has_growth_cells "$aggregated"; then
+		growth_charts "$aggregated"
+	fi
 	if [[ "$pick_note" == "none" ]]; then
 		if has_growth_cells "$aggregated"; then
-			echo "> Charts cover the legacy layout only; growth cells (namespace scaling) are in the markdown report's Namespace scaling section."
+			:
 		else
 			echo "> No cell has valid samples — nothing to chart."
 		fi

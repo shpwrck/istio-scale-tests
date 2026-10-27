@@ -23,9 +23,68 @@ kube_versions: "<mesh-a-ctx>=v1.34.8,<mesh-b-ctx>=v1.34.8"
 files_consumed: 1
 tuning_baseline: "sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on"
 sidecar_egress_hosts: "./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*"
-generated: 2026-10-27T14:09:14+00:00
+generated: 2026-10-27T15:00:02+00:00
 ---
 
 # Control-Plane Resource Scaling — Charts
 
-> Charts cover the legacy layout only; growth cells (namespace scaling) are in the markdown report's Namespace scaling section.
+## Namespace scaling
+
+> Probe windows: the cost of one more namespace at N, a line per sidecar scoping (series order in the note under each chart). Points are the Namespace scaling table's; a cell with no valid sample has no point.
+
+```mermaid
+xychart-beta
+    title "istiod heap in use (MiB) vs namespaces (mesh=1 K=2 config-only)"
+    x-axis "Namespaces (N)" [100, 200, 400]
+    y-axis "istiod heap in use (MiB)"
+    line [102, 141, 169]
+    line [107, 122, 140]
+    line [129, 153, 181]
+```
+
+> Series order: **namespace**, **none**, **wide**.
+
+```mermaid
+xychart-beta
+    title "Per-proxy config (KiB) vs namespaces (mesh=1 K=2 config-only)"
+    x-axis "Namespaces (N)" [100, 200, 400]
+    y-axis "Per-proxy config (KiB)"
+    line [356.8, 356.8, 356.8]
+    line [356.8, 356.8, 356.8]
+    line [1525, 2694, 5031]
+```
+
+> Series order: **namespace**, **none**, **wide**.
+
+```mermaid
+xychart-beta
+    title "Gateway clusters vs namespaces (mesh=1 K=2 config-only)"
+    x-axis "Namespaces (N)" [100, 200, 400]
+    y-axis "Gateway clusters"
+    line [431, 831, 1631]
+```
+
+> One line: the gateway keeps `*/*`, so its figure does not depend on the sidecar scoping.
+
+```mermaid
+xychart-beta
+    title "Gateway memory (MiB) vs namespaces (mesh=1 K=2 config-only)"
+    x-axis "Namespaces (N)" [100, 200, 400]
+    y-axis "Gateway memory (MiB)"
+    line [37, 66, 122]
+```
+
+> One line: the gateway keeps `*/*`, so its figure does not depend on the sidecar scoping.
+
+```mermaid
+xychart-beta
+    title "xDS push time (ms) vs namespaces (mesh=1 K=2 config-only)"
+    x-axis "Namespaces (N)" [100, 200, 400]
+    y-axis "xDS push time (ms)"
+    line [0.68, 1.19, 1.69]
+    line [0.63, 1.18, 1.72]
+    line [1.15, 1.75, 2.85]
+```
+
+> Series order: **namespace**, **none**, **wide**.
+

@@ -966,7 +966,30 @@ report_endpoint_charts() {
 			}
 		}
 		if (n_remote < 2) {
-			print "> Charts require at least two mesh sizes with remote data (mesh >= 2)."
+			print "> The mesh-size charts require at least two mesh sizes with remote data (mesh >= 2); below, what this run can show."
+			print ""
+			# P1 is local: it has a value at every mesh size, mesh 1 included.
+			n_ax = 0
+			for (s = 1; s <= __n; s++) {
+				ms = __sorted[s]
+				v = chart_avg(p1_vals, ms, p1_n[ms])
+				if (v >= 0) { ax[++n_ax] = ms; axv[n_ax] = v }
+			}
+			if (n_ax >= 2) {
+				printf "```mermaid\nxychart-beta\n    title \"P1 Local xDS Latency vs Mesh Size\"\n    x-axis \"Mesh Size\" ["
+				for (i = 1; i <= n_ax; i++) printf "%s%s", (i > 1 ? ", " : ""), ax[i]
+				printf "]\n    y-axis \"Latency (ms)\"\n    line ["
+				for (i = 1; i <= n_ax; i++) printf "%s%.0f", (i > 1 ? ", " : ""), axv[i]
+				printf "]\n```\n\n> Series: **P1 local xDS (wall)**, the mean over valid iterations; a mesh size with none is left out.\n\n"
+			}
+			if (n_remote == 1) {
+				m = remote_ms[1]
+				v1 = chart_avg(p1_vals, m, p1_n[m]); v2 = chart_avg(p2_vals, m, p2_n[m]); v3 = chart_avg(p3_vals, m, p3_n[m])
+				if (v1 >= 0 && v2 >= 0 && v3 >= 0) {
+					printf "```mermaid\nxychart-beta\n    title \"Propagation Phases at Mesh Size %s\"\n    x-axis [\"P1 local xDS\", \"P2 remote EDS\", \"P3 remote sidecar\"]\n    y-axis \"Latency (ms)\"\n    bar [%.0f, %.0f, %.0f]\n```\n\n", m, v1, v2, v3
+					printf "> Means over valid samples (P1 per iteration, P2 and P3 per remote row) at the one mesh size with remote data.\n"
+				} else print "> Phases at the remote mesh size: not charted, a phase has no valid sample."
+			}
 			exit
 		}
 

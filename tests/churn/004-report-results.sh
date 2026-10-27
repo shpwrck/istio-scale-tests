@@ -749,6 +749,40 @@ report_charts() {
 		if($13!="N/A") add("sxp", ms, $13+0)
 		if($14!="N/A") add("rxp", ms, $14+0)
 		if($11!="N/A" && $11+0 > 0 && $13!="N/A") add("amp", ms, ($13+0 + ($14=="N/A" ? 0 : $14+0)) / $11)
+		ci = $3 + 0; ci_seen[ci] = 1
+		if($8!="TIMEOUT" && $8!="N/A") add("cl" SUBSEP ci, ms, $8+0)
+		if($9!="TIMEOUT" && $9!="N/A") add("cr" SUBSEP ci, ms, $9+0)
+		if($10!="TIMEOUT" && $10!="N/A") add("cre" SUBSEP ci, ms, $10+0)
+	}
+	# intensity_chart: with fewer than two mesh sizes to plot against, convergence by churn
+	# intensity at the largest mesh size (remote series only when it has a remote).
+	function intensity_chart(    top, n_ci, C, i, j, t, k, keys, labels, nk, ok, n_ax, ax, miss) {
+		top = ms_arr[n_ms]
+		n_ci = 0
+		for (k in ci_seen) C[++n_ci] = k + 0
+		for (i = 2; i <= n_ci; i++) { t = C[i]; j = i - 1; while (j >= 1 && C[j] > t) { C[j + 1] = C[j]; j-- } C[j + 1] = t }
+		if (top >= 2) { nk = split("cl cr cre", keys, " "); split("local avg,remote reach avg,remote EDS avg", labels, ",") }
+		else { nk = split("cl", keys, " "); split("local avg", labels, ",") }
+		n_ax = 0; miss = ""
+		for (i = 1; i <= n_ci; i++) {
+			ok = 1
+			for (j = 1; j <= nk; j++) if (!((keys[j] SUBSEP C[i], top) in cnt)) { ok = 0; miss = miss (miss == "" ? "" : ", ") labels[j] " @ intensity " C[i] }
+			if (ok) ax[++n_ax] = C[i]
+		}
+		if (n_ax < 2) { print "> Not charted by churn intensity either: fewer than two intensities have samples for every series."; return }
+		printf "%% Convergence latency (ms) vs churn intensity at mesh size %d\n", top
+		printf "```mermaid\nxychart-beta\n    title \"Convergence Latency vs Churn Intensity (Mesh Size %d)\"\n    x-axis \"Churn intensity (deployments)\" [", top
+		for (i = 1; i <= n_ax; i++) printf "%s%s", (i > 1 ? ", " : ""), ax[i]
+		printf "]\n    y-axis \"Latency (ms)\"\n"
+		for (j = 1; j <= nk; j++) {
+			printf "    line ["
+			for (i = 1; i <= n_ax; i++) printf "%s%.0f", (i > 1 ? ", " : ""), sum[keys[j] SUBSEP ax[i], top] / cnt[keys[j] SUBSEP ax[i], top]
+			printf "]\n"
+		}
+		printf "```\n\n> Series order: "
+		for (j = 1; j <= nk; j++) printf "%s**%s**", (j > 1 ? ", " : ""), labels[j]
+		printf ". Charted by churn intensity because fewer than two mesh sizes have remote data.\n"
+		if (miss != "") printf "> Left out (no samples): %s.\n", miss
 	}
 	function sort_ms(    i, j, tmp, k) {
 		n_ms = 0
@@ -765,7 +799,9 @@ report_charts() {
 		}
 		sort_ms()
 		if (n_ms < 2) {
-			print "> Charts require at least two mesh sizes."
+			print "> The mesh-size charts require at least two mesh sizes."
+			print ""
+			intensity_chart()
 			exit
 		}
 		# Collect mesh sizes >= 2 for remote series.
@@ -774,7 +810,9 @@ report_charts() {
 			if (ms_arr[i] >= 2) remote_arr[++n_remote] = ms_arr[i]
 		}
 		if (n_remote < 2) {
-			print "> Charts require at least two mesh sizes with remote data (mesh >= 2)."
+			print "> The mesh-size charts require at least two mesh sizes with remote data (mesh >= 2)."
+			print ""
+			intensity_chart()
 			exit
 		}
 

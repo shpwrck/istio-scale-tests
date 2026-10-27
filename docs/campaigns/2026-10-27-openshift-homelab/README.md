@@ -25,8 +25,10 @@ tests/campaign/001-run-profile.sh --profile openshift --contexts <mesh-a-ctx>,<m
 Files: [`results/`](results/) is the redacted run (the campaign report
 [`campaign-20261027T121857Z-1652653.md`](results/campaign-20261027T121857Z-1652653.md), and
 each suite's sweep dir with its reports and TSVs); [`charts/`](charts/) holds each suite's
-charts. Console and preflight logs, and tuning's raw copies of the Istio CR, are not included
-(`tests/lib/redact-results.sh` does not copy them).
+charts. With one mesh size that has remote data, churn charts by churn intensity,
+propagation charts P1 over mesh size and its phases at mesh size 2, and dataplane has
+only its QPS chart; controlplane charts namespace scaling. Tuning has no chart generator. Console and preflight logs, and tuning's raw copies of
+the Istio CR, are not included (`tests/lib/redact-results.sh` does not copy them).
 
 ## Scale envelope
 
