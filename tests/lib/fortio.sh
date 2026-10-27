@@ -43,12 +43,14 @@
 
 # shellcheck disable=SC2329
 fortio_percentile_ms() {
-	local json="$1" pct="$2"
-	printf '%s' "$json" | jq -r --argjson p "$pct" '
+	local json="$1" pct="$2" out
+	# jq prints nothing for empty input: an empty load output is "N/A", not "".
+	out="$(printf '%s' "$json" | jq -r --argjson p "$pct" '
 		.DurationHistogram.Percentiles
 		| (map(select((.Percentile - $p) | fabs < 0.01)) | .[0])
 		| if . == null then "N/A" else (.Value * 1000 | tostring) end
-	' 2>/dev/null || echo "N/A"
+	' 2>/dev/null)" || out=""
+	printf '%s\n' "${out:-N/A}"
 }
 
 # A missing value is "N/A", never 0: a 0 ms max or 0 QPS would read as a measurement.

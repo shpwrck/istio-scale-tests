@@ -340,6 +340,24 @@ fanout_record_podset() {
 	fanout_list_istiod_pods "$ctx" "$@" > "$out_file"
 }
 
+# Re-scrape one istiod pod's /metrics through the API server's pod proxy instead of its
+# port-forward, into the file fanout_scrape_all wrote. For a scrape whose port-forward
+# died (a brief API blip drops every port-forward and exec stream on a context at once):
+# without it, the post-window scrape fails and the window's restart status is unknown
+# although no istiod restarted. Same completeness rule as fanout_scrape_all.
+# Usage: fanout_scrape_via_api <ctx> <pod> <outfile> <kubectl_argv...>
+# shellcheck disable=SC2329
+fanout_scrape_via_api() {
+	local ctx="$1" pod="$2" outfile="$3"
+	shift 3
+	if ! "$@" --context="$ctx" --request-timeout="${FANOUT_METRICS_TIMEOUT}s" get --raw \
+		"/api/v1/namespaces/istio-system/pods/${pod}:15014/proxy/metrics" > "$outfile" 2>/dev/null; then
+		: > "$outfile"
+		return 1
+	fi
+	fanout_body_complete "$outfile"
+}
+
 # --- aggregation wrappers over the per-pod scrape files --------------------
 # Each takes a list of per-pod metrics files (the .metrics outputs of
 # fanout_scrape_all) plus the metric name and reuses the single-file extractors

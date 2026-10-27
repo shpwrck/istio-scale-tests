@@ -198,6 +198,9 @@ _stop_during_load() {
 	assert_output "OK"
 	run fortio_row_status "$NOPCT_JSON" 1000 0.95 0.99
 	assert_output "PERCENTILE_MISSING"
+	# An exec whose stream dropped exits 0 with no output: missing, not ERROR_RATE_HIGH.
+	run fortio_row_status "" 1000 0.95 0.99
+	assert_output "PERCENTILE_MISSING"
 	run fortio_row_status "not json" 1000 0.95 0.99
 	assert_success
 	assert_output "PERCENTILE_MISSING"
