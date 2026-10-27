@@ -1,0 +1,12 @@
+{
+  "spec": {
+    "values": {
+      "pilot": {
+        "env": {
+          "PILOT_ENABLE_CDS_CACHE": "false",
+          "PILOT_ENABLE_RDS_CACHE": "false"
+        }
+      }
+    }
+  }
+}

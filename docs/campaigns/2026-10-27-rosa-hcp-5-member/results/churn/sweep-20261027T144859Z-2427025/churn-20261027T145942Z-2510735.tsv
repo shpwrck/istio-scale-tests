@@ -1,0 +1,31 @@
+# Churn convergence test — 2026-10-27T14:59:44+00:00
+# Source: <mesh-a-ctx>  Remotes: <mesh-b-ctx> <mesh-c-ctx>  Mesh size: 3
+# Deployments: 5  Scale: 1 -> 5  Iterations: 5
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5,<mesh-c-ctx>=v1.30.5,<mesh-d-ctx>=v1.30.5,<mesh-e-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default,<mesh-c-ctx>=default,<mesh-d-ctx>=default,<mesh-e-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=1/1,<mesh-b-ctx>=1/1,<mesh-c-ctx>=1/1,<mesh-d-ctx>=1/1,<mesh-e-ctx>=1/1
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.6,<mesh-b-ctx>=v1.34.6,<mesh-c-ctx>=v1.34.6
+# ISTIOD_REPLICAS=<mesh-a-ctx>=1,<mesh-b-ctx>=1,<mesh-c-ctx>=1
+# CHURN_SCALE_SCOPE=source
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# RUN_CONFIG=tests/campaign/profiles/rosa/churn.env
+# RUN_CONFIG_SHA256=fa0d077a4411524cc477e224ce10e00eadb4f02927f082f002f5f0067de8c144
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift,<mesh-c-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3,<mesh-c-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-c-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-c-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws,<mesh-c-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772,<mesh-c-ctx>=0c3d8d887772
+run_id	mesh_size	churn_intensity	base_replicas	scale_to	iteration	t0_epoch_ns	convergence_local_ms	remote_endpoint_reachable_ms	convergence_remote_eds_ms	source_push_triggers_delta	remote_push_triggers_delta	source_xds_pushes_delta	remote_xds_pushes_delta	source_queue_time_p99_ms	remote_queue_time_p99_ms	source_connected_proxies	remote_connected_proxies	source_push_time_p99_ms	remote_push_time_p99_ms	status
+20261027T145942Z-2510735	3	5	1	5	1	1793113195510260067	5951	5410	5095	580	320	272	64	99	99	8	16	10	10	OK
+20261027T145942Z-2510735	3	5	1	5	2	1793113217669547883	5276	5115	4868	234	320	148	40	99	99	8	16	10	10	OK
+20261027T145942Z-2510735	3	5	1	5	3	1793113239659379909	5709	5494	5444	412	320	188	32	99	99	8	16	10	10	OK
+20261027T145942Z-2510735	3	5	1	5	4	1793113262921739845	5692	5414	5000	326	320	208	48	99	99	8	16	10	10	OK
+20261027T145942Z-2510735	3	5	1	5	5	1793113285086834128	5828	5605	5673	580	320	216	32	99	99	8	16	10	10	OK

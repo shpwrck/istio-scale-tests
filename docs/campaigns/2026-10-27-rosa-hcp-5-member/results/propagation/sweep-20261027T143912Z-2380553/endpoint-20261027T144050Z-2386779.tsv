@@ -1,0 +1,47 @@
+# Endpoint propagation latency test
+# SWEEP_RUN_ID=20261027T143912Z-2380553
+# RUN_ID=20261027T144050Z-2386779
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5,<mesh-c-ctx>=v1.30.5,<mesh-d-ctx>=v1.30.5,<mesh-e-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default,<mesh-c-ctx>=default,<mesh-d-ctx>=default,<mesh-e-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=1/1,<mesh-b-ctx>=1/1,<mesh-c-ctx>=1/1,<mesh-d-ctx>=1/1,<mesh-e-ctx>=1/1
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.6,<mesh-b-ctx>=v1.34.6
+# ISTIOD_REPLICAS=<mesh-a-ctx>=1,<mesh-b-ctx>=1
+# SOURCE_CTX=<mesh-a-ctx>
+# REMOTES=<mesh-b-ctx>
+# MESH_SIZE=2
+# ITERATIONS=10
+# POLL_INTERVAL_S=0.250
+# TIMEOUT_SEC=120
+# DRAIN_TIMEOUT_SEC=20
+# SETTLE_SEC=5
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# FANOUT_MAX_SKEW_MS=1000
+# FANOUT_METRICS_TIMEOUT=30
+# BACKER_IMAGE=hashicorp/http-echo:1.0
+# RUN_CONFIG=tests/campaign/profiles/rosa/propagation.env
+# RUN_CONFIG_SHA256=9dd833c17bd66ac30a2c1fb991ccf7c0de3a6974d2f42885ead2a309e4835d2c
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772
+# DATE=2026-10-27T14:40:51+00:00
+run_id	mesh_size	iteration	source_ctx	remote_ctx	t0_epoch_ns	p1_ms	p2_ms	p3_ms	status	p1_conv_p50_ms	p1_conv_p99_ms	p1_sample_count	p1_proxy_count	p1_overflow	restarted	p2_dirty	window_ms	scrape_skew_ms	p1_status	p1_scrape_skew_ms	remote_status	remote_scrape_skew_ms
+20261027T144050Z-2386779	2	1	<mesh-a-ctx>	<mesh-b-ctx>	1793112059281867959	664	632	629	OK	N/A	N/A	5/4	4	0	0	0	672	0	OK	0	OK	0
+20261027T144050Z-2386779	2	2	<mesh-a-ctx>	<mesh-b-ctx>	1793112067886966268	664	659	653	OK	N/A	N/A	5/4	4	0	0	0	671	0	OK	0	OK	0
+20261027T144050Z-2386779	2	3	<mesh-a-ctx>	<mesh-b-ctx>	1793112076950974186	795	870	768	OK	N/A	N/A	5/4	4	0	0	0	873	0	OK	0	OK	0
+20261027T144050Z-2386779	2	4	<mesh-a-ctx>	<mesh-b-ctx>	1793112085798541925	707	663	663	OK	N/A	N/A	5/4	4	0	0	0	715	0	OK	0	OK	0
+20261027T144050Z-2386779	2	5	<mesh-a-ctx>	<mesh-b-ctx>	1793112094294163396	606	602	601	OK	N/A	N/A	5/4	4	0	0	0	612	0	OK	0	OK	0
+20261027T144050Z-2386779	2	6	<mesh-a-ctx>	<mesh-b-ctx>	1793112102721717597	635	619	620	OK	N/A	N/A	5/4	4	0	0	0	641	0	OK	0	OK	0
+20261027T144050Z-2386779	2	7	<mesh-a-ctx>	<mesh-b-ctx>	1793112111441843885	669	671	620	OK	N/A	N/A	5/4	4	0	0	0	676	0	OK	0	OK	0
+20261027T144050Z-2386779	2	8	<mesh-a-ctx>	<mesh-b-ctx>	1793112120058304212	652	689	642	OK	N/A	N/A	5/4	4	0	0	0	693	0	OK	0	OK	0
+20261027T144050Z-2386779	2	9	<mesh-a-ctx>	<mesh-b-ctx>	1793112128687032886	609	649	608	OK	N/A	N/A	5/4	4	0	0	0	653	0	OK	0	OK	0
+20261027T144050Z-2386779	2	10	<mesh-a-ctx>	<mesh-b-ctx>	1793112137356287305	682	679	634	OK	N/A	N/A	5/4	4	0	0	0	688	0	OK	0	OK	0

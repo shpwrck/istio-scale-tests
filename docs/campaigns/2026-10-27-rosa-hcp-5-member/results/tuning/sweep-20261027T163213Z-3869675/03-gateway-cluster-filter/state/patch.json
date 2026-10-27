@@ -1,0 +1,11 @@
+{
+  "spec": {
+    "values": {
+      "pilot": {
+        "env": {
+          "PILOT_FILTER_GATEWAY_CLUSTER_CONFIG": "true"
+        }
+      }
+    }
+  }
+}

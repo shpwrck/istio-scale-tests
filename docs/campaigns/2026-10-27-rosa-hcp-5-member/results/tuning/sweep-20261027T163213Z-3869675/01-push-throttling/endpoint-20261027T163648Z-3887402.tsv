@@ -1,0 +1,76 @@
+# Endpoint propagation latency test
+# RUN_ID=20261027T163648Z-3887402
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5,<mesh-c-ctx>=v1.30.5,<mesh-d-ctx>=v1.30.5,<mesh-e-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default,<mesh-c-ctx>=default,<mesh-d-ctx>=default,<mesh-e-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=2/2,<mesh-b-ctx>=2/2,<mesh-c-ctx>=2/2,<mesh-d-ctx>=2/2,<mesh-e-ctx>=2/2
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.6,<mesh-b-ctx>=v1.34.6,<mesh-c-ctx>=v1.34.6,<mesh-d-ctx>=v1.34.6,<mesh-e-ctx>=v1.34.6
+# ISTIOD_REPLICAS=<mesh-a-ctx>=1,<mesh-b-ctx>=1,<mesh-c-ctx>=1,<mesh-d-ctx>=1,<mesh-e-ctx>=1
+# SOURCE_CTX=<mesh-a-ctx>
+# REMOTES=<mesh-b-ctx> <mesh-c-ctx> <mesh-d-ctx> <mesh-e-ctx>
+# MESH_SIZE=5
+# ITERATIONS=10
+# POLL_INTERVAL_S=0.250
+# TIMEOUT_SEC=120
+# DRAIN_TIMEOUT_SEC=20
+# SETTLE_SEC=5
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# FANOUT_MAX_SKEW_MS=1000
+# FANOUT_METRICS_TIMEOUT=30
+# BACKER_IMAGE=hashicorp/http-echo:1.0
+# RUN_CONFIG=tests/campaign/profiles/rosa/propagation.env
+# RUN_CONFIG_SHA256=9dd833c17bd66ac30a2c1fb991ccf7c0de3a6974d2f42885ead2a309e4835d2c
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift,<mesh-c-ctx>=openshift,<mesh-d-ctx>=openshift,<mesh-e-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3,<mesh-c-ctx>=servicemeshoperator3:3.4.3,<mesh-d-ctx>=servicemeshoperator3:3.4.3,<mesh-e-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-c-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-d-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-e-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-c-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-d-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-e-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws,<mesh-c-ctx>=aws,<mesh-d-ctx>=aws,<mesh-e-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0a5358173660,<mesh-b-ctx>=0a5358173660,<mesh-c-ctx>=0a5358173660,<mesh-d-ctx>=0a5358173660,<mesh-e-ctx>=0a5358173660
+# DATE=2026-10-27T16:36:50+00:00
+run_id	mesh_size	iteration	source_ctx	remote_ctx	t0_epoch_ns	p1_ms	p2_ms	p3_ms	status	p1_conv_p50_ms	p1_conv_p99_ms	p1_sample_count	p1_proxy_count	p1_overflow	restarted	p2_dirty	window_ms	scrape_skew_ms	p1_status	p1_scrape_skew_ms	remote_status	remote_scrape_skew_ms
+20261027T163648Z-3887402	5	1	<mesh-a-ctx>	<mesh-b-ctx>	1793119025347502194	1095	1065	1854	OK	N/A	N/A	5/4	4	0	0	0	1927	0	OK	0	OK	0
+20261027T163648Z-3887402	5	1	<mesh-a-ctx>	<mesh-c-ctx>	1793119025347502194	1095	1025	1847	OK	N/A	N/A	5/4	4	0	0	0	1927	0	OK	0	OK	0
+20261027T163648Z-3887402	5	1	<mesh-a-ctx>	<mesh-d-ctx>	1793119025347502194	1095	1060	1923	OK	N/A	N/A	5/4	4	0	0	0	1927	0	OK	0	OK	0
+20261027T163648Z-3887402	5	1	<mesh-a-ctx>	<mesh-e-ctx>	1793119025347502194	1095	1080	1874	OK	N/A	N/A	5/4	4	0	0	0	1927	0	OK	0	OK	0
+20261027T163648Z-3887402	5	2	<mesh-a-ctx>	<mesh-b-ctx>	1793119036846517544	1117	1081	1879	OK	N/A	N/A	5/4	4	0	0	0	1932	0	OK	0	OK	0
+20261027T163648Z-3887402	5	2	<mesh-a-ctx>	<mesh-c-ctx>	1793119036846517544	1117	1058	1879	OK	N/A	N/A	5/4	4	0	0	0	1932	0	OK	0	OK	0
+20261027T163648Z-3887402	5	2	<mesh-a-ctx>	<mesh-d-ctx>	1793119036846517544	1117	1091	1928	OK	N/A	N/A	5/4	4	0	0	0	1932	0	OK	0	OK	0
+20261027T163648Z-3887402	5	2	<mesh-a-ctx>	<mesh-e-ctx>	1793119036846517544	1117	1092	1887	OK	N/A	N/A	5/4	4	0	0	0	1932	0	OK	0	OK	0
+20261027T163648Z-3887402	5	3	<mesh-a-ctx>	<mesh-b-ctx>	1793119048245545239	1118	1091	1883	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	3	<mesh-a-ctx>	<mesh-c-ctx>	1793119048245545239	1118	1065	1879	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	3	<mesh-a-ctx>	<mesh-d-ctx>	1793119048245545239	1118	1081	1931	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	3	<mesh-a-ctx>	<mesh-e-ctx>	1793119048245545239	1118	1110	1907	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	4	<mesh-a-ctx>	<mesh-b-ctx>	1793119059731557554	1113	1111	1895	OK	N/A	N/A	5/4	4	0	0	0	1923	0	OK	0	OK	0
+20261027T163648Z-3887402	5	4	<mesh-a-ctx>	<mesh-c-ctx>	1793119059731557554	1113	1041	1879	OK	N/A	N/A	5/4	4	0	0	0	1923	0	OK	0	OK	0
+20261027T163648Z-3887402	5	4	<mesh-a-ctx>	<mesh-d-ctx>	1793119059731557554	1113	1064	1919	OK	N/A	N/A	5/4	4	0	0	0	1923	0	OK	0	OK	0
+20261027T163648Z-3887402	5	4	<mesh-a-ctx>	<mesh-e-ctx>	1793119059731557554	1113	1103	1883	OK	N/A	N/A	5/4	4	0	0	0	1923	0	OK	0	OK	0
+20261027T163648Z-3887402	5	5	<mesh-a-ctx>	<mesh-b-ctx>	1793119071162963744	1142	1105	1905	OK	N/A	N/A	5/4	4	0	0	0	1965	0	OK	0	OK	0
+20261027T163648Z-3887402	5	5	<mesh-a-ctx>	<mesh-c-ctx>	1793119071162963744	1142	1068	1906	OK	N/A	N/A	5/4	4	0	0	0	1965	0	OK	0	OK	0
+20261027T163648Z-3887402	5	5	<mesh-a-ctx>	<mesh-d-ctx>	1793119071162963744	1142	1090	1961	OK	N/A	N/A	5/4	4	0	0	0	1965	0	OK	0	OK	0
+20261027T163648Z-3887402	5	5	<mesh-a-ctx>	<mesh-e-ctx>	1793119071162963744	1142	1139	1938	OK	N/A	N/A	5/4	4	0	0	0	1965	0	OK	0	OK	0
+20261027T163648Z-3887402	5	6	<mesh-a-ctx>	<mesh-b-ctx>	1793119082642459737	1122	1085	1897	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	6	<mesh-a-ctx>	<mesh-c-ctx>	1793119082642459737	1122	1047	1889	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	6	<mesh-a-ctx>	<mesh-d-ctx>	1793119082642459737	1122	1066	1931	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	6	<mesh-a-ctx>	<mesh-e-ctx>	1793119082642459737	1122	1098	1896	OK	N/A	N/A	5/4	4	0	0	0	1935	0	OK	0	OK	0
+20261027T163648Z-3887402	5	7	<mesh-a-ctx>	<mesh-b-ctx>	1793119094085988264	1118	1097	1879	OK	N/A	N/A	5/4	4	0	0	0	1930	0	OK	0	OK	0
+20261027T163648Z-3887402	5	7	<mesh-a-ctx>	<mesh-c-ctx>	1793119094085988264	1118	1057	1879	OK	N/A	N/A	5/4	4	0	0	0	1930	0	OK	0	OK	0
+20261027T163648Z-3887402	5	7	<mesh-a-ctx>	<mesh-d-ctx>	1793119094085988264	1118	1079	1926	OK	N/A	N/A	5/4	4	0	0	0	1930	0	OK	0	OK	0
+20261027T163648Z-3887402	5	7	<mesh-a-ctx>	<mesh-e-ctx>	1793119094085988264	1118	1119	1896	OK	N/A	N/A	5/4	4	0	0	0	1930	0	OK	0	OK	0
+20261027T163648Z-3887402	5	8	<mesh-a-ctx>	<mesh-b-ctx>	1793119105521446625	1141	1115	1971	OK	N/A	N/A	5/4	4	0	0	0	1975	0	OK	0	OK	0
+20261027T163648Z-3887402	5	8	<mesh-a-ctx>	<mesh-c-ctx>	1793119105521446625	1141	1068	1927	OK	N/A	N/A	5/4	4	0	0	0	1975	0	OK	0	OK	0
+20261027T163648Z-3887402	5	8	<mesh-a-ctx>	<mesh-d-ctx>	1793119105521446625	1141	1091	1951	OK	N/A	N/A	5/4	4	0	0	0	1975	0	OK	0	OK	0
+20261027T163648Z-3887402	5	8	<mesh-a-ctx>	<mesh-e-ctx>	1793119105521446625	1141	1115	1913	OK	N/A	N/A	5/4	4	0	0	0	1975	0	OK	0	OK	0
+20261027T163648Z-3887402	5	9	<mesh-a-ctx>	<mesh-b-ctx>	1793119116938751625	1110	1093	3149	OK	N/A	N/A	5/4	4	0	0	0	3153	0	OK	0	OK	0
+20261027T163648Z-3887402	5	9	<mesh-a-ctx>	<mesh-c-ctx>	1793119116938751625	1110	1049	1887	OK	N/A	N/A	5/4	4	0	0	0	3153	0	OK	0	OK	0
+20261027T163648Z-3887402	5	9	<mesh-a-ctx>	<mesh-d-ctx>	1793119116938751625	1110	1059	1925	OK	N/A	N/A	5/4	4	0	0	0	3153	0	OK	0	OK	0
+20261027T163648Z-3887402	5	9	<mesh-a-ctx>	<mesh-e-ctx>	1793119116938751625	1110	1107	1898	OK	N/A	N/A	5/4	4	0	0	0	3153	0	OK	0	OK	0
+20261027T163648Z-3887402	5	10	<mesh-a-ctx>	<mesh-b-ctx>	1793119129484211744	1105	1071	1883	OK	N/A	N/A	5/4	4	0	0	0	1926	0	OK	0	OK	0
+20261027T163648Z-3887402	5	10	<mesh-a-ctx>	<mesh-c-ctx>	1793119129484211744	1105	1061	1882	OK	N/A	N/A	5/4	4	0	0	0	1926	0	OK	0	OK	0
+20261027T163648Z-3887402	5	10	<mesh-a-ctx>	<mesh-d-ctx>	1793119129484211744	1105	1061	1922	OK	N/A	N/A	5/4	4	0	0	0	1926	0	OK	0	OK	0
+20261027T163648Z-3887402	5	10	<mesh-a-ctx>	<mesh-e-ctx>	1793119129484211744	1105	1094	1898	OK	N/A	N/A	5/4	4	0	0	0	1926	0	OK	0	OK	0
