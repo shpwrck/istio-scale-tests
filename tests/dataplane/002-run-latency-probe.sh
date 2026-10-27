@@ -611,9 +611,9 @@ run_fortio() {
 		local json_output load_start_ns
 		LOAD_POD="$CLIENT_POD"
 		load_start_ns="$(now_ns)"
-		json_output=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
+		if ! json_output=$("${KUBECTL[@]}" --context="$SOURCE_CTX" -n "$NS" exec "$CLIENT_POD" -c fortio -- \
 			fortio load -qps "$qps" -c "$CONNECTIONS" -t "${DURATION}s" -p '50,90,99,99.9' \
-			-json - -quiet "$target_url" 2>/dev/null) && [[ -n "$json_output" ]] || {
+			-json - -quiet "$target_url" 2>/dev/null) || [[ -z "$json_output" ]]; then
 			# An exec that fails, or that exits 0 with no output (its stream dropped): no result.
 			echo "    FAILED"
 			# Nothing was measured: qps_actual and every latency are N/A, never 0.
@@ -624,7 +624,7 @@ run_fortio() {
 			fortio_load_wait_out "$load_start_ns" "$DURATION" "$SOURCE_CTX" "$NS" "$CLIENT_POD" "${KUBECTL[@]}"
 			LOAD_POD=""
 			continue
-		}
+		fi
 		LOAD_POD=""
 
 		# Parsing and the row status live in tests/lib/fortio.sh.
