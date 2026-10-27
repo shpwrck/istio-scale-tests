@@ -65,6 +65,7 @@ pattern for:
 
 | Date | Run | Files |
 |---|---|---|
+| 2026-10-27 | `rosa` profile on ROSA HCP, hub + 5 members, every sweep 1 to 5 members: all suites OK; a remote hop adds about 1 ms p50, flat with mesh size; churn's p99 cost lands at the first remote member; namespace scaling to 4000 + 2000 outside namespaces **PASS** (peak 13%); dataplane API-blip fix (PR 117) | [record](2026-10-27-rosa-hcp-5-member/README.md), [charts](2026-10-27-rosa-hcp-5-member/charts/), [results](2026-10-27-rosa-hcp-5-member/results/) |
 | 2026-10-27 | First full campaign-runner run, `openshift` profile on the 2-member lab: all 6 suites OK in 110 min; namespace scaling to 400 + 200 outside namespaces **PASS** (peak 35%); no tuning profile moved propagation; 3 harness issues fixed | [record](2026-10-27-openshift-homelab/README.md), [charts](2026-10-27-openshift-homelab/charts/), [results](2026-10-27-openshift-homelab/results/) |
 | 2026-10-14 | ROSA validation window (hub + 3 members, Tier C): tasks 3 and 4 validated, task 6 at 60-250 Services, task 1 to 4000 namespaces / 8000 Services; the east-west gateway is the binding resource; 17 issues → BACKLOG 9 | [results](2026-10-14-rosa-validation/README.md) |
 | 2026-10-14 | Lab run of the Gateway API multicluster ingress check (backlog task 8): no Service needed for traffic; namespace needed with `kind: Service`; 22/22 predictions matched | [results](2026-10-14-gateway-api-multicluster-lab/README.md) |

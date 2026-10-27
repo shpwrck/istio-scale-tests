@@ -1,0 +1,14 @@
+# ISTIOD_DIAG_SCHEMA=1
+# RUN_ID=20261027T135531Z-2028413
+# CREATED_BY=002-run-latency-probe.sh
+# HARNESS_SHA=d21a197
+# DATE=2026-10-27T14:04:41Z
+# ISTIOD_DIAG_REQUEST_TIMEOUT=15
+# ISTIOD_DIAG_MAX_SEC=120
+# ISTIOD_DIAG_MAX_CAPTURES=20
+# ISTIOD_DIAG_LOG_LINES=5000
+# ISTIOD_DIAG_LOG_BYTES=1048576
+captured_at	tag	context	trigger	pod	change	cause	restart_count	exit_code	signal	term_reason	started_at	finished_at	mem_limit_mi	rss_pre_mi	heap_inuse_pre_mi	goroutines_pre	proxies_pre	pre_scrape_at	rs_changed	node_ready_at	evidence	note
+2026-10-27T14:04:41Z	m4	<mesh-a-ctx>	unknown	-	no_change	no_restart_found	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	-	1 istiod pod(s), none restarted or replaced since the pre-window scrape
+2026-10-27T14:04:41Z	m4	<mesh-c-ctx>	unknown	-	no_change	no_restart_found	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	-	1 istiod pod(s), none restarted or replaced since the pre-window scrape
+2026-10-27T14:04:42Z	m4	<mesh-d-ctx>	unknown	-	no_change	no_restart_found	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	N/A	-	1 istiod pod(s), none restarted or replaced since the pre-window scrape

@@ -1,0 +1,206 @@
+# Memory stop guard (controlplane growth mode)
+# generated_at=2026-10-27T18:06:11+00:00
+# RUN_ID=20261027T180552Z-4034321
+# HARNESS_SHA=bf258af
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5,<mesh-c-ctx>=v1.30.5,<mesh-d-ctx>=v1.30.5,<mesh-e-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default,<mesh-c-ctx>=default,<mesh-d-ctx>=default,<mesh-e-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=7/7,<mesh-b-ctx>=7/7,<mesh-c-ctx>=7/7,<mesh-d-ctx>=7/7,<mesh-e-ctx>=7/7
+# MEM_STOP_PCT=70
+# MEM_GUARD_CONTEXTS=<mesh-a-ctx>,<mesh-b-ctx>,<mesh-c-ctx>,<mesh-d-ctx>,<mesh-e-ctx>
+# GUARD_SCHEMA=2
+# GW_MODEL=intercept 10 Mi; eastwestgateway 145 Mi per 1000 Services x 2.5; ingressgateway 91 Mi per 1000 Services x 1.2
+# NOTE=rel_projected = base + (current - base) x ratio^power from the series start (ratio 1: the first step and changes that add no Services); abs_projected (gateways) = (intercept + Mi per 1000 Services x services_after / 1000) x burst factor, plus the non-heap part of a working-set reading (ws - Envoy physical heap); services_after = the context's istiod pilot_services + the Services the step adds; projected = the larger, compared with stop_pct % of limit_mi. metric: rss = istiod process_resident_memory_bytes (max over replicas, per-replica limit); ws = the gateway container's working set (kubectl top), else physical = Envoy server.memory_physical_size, else allocated = server.memory_allocated (istio-proxy limit). verdict stale_base: a gateway's Envoy allocated memory exceeded 1.5 x the model + 100 Mi at the series start (memory kept from an earlier series).
+# RUN_CONFIG=tests/campaign/profiles/rosa/controlplane.env
+# RUN_CONFIG_SHA256=84b2f2d8cfe993f0c74e8a6df29cc65eb9e936bc5e4d7f3701a0fb1f7bc1f0f3
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift,<mesh-c-ctx>=openshift,<mesh-d-ctx>=openshift,<mesh-e-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3,<mesh-c-ctx>=servicemeshoperator3:3.4.3,<mesh-d-ctx>=servicemeshoperator3:3.4.3,<mesh-e-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-c-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-d-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-e-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-c-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-d-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-e-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws,<mesh-c-ctx>=aws,<mesh-d-ctx>=aws,<mesh-e-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772,<mesh-c-ctx>=0c3d8d887772,<mesh-d-ctx>=0c3d8d887772,<mesh-e-ctx>=0c3d8d887772
+timestamp	series	cell	context	component	metric	current_mi	base_mi	ratio	power	rel_projected_mi	services_after	abs_projected_mi	projected_mi	limit_mi	stop_pct	verdict
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	40	40	1	1	40	253	61	61	2048	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	42	42	1	1	42	253	64	64	2048	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-c-ctx>	istiod	rss	219	219	1	1	219	-	-	219	16384	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	42	42	1	1	42	253	62	62	2048	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	50	50	1	1	50	253	144	144	5120	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	42	42	1	1	42	253	64	64	2048	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	43	43	1	1	43	253	65	65	2048	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-d-ctx>	istiod	rss	209	209	1	1	209	-	-	209	16384	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	51	51	1	1	51	253	147	147	5120	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	49	49	1	1	49	253	145	145	5120	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	48	48	1	1	48	253	144	144	5120	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-e-ctx>	istiod	rss	210	210	1	1	210	-	-	210	16384	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	49	49	1	1	49	253	144	144	5120	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-b-ctx>	istiod	rss	214	214	1	1	214	-	-	214	16384	70	ok
+2026-10-27T18:06:50+00:00	s1027180552-1	grow 0->250	<mesh-a-ctx>	istiod	rss	209	209	1	1	209	-	-	209	16384	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	64	40	1	1	64	254	63	64	2048	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	66	42	1	1	66	254	64	66	2048	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-c-ctx>	istiod	rss	239	219	1	2	239	-	-	239	16384	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	66	42	1	1	66	254	64	66	2048	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	102	50	1	1	102	254	152	152	5120	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	67	42	1	1	67	254	65	67	2048	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	69	43	1	1	69	254	67	69	2048	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-d-ctx>	istiod	rss	230	209	1	2	230	-	-	230	16384	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	95	51	1	1	95	254	149	149	5120	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	99	49	1	1	99	254	151	151	5120	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	95	48	1	1	95	254	147	147	5120	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-e-ctx>	istiod	rss	238	210	1	2	238	-	-	238	16384	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	95	49	1	1	95	254	148	148	5120	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-b-ctx>	istiod	rss	239	214	1	2	239	-	-	239	16384	70	ok
+2026-10-27T18:11:00+00:00	s1027180552-1	probe wide N=250	<mesh-a-ctx>	istiod	rss	263	209	1	2	263	-	-	263	16384	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	67	40	4.0000	1	148	1003	146	148	2048	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	66	42	4.0000	1	138	1003	146	146	2048	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-c-ctx>	istiod	rss	222	219	4.0000	1	231	-	-	231	16384	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	67	42	4.0000	1	142	1003	147	147	2048	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	99	50	4.0000	1	246	1003	421	421	5120	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	66	42	4.0000	1	138	1003	146	146	2048	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	71	43	4.0000	1	155	1003	151	155	2048	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-d-ctx>	istiod	rss	241	209	4.0000	1	337	-	-	337	16384	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	95	51	4.0000	1	227	1003	421	421	5120	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	103	49	4.0000	1	265	1003	427	427	5120	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	96	48	4.0000	1	240	1003	420	420	5120	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-e-ctx>	istiod	rss	248	210	4.0000	1	362	-	-	362	16384	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	95	49	4.0000	1	233	1003	420	420	5120	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-b-ctx>	istiod	rss	224	214	4.0000	1	254	-	-	254	16384	70	ok
+2026-10-27T18:15:32+00:00	s1027180552-1	grow 250->1000	<mesh-a-ctx>	istiod	rss	279	209	4.0000	1	489	-	-	489	16384	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	138	40	1	1	138	1004	145	145	2048	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	140	42	1	1	140	1004	148	148	2048	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-c-ctx>	istiod	rss	222	219	4.0000	2	267	-	-	267	16384	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	156	42	1	1	156	1004	154	156	2048	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	276	50	1	1	276	1004	440	440	5120	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	155	42	1	1	155	1004	155	155	2048	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	143	43	1	1	143	1004	151	151	2048	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-d-ctx>	istiod	rss	241	209	4.0000	2	721	-	-	721	16384	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	275	51	1	1	275	1004	441	441	5120	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	277	49	1	1	277	1004	443	443	5120	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	279	48	1	1	279	1004	445	445	5120	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-e-ctx>	istiod	rss	227	210	4.0000	2	482	-	-	482	16384	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	275	49	1	1	275	1004	440	440	5120	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-b-ctx>	istiod	rss	224	214	4.0000	2	374	-	-	374	16384	70	ok
+2026-10-27T18:21:17+00:00	s1027180552-1	probe wide N=1000	<mesh-a-ctx>	istiod	rss	279	209	4.0000	2	1329	-	-	1329	16384	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	138	40	2.0000	1	236	2003	254	254	2048	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	140	42	2.0000	1	238	2003	257	257	2048	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-c-ctx>	istiod	rss	268	219	2.0000	1	317	-	-	317	16384	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	154	42	2.0000	1	266	2003	261	266	2048	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	271	50	2.0000	1	492	2003	797	797	5120	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	153	42	2.0000	1	264	2003	262	264	2048	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	143	43	2.0000	1	243	2003	260	260	2048	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-d-ctx>	istiod	rss	256	209	2.0000	1	303	-	-	303	16384	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	257	51	2.0000	1	463	2003	785	785	5120	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	268	49	2.0000	1	487	2003	796	796	5120	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	265	48	2.0000	1	482	2003	793	793	5120	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-e-ctx>	istiod	rss	260	210	2.0000	1	310	-	-	310	16384	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	254	49	2.0000	1	459	2003	781	781	5120	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-b-ctx>	istiod	rss	269	214	2.0000	1	324	-	-	324	16384	70	ok
+2026-10-27T18:27:12+00:00	s1027180552-1	grow 1000->2000	<mesh-a-ctx>	istiod	rss	404	209	2.0000	1	599	-	-	599	16384	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	233	40	1	1	233	2004	257	257	2048	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	233	42	1	1	233	2004	258	258	2048	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-c-ctx>	istiod	rss	268	219	2.0000	2	415	-	-	415	16384	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	243	42	1	1	243	2004	266	266	2048	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	511	50	1	1	511	2004	812	812	5120	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	242	42	1	1	242	2004	267	267	2048	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	244	43	1	1	244	2004	269	269	2048	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-d-ctx>	istiod	rss	270	209	2.0000	2	453	-	-	453	16384	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	520	51	1	1	520	2004	828	828	5120	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	519	49	1	1	519	2004	821	821	5120	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	520	48	1	1	520	2004	824	824	5120	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-e-ctx>	istiod	rss	271	210	2.0000	2	454	-	-	454	16384	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	517	49	1	1	517	2004	823	823	5120	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-b-ctx>	istiod	rss	269	214	2.0000	2	434	-	-	434	16384	70	ok
+2026-10-27T18:33:46+00:00	s1027180552-1	probe wide N=2000	<mesh-a-ctx>	istiod	rss	446	209	2.0000	2	1157	-	-	1157	16384	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	233	40	2.0000	1	426	4003	475	475	2048	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	264	42	2.0000	1	486	4003	487	487	2048	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-c-ctx>	istiod	rss	341	219	2.0000	1	463	-	-	463	16384	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	239	42	2.0000	1	436	4003	480	480	2048	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	480	50	2.0000	1	910	4003	1578	1578	5120	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	237	42	2.0000	1	432	4003	480	480	2048	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	238	43	2.0000	1	433	4003	481	481	2048	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-d-ctx>	istiod	rss	311	209	2.0000	1	413	-	-	413	16384	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	494	51	2.0000	1	937	4003	1599	1599	5120	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	497	49	2.0000	1	945	4003	1594	1594	5120	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	432	48	2.0000	1	816	4003	1529	1529	5120	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-e-ctx>	istiod	rss	328	210	2.0000	1	446	-	-	446	16384	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	490	49	2.0000	1	931	4003	1589	1589	5120	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-b-ctx>	istiod	rss	316	214	2.0000	1	418	-	-	418	16384	70	ok
+2026-10-27T18:41:32+00:00	s1027180552-1	grow 2000->4000	<mesh-a-ctx>	istiod	rss	587	209	2.0000	1	965	-	-	965	16384	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	462	40	1	1	462	4004	479	479	2048	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	427	42	1	1	427	4004	481	481	2048	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	istiod	rss	333	219	2.0000	2	675	-	-	675	16384	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	466	42	1	1	466	4004	485	485	2048	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	1140	50	1	1	1140	4004	1666	1666	5120	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	435	42	1	1	435	4004	488	488	2048	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	433	43	1	1	433	4004	486	486	2048	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	istiod	rss	331	209	2.0000	2	697	-	-	697	16384	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	1045	51	1	1	1045	4004	1591	1591	5120	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	1096	49	1	1	1096	4004	1610	1610	5120	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	1093	48	1	1	1093	4004	1609	1609	5120	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	istiod	rss	328	210	2.0000	2	682	-	-	682	16384	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	1046	49	1	1	1046	4004	1579	1579	5120	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	istiod	rss	337	214	2.0000	2	706	-	-	706	16384	70	ok
+2026-10-27T18:51:25+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	istiod	rss	551	209	2.0000	2	1577	-	-	1577	16384	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	458	40	1	1	458	4003	475	475	2048	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	426	42	1	1	426	4003	480	480	2048	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-c-ctx>	istiod	rss	500	219	1	1	500	-	-	500	16384	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	462	42	1	1	462	4003	481	481	2048	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	969	50	1	1	969	4003	1714	1714	5120	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	435	42	1	1	435	4003	488	488	2048	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	435	43	1	1	435	4003	488	488	2048	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-d-ctx>	istiod	rss	415	209	1	1	415	-	-	415	16384	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	982	51	1	1	982	4003	1730	1730	5120	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	911	49	1	1	911	4003	1660	1660	5120	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	944	48	1	1	944	4003	1689	1689	5120	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-e-ctx>	istiod	rss	422	210	1	1	422	-	-	422	16384	70	ok
+2026-10-27T19:02:55+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	984	49	1	1	984	4003	1736	1736	5120	70	ok
+2026-10-27T19:02:56+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-b-ctx>	istiod	rss	496	214	1	1	496	-	-	496	16384	70	ok
+2026-10-27T19:02:56+00:00	s1027180552-1	outside unlabeled N=4000	<mesh-a-ctx>	istiod	rss	813	209	1	1	813	-	-	813	16384	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	458	40	1	1	458	4004	475	475	2048	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	483	42	1	1	483	4004	499	499	2048	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	istiod	rss	529	219	1.0000	2	529	-	-	529	16384	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	468	42	1	1	468	4004	487	487	2048	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	1014	50	1	1	1014	4004	1768	1768	5120	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	435	42	1	1	435	4004	488	488	2048	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	435	43	1	1	435	4004	488	488	2048	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	istiod	rss	485	209	1.0000	2	485	-	-	485	16384	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	1034	51	1	1	1034	4004	1788	1788	5120	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	937	49	1	1	937	4004	1695	1695	5120	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	973	48	1	1	973	4004	1728	1728	5120	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	istiod	rss	498	210	1.0000	2	498	-	-	498	16384	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	1021	49	1	1	1021	4004	1777	1777	5120	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	istiod	rss	566	214	1.0000	2	566	-	-	566	16384	70	ok
+2026-10-27T19:10:06+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	istiod	rss	903	209	1.0000	2	903	-	-	903	16384	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	466	40	1.5000	1	679	6003	700	700	2048	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	466	42	1.5000	1	678	6003	701	701	2048	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-c-ctx>	istiod	rss	591	219	1.5000	1	777	-	-	777	16384	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	469	42	1.5000	1	682	6003	703	703	2048	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	1049	50	1.5000	1	1548	6003	2519	2519	5120	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	473	42	1.5000	1	688	6003	709	709	2048	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	465	43	1.5000	1	676	6003	701	701	2048	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-d-ctx>	istiod	rss	581	209	1.5000	1	767	-	-	767	16384	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	1019	51	1.5000	1	1503	6003	2488	2488	5120	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	919	49	1.5000	1	1354	6003	2401	2401	5120	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	997	48	1.5000	1	1472	6003	2466	2466	5120	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-e-ctx>	istiod	rss	563	210	1.5000	1	740	-	-	740	16384	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	994	49	1.5000	1	1466	6003	2474	2474	5120	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-b-ctx>	istiod	rss	586	214	1.5000	1	772	-	-	772	16384	70	ok
+2026-10-27T19:21:01+00:00	s1027180552-1	outside labeled N=4000	<mesh-a-ctx>	istiod	rss	1016	209	1.5000	1	1420	-	-	1420	16384	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	gw:istio-ingressgateway-58559d4586-n4gd2	ws	609	40	1	1	609	6004	697	697	2048	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	gw:istio-ingressgateway-7d5ffbfc64-glkzj	ws	613	42	1	1	613	6004	702	702	2048	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	istiod	rss	518	219	1.5000	2	892	-	-	892	16384	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	gw:istio-ingressgateway-59868c6d86-6xd96	ws	712	42	1	1	712	6004	744	744	2048	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	gw:istio-eastwestgateway-b59489549-vzvnn	ws	1408	50	1	1	1408	6004	2364	2364	5120	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	gw:istio-ingressgateway-6b567bb859-rzpw8	ws	618	42	1	1	618	6004	706	706	2048	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	gw:istio-ingressgateway-8c7b4b7bf-f9fgn	ws	613	43	1	1	613	6004	699	699	2048	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	istiod	rss	606	209	1.5000	2	1102	-	-	1102	16384	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	gw:istio-eastwestgateway-6f79f697df-5xsfl	ws	1669	51	1	1	1669	6004	2600	2600	5120	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-d-ctx>	gw:istio-eastwestgateway-fd97bb6bf-jr4b8	ws	1560	49	1	1	1560	6004	2503	2503	5120	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-c-ctx>	gw:istio-eastwestgateway-df8db845-t5zd7	ws	1552	48	1	1	1552	6004	2509	2509	5120	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	istiod	rss	588	210	1.5000	2	1060	-	-	1060	16384	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-e-ctx>	gw:istio-eastwestgateway-7c8cb875b9-wh9jd	ws	1630	49	1	1	1630	6004	2602	2602	5120	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-b-ctx>	istiod	rss	561	214	1.5000	2	995	-	-	995	16384	70	ok
+2026-10-27T19:27:43+00:00	s1027180552-1	probe wide N=4000	<mesh-a-ctx>	istiod	rss	1117	209	1.5000	2	2252	-	-	2252	16384	70	ok

@@ -8,7 +8,12 @@ status: current
 
 How to stand up the ROSA path end to end (`terraform/rosa-hcp`, then `terraform/platform` in rosa
 mode, then a mesh check), run one cost-capped validation window on it, and tear it all down again.
-**No ROSA clusters exist:** the 2026-10-16 window (Tier C, 4 clusters, window commit `12401a8`,
+**No ROSA clusters exist:** the 2026-10-27 campaign run (hub + 5 members, 6 clusters, the
+campaign runner's `rosa` profile, T0 12:16 UTC; record
+[`docs/campaigns/2026-10-27-rosa-hcp-5-member/`](../../campaigns/2026-10-27-rosa-hcp-5-member/README.md))
+was torn down with `003-auto-teardown.sh --now` chained after the last suite (`CLEAN` 20:13 UTC),
+destroyed and audited empty across all regions on 2026-10-27; its timers are disarmed and its
+platform `rosa` workspace discarded. Before it, the 2026-10-16 window (Tier C, 4 clusters, window commit `12401a8`,
 T0 17:59 UTC; it validated BACKLOG section 9) was torn down with `003-auto-teardown.sh --now`
 from 21:03 UTC (`CLEAN` 21:27) and audited empty across all regions the same day; about $30-35
 (an estimate until Cost Explorer confirms it). Its timers are disarmed and its platform `rosa`

@@ -1,0 +1,106 @@
+# churn-dataplane co-exec test
+# generated_at=2026-10-27T15:13:33+00:00
+# RUN_ID=20261027T151327Z-3162743
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5,<mesh-c-ctx>=v1.30.5,<mesh-d-ctx>=v1.30.5,<mesh-e-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default,<mesh-c-ctx>=default,<mesh-d-ctx>=default,<mesh-e-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=1/1,<mesh-b-ctx>=1/1,<mesh-c-ctx>=1/1,<mesh-d-ctx>=1/1,<mesh-e-ctx>=1/1
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.6,<mesh-b-ctx>=v1.34.6,<mesh-c-ctx>=v1.34.6,<mesh-d-ctx>=v1.34.6,<mesh-e-ctx>=v1.34.6
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# ISTIOD_REPLICAS=1
+# SETTLE_SEC=10
+# BASELINE_DURATION_SEC=60
+# CHURN_DURATION_SEC=60
+# QPS=200
+# CONNECTIONS=8
+# NAMESPACE=churn-dataplane-test
+# MATRIX_SIZE=15
+# REPETITIONS=1
+# SETUP_NS_WAIT_SEC=240
+# CLEANUP_GRACE_SEC=5
+# NS_DELETE_TIMEOUT_SEC=240
+# FANOUT_MAX_SKEW_MS=1000
+# FANOUT_METRICS_TIMEOUT=30
+# MIN_PCT_200=0.99
+# REACH_REQUESTS=10
+# REACH_QPS=10
+# REACH_HTTP_TIMEOUT_SEC=3
+# REACH_DETAIL_TIMEOUT_SEC=35
+# REACH_ATTEMPTS=3
+# REACH_RETRY_SEC=10
+# ON_UNREACHABLE=warn
+# RUN_CONFIG=tests/campaign/profiles/rosa/churn-dataplane.env
+# RUN_CONFIG_SHA256=f09b6903b7a263d5a80e9fa6130ce613401a4a26ea31ae070e02de967ff8d98d
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift,<mesh-c-ctx>=openshift,<mesh-d-ctx>=openshift,<mesh-e-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3,<mesh-c-ctx>=servicemeshoperator3:3.4.3,<mesh-d-ctx>=servicemeshoperator3:3.4.3,<mesh-e-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-c-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-d-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-e-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-c-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-d-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-e-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws,<mesh-c-ctx>=aws,<mesh-d-ctx>=aws,<mesh-e-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772,<mesh-c-ctx>=0c3d8d887772,<mesh-d-ctx>=0c3d8d887772,<mesh-e-ctx>=0c3d8d887772
+run_id	harness_sha	combo_id	mesh_size	churn_rate	phase	duration_s	qps_target	qps_actual	p50_ms	p90_ms	p99_ms	p999_ms	max_ms	delta_p99_ms	istiod_restarted	status	churn_ops_attempted	churn_ops_succeeded	xds_pushes_delta	eds_pushes_delta	push_triggers_delta	convergence_p99_ms	queue_time_p99_ms	push_time_p99_ms
+# combo=ms1-cr1 phase=baseline window_start_ns=1793114035222521888 window_end_ns=1793114096094102104 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms1-cr1	1	0	baseline	60	200	199.98850555064982	2.7033121916842844	3.660087082728592	3.973584905660377	8.500000000000107	9.203476	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms1-cr1 phase=churn window_start_ns=1793114109155850198 window_end_ns=1793114170025664244 churn_ops_attempted=60 churn_ops_succeeded=60 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms1-cr1	1	1	churn	60	200	199.98855667145298	2.933728364260097	3.96280809859155	7.031250000000024	15.000000000000213	20.063395	3.06	0	OK	60	60	4525	3820	7987	99.00	99.00	9.90
+# combo=ms1-cr5 phase=baseline window_start_ns=1793114201852736587 window_end_ns=1793114262704018102 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms1-cr5	1	0	baseline	60	200	199.98924018556585	2.7298318303680236	3.6856915317228567	3.9723918237324134	6.500000000000107	16.552607000000002	N/A	0	OK	N/A	N/A	3	1	0	N/A	N/A	9.90
+# combo=ms1-cr5 phase=churn window_start_ns=1793114275786436652 window_end_ns=1793114336627189015 churn_ops_attempted=300 churn_ops_succeeded=300 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms1-cr5	1	5	churn	60	200	199.98725508554932	3.5947444056661877	5.765277777777778	13.058823529411745	17.60000000000007	25.053627	9.09	0	OK	300	300	6309	4512	19840	99.00	99.00	9.90
+# combo=ms1-cr10 phase=baseline window_start_ns=1793114409258502420 window_end_ns=1793114470124785626 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms1-cr10	1	0	baseline	60	200	199.99009961344586	2.733292533659731	3.687385260949384	3.9706268030422236	3.9989509572515085	10.066714	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms1-cr10 phase=churn window_start_ns=1793114483358318422 window_end_ns=1793114544270880467 churn_ops_attempted=600 churn_ops_succeeded=599 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms1-cr10	1	10	churn	60	200	199.98032098650842	3.582172701949861	5.4881756756756745	11.857142857142865	22.254676500000162	24.509353	7.89	0	OK	600	599	12786	9200	40950	99.00	99.00	9.90
+# combo=ms2-cr1 phase=baseline window_start_ns=1793114865658470438 window_end_ns=1793114926527728054 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms2-cr1	2	0	baseline	60	200	199.98611997667544	2.6366013071895424	3.627521613832853	4.696969696969695	23.333333333333808	42.064644	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms2-cr1 phase=churn window_start_ns=1793114939572705070 window_end_ns=1793115000545325622 churn_ops_attempted=60 churn_ops_succeeded=60 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms2-cr1	2	1	churn	60	200	199.98878364573497	2.839976115838185	5.49879518072289	15.272727272727291	38.33333333333397	47.141645000000004	10.58	0	OK	60	60	4752	4035	15511	99.00	99.00	9.90
+# combo=ms2-cr5 phase=baseline window_start_ns=1793115033342003005 window_end_ns=1793115094225003650 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms2-cr5	2	0	baseline	60	200	199.98808744625362	2.6528823602024443	3.6556728232189974	4.444444444444442	20	36.64355	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms2-cr5 phase=churn window_start_ns=1793115107369456653 window_end_ns=1793115168214783045 churn_ops_attempted=300 churn_ops_succeeded=300 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms2-cr5	2	5	churn	60	200	199.98790767116628	3.8349764252036005	12	24.61988304093567	43.18181818181832	224.069789	20.18	0	OK	300	300	6431	4637	43515	99.00	99.00	9.90
+# combo=ms2-cr10 phase=baseline window_start_ns=1793115248183838493 window_end_ns=1793115309074638359 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms2-cr10	2	0	baseline	60	200	199.98747893393454	2.657006048387097	3.67555266579974	5.346938775510203	15.636363636363663	32.863656999999996	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms2-cr10 phase=churn window_start_ns=1793115322349411813 window_end_ns=1793115383266795125 churn_ops_attempted=600 churn_ops_succeeded=600 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms2-cr10	2	10	churn	60	200	199.9534095425492	3.79704641350211	11.877005347593585	26.524390243902427	39.33333333333337	79.397694	21.18	0	OK	600	600	12570	8982	90597	99.00	99.00	9.90
+# combo=ms3-cr1 phase=baseline window_start_ns=1793115783305852046 window_end_ns=1793115844193819908 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms3-cr1	3	0	baseline	60	200	199.9609993034217	2.8695341781188652	3.884949978251414	4.983928571428572	15.66666666666695	42.118239	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms3-cr1 phase=churn window_start_ns=1793115856876871680 window_end_ns=1793115917868387657 churn_ops_attempted=60 churn_ops_succeeded=60 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms3-cr1	3	1	churn	60	200	199.98622417559872	3.1940744767599893	7.135458167330676	17.300000000000015	28.33333333333357	49.764734	12.32	0	OK	60	60	4469	3750	22586	99.00	99.00	9.90
+# combo=ms3-cr5 phase=baseline window_start_ns=1793115950920834953 window_end_ns=1793116011840752866 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms3-cr5	3	0	baseline	60	200	199.98462033276178	2.928722382324688	3.9020366598778002	4.973983739837397	15.000000000000853	41.374624	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms3-cr5 phase=churn window_start_ns=1793116024965286869 window_end_ns=1793116085873928986 churn_ops_attempted=300 churn_ops_succeeded=300 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms3-cr5	3	5	churn	60	200	199.97725253419696	3.3735506110937012	9.528301886792454	22.80219780219781	40.833333333334046	61.464497	17.83	0	OK	300	300	6498	4571	71263	99.00	99.00	9.90
+# combo=ms3-cr10 phase=baseline window_start_ns=1793116207460035994 window_end_ns=1793116268329999475 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms3-cr10	3	0	baseline	60	200	199.98457867251176	3.102699841185813	3.9497088406564322	4.975460122699387	22.14285714285749	237.628856	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms3-cr10 phase=churn window_start_ns=1793116281520021216 window_end_ns=1793116342464510227 churn_ops_attempted=600 churn_ops_succeeded=600 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms3-cr10	3	10	churn	60	200	199.93680626355263	5.249752229930625	14.362666666666664	29.500000000000025	46.66666666666667	70.84721900000001	24.52	0	OK	600	600	11710	8113	134629	99.00	99.00	9.90
+# combo=ms4-cr1 phase=baseline window_start_ns=1793116782949070355 window_end_ns=1793116843835527774 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms4-cr1	4	0	baseline	60	200	199.98415868816852	3.3389641211782775	4.066803699897226	9.176470588235336	32.50000000000071	46.729773	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms4-cr1 phase=churn window_start_ns=1793116856348313551 window_end_ns=1793116917269905590 churn_ops_attempted=60 churn_ops_succeeded=60 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms4-cr1	4	1	churn	60	200	199.98847586073384	3.5041551246537397	6.954545454545454	19.300000000000033	35.62500000000054	42.412508	10.12	0	OK	60	60	3295	2665	26035	99.00	99.00	9.90
+# combo=ms4-cr5 phase=baseline window_start_ns=1793116951590084470 window_end_ns=1793117012497594836 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms4-cr5	4	0	baseline	60	200	199.98374946050745	3.3542959591780446	4.101287553648069	5.687500000000004	27.50000000000071	208.056976	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms4-cr5 phase=churn window_start_ns=1793117025676955133 window_end_ns=1793117086613931285 churn_ops_attempted=300 churn_ops_succeeded=300 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms4-cr5	4	5	churn	60	200	199.972869747419	5.361494719740049	13.167315175097277	26.269841269841322	42.647058823529534	71.306639	20.58	0	OK	300	300	4916	3125	91888	99.00	99.00	9.90
+# combo=ms4-cr10 phase=baseline window_start_ns=1793117174010719541 window_end_ns=1793117234865241054 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms4-cr10	4	0	baseline	60	200	199.9849885668002	3.171895640686922	3.9644980184940555	5.4838709677419235	30	47.559819000000005	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms4-cr10 phase=churn window_start_ns=1793117247508364419 window_end_ns=1793117308433481278 churn_ops_attempted=600 churn_ops_succeeded=600 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms4-cr10	4	10	churn	60	200	199.96873369533995	5.170293282876065	13.540481400437638	26.969696969696997	47.77777777777799	72.79374700000001	21.49	0	OK	600	600	8955	5364	181087	99.00	99.00	9.90
+# combo=ms5-cr1 phase=baseline window_start_ns=1793117749121869571 window_end_ns=1793117809975729047 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms5-cr1	5	0	baseline	60	200	199.98388902792166	3.1944225618402395	3.9506853631636996	5.116279069767455	26.666666666666668	51.962914999999995	N/A	0	OK	N/A	N/A	3	1	180	99.00	99.00	9.90
+# combo=ms5-cr1 phase=churn window_start_ns=1793117823273782432 window_end_ns=1793117884188160339 churn_ops_attempted=60 churn_ops_succeeded=60 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms5-cr1	5	1	churn	60	200	199.98477989167998	3.3706538377432755	6.566844919786098	16	27.5	63.341792999999996	10.88	0	OK	60	60	3042	2430	32569	99.00	99.00	9.90
+# combo=ms5-cr5 phase=baseline window_start_ns=1793117918426680096 window_end_ns=1793117979291228677 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms5-cr5	5	0	baseline	60	200	199.98338092774924	3.193106780479949	3.9661781285231115	5.161290322580659	25	91.735479	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms5-cr5 phase=churn window_start_ns=1793117992490657495 window_end_ns=1793118053401441468 churn_ops_attempted=300 churn_ops_succeeded=300 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms5-cr5	5	5	churn	60	200	199.97709926251918	4.529133858267716	12.365	25.909090909090956	41.00000000000068	65.024003	20.75	0	OK	300	300	6477	4629	134179	99.00	99.00	9.90
+# combo=ms5-cr10 phase=baseline window_start_ns=1793118161083618524 window_end_ns=1793118222067578599 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms5-cr10	5	0	baseline	60	200	199.9841512060209	3.1764615620684364	3.9129967776584316	5.241379310344835	21.000000000000682	212.21533	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms5-cr10 phase=churn window_start_ns=1793118235281387816 window_end_ns=1793118296399608865 churn_ops_attempted=600 churn_ops_succeeded=600 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T151327Z-3162743	d21a197	ms5-cr10	5	10	churn	60	200	199.931169299815	4.533130236100533	12.662251655629138	26.986301369863003	50	214.679372	21.74	0	OK	600	600	9553	5899	239136	99.00	99.00	9.90

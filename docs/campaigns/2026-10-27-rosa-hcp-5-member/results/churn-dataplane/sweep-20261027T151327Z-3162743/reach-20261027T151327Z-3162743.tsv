@@ -1,0 +1,69 @@
+# Remote reachability check (tests/lib/reach.sh)
+# REACH_SCHEMA=1
+# RUN_ID=20261027T151327Z-3162743
+# HARNESS_SHA=d21a197
+# SUITE=churn-dataplane
+# NAMESPACE=churn-dataplane-test
+# ON_UNREACHABLE=warn
+# RUN_CONFIG=tests/campaign/profiles/rosa/churn-dataplane.env
+# RUN_CONFIG_SHA256=f09b6903b7a263d5a80e9fa6130ce613401a4a26ea31ae070e02de967ff8d98d
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift,<mesh-c-ctx>=openshift,<mesh-d-ctx>=openshift,<mesh-e-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3,<mesh-c-ctx>=servicemeshoperator3:3.4.3,<mesh-d-ctx>=servicemeshoperator3:3.4.3,<mesh-e-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-c-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-d-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-e-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-c-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-d-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-e-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws,<mesh-c-ctx>=aws,<mesh-d-ctx>=aws,<mesh-e-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772,<mesh-c-ctx>=0c3d8d887772,<mesh-d-ctx>=0c3d8d887772,<mesh-e-ctx>=0c3d8d887772
+# REACH_REQUESTS=10
+# REACH_QPS=10
+# REACH_HTTP_TIMEOUT_SEC=3
+# REACH_DETAIL_TIMEOUT_SEC=35
+# REACH_ATTEMPTS=3
+# REACH_RETRY_SEC=10
+run_id	combo_id	mesh_size	source_ctx	target_ctx	target_class	attempts	requests	ok	pct_200	top_code	reach_status	detail
+20261027T151327Z-3162743	ms1-cr1	1	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms1-cr5	1	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms1-cr10	1	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms2-cr1	2	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms2-cr1	2	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms2-cr5	2	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms2-cr5	2	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms2-cr10	2	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms2-cr10	2	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr1	3	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr1	3	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr1	3	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr5	3	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr5	3	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr5	3	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr10	3	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr10	3	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms3-cr10	3	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr1	4	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr1	4	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr1	4	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr1	4	<mesh-a-ctx>	<mesh-d-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr5	4	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr5	4	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr5	4	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr5	4	<mesh-a-ctx>	<mesh-d-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr10	4	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr10	4	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr10	4	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms4-cr10	4	<mesh-a-ctx>	<mesh-d-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr1	5	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr1	5	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr1	5	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr1	5	<mesh-a-ctx>	<mesh-d-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr1	5	<mesh-a-ctx>	<mesh-e-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr5	5	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr5	5	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr5	5	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr5	5	<mesh-a-ctx>	<mesh-d-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr5	5	<mesh-a-ctx>	<mesh-e-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr10	5	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr10	5	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr10	5	<mesh-a-ctx>	<mesh-c-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr10	5	<mesh-a-ctx>	<mesh-d-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
+20261027T151327Z-3162743	ms5-cr10	5	<mesh-a-ctx>	<mesh-e-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-

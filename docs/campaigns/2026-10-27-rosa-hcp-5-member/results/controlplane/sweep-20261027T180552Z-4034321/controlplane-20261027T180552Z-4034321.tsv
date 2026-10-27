@@ -1,0 +1,101 @@
+# Control-plane resource metrics — 2026-10-27T18:06:11+00:00
+# CONTROLPLANE_SCHEMA=66
+# CONTROLPLANE_INFRA_SCHEMA=2
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5,<mesh-c-ctx>=v1.30.5,<mesh-d-ctx>=v1.30.5,<mesh-e-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default,<mesh-c-ctx>=default,<mesh-d-ctx>=default,<mesh-e-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=7/7,<mesh-b-ctx>=7/7,<mesh-c-ctx>=7/7,<mesh-d-ctx>=7/7,<mesh-e-ctx>=7/7
+# HARNESS_SHA=bf258af
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.6,<mesh-b-ctx>=v1.34.6,<mesh-c-ctx>=v1.34.6,<mesh-d-ctx>=v1.34.6,<mesh-e-ctx>=v1.34.6
+# SETTLE_SEC=45
+# RUN_ID=20261027T180552Z-4034321
+# PHASE=sweep
+# SIDECAR_SCOPING=namespace,wide
+# CONFIG_DUMP_SAMPLES=4
+# NODE_ALLOC_CPU_M=22500
+# NODE_ALLOC_MEM_MI=186408
+# ISTIOD_CPU_LIMIT_M=4000
+# ISTIOD_MEM_LIMIT_MI=16384
+# SCALE_TARGET_FRACTION=0.7
+# SCALE_SIZING_MODE=fixed
+# PROXY_CHECK_TOLERANCE_PCT=10
+# PROXY_CHECK_MIN_DIFF=2
+# TRAFFIC_CONFIG=none
+# VSDR_EVERY=1
+# VSDR_SUBSETS=2
+# VSDR_APPLY=together
+# RUN_CONFIG=tests/campaign/profiles/rosa/controlplane.env
+# RUN_CONFIG_SHA256=84b2f2d8cfe993f0c74e8a6df29cc65eb9e936bc5e4d7f3701a0fb1f7bc1f0f3
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift,<mesh-c-ctx>=openshift,<mesh-d-ctx>=openshift,<mesh-e-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3,<mesh-c-ctx>=servicemeshoperator3:3.4.3,<mesh-d-ctx>=servicemeshoperator3:3.4.3,<mesh-e-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-c-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-d-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-e-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-c-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-d-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-e-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws,<mesh-c-ctx>=aws,<mesh-d-ctx>=aws,<mesh-e-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772,<mesh-c-ctx>=0c3d8d887772,<mesh-d-ctx>=0c3d8d887772,<mesh-e-ctx>=0c3d8d887772
+# SERVICES_PER_NAMESPACE=1
+# GROWTH_MODE=in-place
+# WORKLOAD_MODE=config-only
+# MEASUREMENT_PODS=8
+# MEASUREMENT_PROXY_MEM_LIMIT=2Gi
+# OUTSIDE_NAMESPACES=2000
+# OUTSIDE_MODES=unlabeled,labeled
+# PROBE_SETTLE_SEC=45
+# MEM_STOP_PCT=70
+# MEM_GUARD_CONTEXTS=<mesh-a-ctx>,<mesh-b-ctx>,<mesh-c-ctx>,<mesh-d-ctx>,<mesh-e-ctx>
+# SERIES_RETIRE=undiscover
+# DISCOVERY_LABEL=istio-discovery=enabled
+# LEFTOVER_TEST_NAMESPACES=<mesh-a-ctx>=0/0
+# LEFTOVER_NS_WARN=100
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# METRICS_API=available
+# ISTIOD_REQ_CPU_M=2000
+# ISTIOD_REQ_MEM_MI=8192
+# ISTIOD_LIM_CPU_M=4000
+# ISTIOD_LIM_MEM_MI=16384
+# ISTIOD_REPLICAS=1
+# ISTIOD_REPLICAS_BY_CONTEXT=<mesh-a-ctx>=1,<mesh-b-ctx>=1,<mesh-c-ctx>=1,<mesh-d-ctx>=1,<mesh-e-ctx>=1
+# NETWORK_TOPOLOGY=multi-primary,multi-network:5
+# NOTE=preamble pre-created by 003-run-sweep.sh so provenance survives a first-combo setup/baseline failure
+# Contexts: <mesh-a-ctx> <mesh-b-ctx> <mesh-c-ctx> <mesh-d-ctx> <mesh-e-ctx>  Mesh sizes: 1  Services: 10  Replicas: 3  Namespaces: 250,1000,2000,4000  Scopings: namespace,wide  Traffic: none
+timestamp	context	mesh_size	service_count	replicas	namespace_count	sidecar_scoping	istiod_mem_mi	convergence_p50_ms	convergence_p99_ms	queue_p50_ms	queue_p99_ms	xds_pushes_delta	xds_pushes_rate	xds_pushes_cds	xds_pushes_eds	xds_pushes_lds	xds_pushes_rds	xds_pushes_nds	k8s_events_delta	k8s_events_rate	connected_proxies	config_size_avg_bytes	sidecar_config_bytes_avg	sidecar_config_bytes_p50	sidecar_config_bytes_max	sidecar_config_bytes_samples	scrape_window_sec	scrape_skew_ms	settle_sec	istiod_restarted	istiod_cpu_m_delta	go_heap_alloc_mi	go_heap_inuse_mi	istiod_cpu_pct_of_limit	istiod_mem_pct_of_limit	node_cpu_pct	node_mem_pct	pods_scheduled	pods_allocatable	cluster_connected_proxies	sidecar_pods	proxy_check	traffic_config	vsdr_services	istiod_virt_services	push_time_avg_ms	pushcontext_init_avg_ms	sidecar_clusters_avg	sidecar_cds_bytes_avg	sidecar_rds_bytes_avg	services_per_namespace	workload_mode	measurement_pods	outside_namespaces	outside_discovery	window_kind	istiod_services	istiod_cpu_s_delta	sidecar_mem_mi_avg	gateway_clusters_max	gateway_mem_mi_max	root_cert_configmaps	gateway_physical_mi_max	gateway_ws_mi_max	leftover_test_namespaces
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:08:35+00:00	<mesh-a-ctx>	1	250	1	250	namespace	259	50	99	50	99	128	1.29	32	40	32	24	0	250	2.51	10	38166	359786	359848	359849	4/4	99.5	0	45	0	58	120	136	0	1	2	7	113	750	10	10	OK	none	0	0	0.63	0.63	16	37460	10702	1	config-only	8	0	none	grow	253	2.13	10	527	44	251	63	95	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:09:44+00:00	<mesh-a-ctx>	1	250	1	250	namespace	261	50	99	50	99	16	0.30	2	12	2	0	0	1	0.02	10	45592	359786	359848	359849	4/4	52.6	0	45	0	10	89	122	0	1	3	7	113	750	10	10	OK	none	0	0	0.49	0.97	16	37460	10702	1	config-only	8	0	none	probe	254	0.17	10	529	44	252	63	95	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:12:56+00:00	<mesh-a-ctx>	1	250	1	250	wide	267	50	99	50	99	48	0.91	10	20	10	8	0	1	0.02	10	61292	1861462	1861525	1861525	4/4	52.7	0	45	0	12	130	149	0	1	2	7	113	750	10	10	OK	none	0	0	1.45	0.98	266	687826	270246	1	config-only	8	0	none	probe	254	0.22	40	529	44	252	63	95	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:18:46+00:00	<mesh-a-ctx>	1	1000	1	1000	namespace	374	50	99	50	99	141	0.75	23	87	23	8	0	750	4.00	10	124976	359786	359848	359849	4/4	187.6	0	45	0	73	186	213	0	2	3	7	113	750	10	10	OK	none	0	0	1.26	1.60	16	37460	10702	1	config-only	8	0	none	grow	1003	5.76	11	2027	152	1001	223	275	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:20:01+00:00	<mesh-a-ctx>	1	1000	1	1000	namespace	376	50	99	50	99	16	0.28	2	12	2	0	0	1	0.02	10	170561	359786	359848	359849	4/4	57.8	0	45	0	10	145	192	0	2	2	7	114	750	10	10	OK	none	0	0	1.51	3.13	16	37460	10702	1	config-only	8	0	none	probe	1004	0.24	11	2029	152	1002	223	275	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:23:56+00:00	<mesh-a-ctx>	1	1000	1	1000	wide	446	50	99	50	99	48	0.83	10	20	10	8	0	1	0.02	10	205337	6348793	6348854	6348858	4/4	57.9	0	45	0	34	166	217	0	3	2	8	113	750	10	10	OK	none	0	0	4.75	3.53	1016	2638574	1051079	1	config-only	8	0	none	probe	1004	0.36	128	2029	152	1002	223	271	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:31:13+00:00	<mesh-a-ctx>	1	2000	1	2000	namespace	545	50	99	50	99	172	0.73	28	108	28	8	0	1000	4.26	10	288955	359786	359848	359849	4/4	234.8	0	45	0	79	391	411	0	3	3	9	113	750	10	10	OK	none	0	0	2.86	4.35	16	37460	10702	1	config-only	8	0	none	grow	2003	8.46	12	4027	295	2001	477	552	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:32:28+00:00	<mesh-a-ctx>	1	2000	1	2000	namespace	541	50	99	50	99	16	0.28	2	12	2	0	0	1	0.02	10	337873	359786	359848	359849	4/4	57.6	0	45	0	15	262	311	0	3	2	8	113	750	10	10	OK	none	0	0	2.94	7.69	16	37460	10702	1	config-only	8	0	none	probe	2004	0.20	12	4029	295	2002	448	524	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:37:13+00:00	<mesh-a-ctx>	1	2000	1	2000	wide	664	50	99	50	99	48	0.83	10	20	10	8	0	1	0.02	10	398964	12345928	12345988	12345996	4/4	57.7	0	45	0	87	316	388	0	4	3	9	113	750	10	10	OK	none	0	0	13.27	6.88	2016	5245568	2099220	1	config-only	8	0	none	probe	2004	0.58	246	4029	295	2002	371	506	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:48:51+00:00	<mesh-a-ctx>	1	4000	1	4000	namespace	908	50	99	50	99	476	1.10	62	344	62	8	0	2000	4.62	10	506608	359787	359849	359850	4/4	433.1	0	45	0	102	572	610	0	6	2	10	113	750	10	10	OK	none	0	0	11.18	8.67	16	37461	10702	1	config-only	8	0	none	grow	4003	19.48	14	8027	582	4001	966	1067	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:50:07+00:00	<mesh-a-ctx>	1	4000	1	4000	namespace	760	50	99	50	99	16	0.28	2	12	2	0	0	1	0.02	10	672498	359787	359849	359850	4/4	57.7	0	45	0	17	446	505	0	6	4	10	113	750	10	10	OK	none	0	0	5.91	14.60	16	37461	10702	1	config-only	8	0	none	probe	4004	0.26	14	8029	582	4002	946	1061	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T18:57:04+00:00	<mesh-a-ctx>	1	4000	1	4000	wide	1025	77	489	50	99	48	0.83	10	20	10	8	0	6	0.10	10	786225	24340239	24340299	24340307	4/4	57.9	0	45	0	180	508	597	0	7	3	11	113	750	10	10	OK	none	0	0	29.73	11.45	4016	10459564	4195535	1	config-only	8	0	none	probe	4004	1.09	474	8029	582	4002	719	998	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T19:07:33+00:00	<mesh-a-ctx>	1	4000	1	4000	namespace	825	50	99	50	99	8	0.03	2	2	2	2	0	2	0.01	10	21824	359787	359849	359850	4/4	271.6	0	45	0	88	577	640	0	6	3	11	113	750	10	10	OK	none	0	0	0.22	N/A	16	37461	10702	1	config-only	8	2000	unlabeled	outside	4003	7.74	18	8027	582	4001	728	977	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T19:08:49+00:00	<mesh-a-ctx>	1	4000	1	4000	namespace	848	50	99	50	99	20	0.35	3	13	3	1	0	1	0.02	10	542364	359787	359849	359850	4/4	57.9	0	45	0	54	503	586	1	6	3	11	113	750	10	10	OK	none	0	0	4.64	14.15	16	37461	10702	1	config-only	8	2000	unlabeled	probe	4004	1.02	18	8029	582	4002	721	1018	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T19:15:06+00:00	<mesh-a-ctx>	1	4000	1	4000	wide	1115	62	480	50	99	51	0.88	11	21	11	8	0	1	0.02	10	1040242	24128898	24340307	24340319	4/4	57.7	0	45	0	125	620	703	0	6	4	12	113	750	10	10	OK	none	0	0	26.20	13.99	4016	10459568	4195540	1	config-only	8	2000	unlabeled	probe	4004	1.15	474	8029	582	4002	729	1059	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T19:25:06+00:00	<mesh-a-ctx>	1	4000	1	4000	namespace	1271	50	100	50	99	480	2.00	120	144	120	96	0	0	0.00	10	659805	359787	359849	359850	4/4	239.6	0	45	0	187	565	671	0	7	3	11	113	750	10	10	OK	none	0	0	3.97	16.38	16	37461	10702	1	config-only	8	2000	labeled	outside	6003	10.76	18	12027	863	6001	1316	1772	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T19:26:23+00:00	<mesh-a-ctx>	1	4000	1	4000	namespace	1063	50	99	50	99	16	0.28	2	12	2	0	0	1	0.02	10	1011862	359787	359849	359850	4/4	57.7	0	45	0	39	678	740	0	7	2	11	113	750	10	10	OK	none	0	0	8.77	17.48	16	37461	10702	1	config-only	8	2000	labeled	probe	6004	0.30	18	12029	863	6002	1289	1749	0
+# WINDOW_ROWS=<mesh-a-ctx>=1/1
+2026-10-27T19:32:54+00:00	<mesh-a-ctx>	1	4000	1	4000	wide	1329	91	491	50	99	48	0.83	10	20	10	8	0	1	0.02	10	1184241	35785518	36430735	36431002	4/4	57.8	0	45	0	282	872	978	0	9	3	13	113	750	10	10	OK	none	0	0	56.72	17.71	6016	15714894	6340005	1	config-only	8	2000	labeled	probe	6004	1.58	703	12029	863	6002	1043	1480	0

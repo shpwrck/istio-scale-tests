@@ -1,0 +1,51 @@
+# RUN_ID=20261027T133514Z-1998171
+# DATE=2026-10-27T13:35:15+00:00
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5,<mesh-c-ctx>=v1.30.5,<mesh-d-ctx>=v1.30.5,<mesh-e-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default,<mesh-c-ctx>=default,<mesh-d-ctx>=default,<mesh-e-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=1/1,<mesh-b-ctx>=1/1,<mesh-c-ctx>=1/1,<mesh-d-ctx>=1/1,<mesh-e-ctx>=1/1
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.6,<mesh-b-ctx>=v1.34.6
+# FORTIO_IMAGE=fortio/fortio:1.75.3
+# SETTLE_SEC=30
+# WARMUP_DURATION_SEC=5
+# QPS_LEVELS=10,100,500,1000
+# DURATION_SEC=30
+# CONNECTIONS=8
+# SOURCE_CTX=<mesh-a-ctx>
+# REMOTE_CONTEXTS=<mesh-b-ctx>
+# MESH_SIZE=2
+# NAMESPACE=dataplane-test
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# SERVER_REPLICAS=<mesh-a-ctx>=2/2,<mesh-b-ctx>=2/2
+# MIN_QPS_RATIO=0.95
+# MIN_PCT_200=0.99
+# REACH_REQUESTS=10
+# REACH_QPS=10
+# REACH_HTTP_TIMEOUT_SEC=3
+# REACH_DETAIL_TIMEOUT_SEC=35
+# REACH_ATTEMPTS=3
+# REACH_RETRY_SEC=10
+# ON_UNREACHABLE=warn
+# RUN_CONFIG=tests/campaign/profiles/rosa/dataplane.env
+# RUN_CONFIG_SHA256=db074568fba1090eabad72c8a08100bb7f5f9f6eabc97bba207a95e613e1afcc
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772
+run_id	mesh_size	source_ctx	target_ctx	qps_target	qps_actual	connections	duration_s	p50_ms	p90_ms	p99_ms	p999_ms	max_ms	status	pct_200	istiod_restarted	target_class
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-a-ctx>	10	9.998928442538547	8	30	2.443396226415094	3.0036734666666667	3.248326346666667	3.272791634666667	3.27551	OK	1	0	local
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-a-ctx>	100	99.98916014848453	8	30	2.045871559633028	2.832241153342071	3.4666666666666686	8.750000000000027	28.183092	OK	1	0	local
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-a-ctx>	500	499.9478085151376	8	30	1.9053401065543303	2.790578287784992	2.994413407821229	5.200000000000256	27.590623	OK	1	0	local
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-a-ctx>	1000	999.9011472061742	8	30	1.7345595151008464	2.703824247355574	2.978437754271766	3.950819672131192	38.354974	OK	1	0	local
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-b-ctx>	10	9.998243634211944	8	30	3.6836734693877555	4.732467532467533	9.350964456000002	9.809282745600003	9.860206999999999	OK	1	0	remote
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-b-ctx>	100	99.98536563862545	8	30	3.3802816901408455	3.983903420523139	11.5	26.66666666666714	30.011276	OK	1	0	remote
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-b-ctx>	500	499.92370167797816	8	30	3.270444167704442	3.8931091739310917	4.760095011876485	9.647058823529472	16.929487	OK	1	0	remote
+20261027T133514Z-1998171	2	<mesh-a-ctx>	<mesh-b-ctx>	1000	999.865299313386	8	30	2.6620176223908025	3.704671532846715	10.499999999999998	32.14285714285722	74.24721600000001	OK	1	0	remote

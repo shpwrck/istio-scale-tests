@@ -1,0 +1,26 @@
+# Remote reachability check (tests/lib/reach.sh)
+# REACH_SCHEMA=1
+# RUN_ID=20261027T170233Z-3953232
+# HARNESS_SHA=bf258af
+# SUITE=dataplane
+# NAMESPACE=dataplane-test
+# ON_UNREACHABLE=warn
+# RUN_CONFIG=tests/campaign/profiles/rosa/dataplane.env
+# RUN_CONFIG_SHA256=db074568fba1090eabad72c8a08100bb7f5f9f6eabc97bba207a95e613e1afcc
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=aws,<mesh-b-ctx>=aws
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772
+# REACH_REQUESTS=10
+# REACH_QPS=10
+# REACH_HTTP_TIMEOUT_SEC=3
+# REACH_DETAIL_TIMEOUT_SEC=35
+# REACH_ATTEMPTS=3
+# REACH_RETRY_SEC=10
+run_id	combo_id	mesh_size	source_ctx	target_ctx	target_class	attempts	requests	ok	pct_200	top_code	reach_status	detail
+20261027T170233Z-3953232	20261027T170233Z-3953232	2	<mesh-a-ctx>	<mesh-a-ctx>	local	1	10	10	1.0000	-	REACHABLE	-
+20261027T170233Z-3953232	20261027T170233Z-3953232	2	<mesh-a-ctx>	<mesh-b-ctx>	remote	1	10	10	1.0000	-	REACHABLE	-
