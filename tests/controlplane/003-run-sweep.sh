@@ -43,6 +43,9 @@ source "${ROOT}/tests/lib/config.sh"  # config_preload, config_preamble_lines
 # The steps this sweep runs inherit them (and RUN_CONFIG*) from the environment; the
 # per-combo flags it passes still win.
 config_preload controlplane "$@"
+# The members the caller named, before versions.env fills in its default: the memory
+# guard adds them to --contexts, but never that default (the ROSA campaign's names).
+SETUP_CONTEXTS_GIVEN="${SETUP_CONTEXTS:-}"
 # shellcheck disable=SC1091
 source "${ROOT}/config/versions.env"
 # shellcheck disable=SC1091
@@ -161,7 +164,7 @@ Namespace scaling (growth mode):
   --probe-settle SEC          Settle after a probe's apply and its teardown (default: $PROBE_SETTLE_SEC).
   --mem-stop-pct PCT          Skip a cell over PCT % of a memory limit (default: $MEM_STOP_PCT; 0 = off).
   --mem-guard-contexts CSV    Contexts the memory guard samples (default: --contexts plus
-                              \$SETUP_CONTEXTS).
+                              \$SETUP_CONTEXTS when set; not versions.env's default).
   --series-retire MODE        undiscover, delete or keep (default: $SERIES_RETIRE).
 
 Other:
@@ -891,7 +894,7 @@ if ((GROWTH)); then
 		split_contexts "$MEM_GUARD_CONTEXTS_CSV" GUARD_CONTEXTS "--mem-guard-contexts (or CONTROLPLANE_MEM_GUARD_CONTEXTS)"
 	else
 		_setup_ctxs=()
-		split_csv "${SETUP_CONTEXTS:-}" _setup_ctxs
+		split_csv "${SETUP_CONTEXTS_GIVEN}" _setup_ctxs
 		declare -A _gseen=()
 		for _c in "${CONTEXTS[@]}" ${_setup_ctxs[@]+"${_setup_ctxs[@]}"}; do
 			[[ -n "${_gseen[$_c]:-}" ]] && continue
