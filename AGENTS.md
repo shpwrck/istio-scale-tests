@@ -142,7 +142,7 @@ which wins over the upstream docs there when they disagree.
 | `tests/preflight/` | `001-check-mesh.sh`: read-only readiness check before a run (tools, member contexts, wiring gate, Istio version; `--echo` sends traffic end to end). Not a suite: no chart, no results |
 | `tests/tuning/profiles/` | Four profiles that each change something vs the chart's tuning baseline |
 | `tests/lib/` | `common.sh`, `timestamp.sh`, `preamble.sh`, `metrics.sh`, `fanout.sh`, `capacity.sh`, `envelope.sh`, `lint-bare-scrape.sh`, `lint-keyed-arith.sh`, `verify.sh`, `redact-results.sh` (redacted copy of results for `docs/campaigns`), `fortio.sh`, `reach.sh`, `config.sh`, `platform.sh` (the platform record and its checks), `propagation.sh`, `fit.sh` (namespace-scaling fits), `growth.sh` (namespace-growth probes), `istiod-diag.sh` (istiod restart evidence), `awk-mawk/` (awk as mawk, put first on PATH on a gawk 5.2 or 5.3 host); bats tests in `test/` |
-| `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results |
+| `docs/scale-test-campaign/`, `docs/campaigns/` | Campaign runbook; recorded results, one `<date>-<slug>/` dir per campaign (record, charts, results) |
 | `docs/scale-test-team/` | The six review lenses for harness changes and the process-learnings (PL) catalog that code comments cite |
 | `docs/runbooks/` | Leave-behind runbooks for deployed environments; `kind-lab/` builds a hub and two members on one machine |
 

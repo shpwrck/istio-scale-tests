@@ -1,0 +1,31 @@
+# Churn convergence test — 2026-10-27T12:38:38+00:00
+# Source: <mesh-a-ctx>  Remotes: none  Mesh size: 1
+# Deployments: 5  Scale: 1 -> 5  Iterations: 5
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=3/3,<mesh-b-ctx>=3/3
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.8
+# ISTIOD_REPLICAS=<mesh-a-ctx>=1
+# CHURN_SCALE_SCOPE=source
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# RUN_CONFIG=tests/campaign/profiles/openshift/churn.env
+# RUN_CONFIG_SHA256=d9814d2eb0fde363bdc82203bbeea407d452ad90a0beeb97f08edc8fe65d58c2
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=none
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772
+run_id	mesh_size	churn_intensity	base_replicas	scale_to	iteration	t0_epoch_ns	convergence_local_ms	remote_endpoint_reachable_ms	convergence_remote_eds_ms	source_push_triggers_delta	remote_push_triggers_delta	source_xds_pushes_delta	remote_xds_pushes_delta	source_queue_time_p99_ms	remote_queue_time_p99_ms	source_connected_proxies	remote_connected_proxies	source_push_time_p99_ms	remote_push_time_p99_ms	status
+20261027T123838Z-1727078	1	5	1	5	1	1793104720514020789	6391	N/A	N/A	406	N/A	223	N/A	99	N/A	8	N/A	10	N/A	OK
+20261027T123838Z-1727078	1	5	1	5	2	1793104740529125663	6072	N/A	N/A	174	N/A	160	N/A	99	N/A	8	N/A	10	N/A	OK
+20261027T123838Z-1727078	1	5	1	5	3	1793104789811863067	6675	N/A	N/A	580	N/A	216	N/A	99	N/A	8	N/A	10	N/A	OK
+20261027T123838Z-1727078	1	5	1	5	4	1793104809678820745	6062	N/A	N/A	291	N/A	180	N/A	99	N/A	8	N/A	10	N/A	OK
+20261027T123838Z-1727078	1	5	1	5	5	1793104858488443442	7196	N/A	N/A	580	N/A	244	N/A	99	N/A	8	N/A	10	N/A	OK

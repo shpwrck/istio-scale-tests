@@ -1,0 +1,46 @@
+# RUN_ID=20261027T122137Z-1656601
+# DATE=2026-10-27T12:21:37+00:00
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=3/3,<mesh-b-ctx>=3/3
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.8
+# FORTIO_IMAGE=fortio/fortio:1.75.3
+# SETTLE_SEC=30
+# WARMUP_DURATION_SEC=5
+# QPS_LEVELS=10,100,500
+# DURATION_SEC=30
+# CONNECTIONS=8
+# SOURCE_CTX=<mesh-a-ctx>
+# REMOTE_CONTEXTS=
+# MESH_SIZE=1
+# NAMESPACE=dataplane-test
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# SERVER_REPLICAS=<mesh-a-ctx>=2/2
+# MIN_QPS_RATIO=0.95
+# MIN_PCT_200=0.99
+# REACH_REQUESTS=10
+# REACH_QPS=10
+# REACH_HTTP_TIMEOUT_SEC=3
+# REACH_DETAIL_TIMEOUT_SEC=35
+# REACH_ATTEMPTS=3
+# REACH_RETRY_SEC=10
+# ON_UNREACHABLE=warn
+# RUN_CONFIG=tests/campaign/profiles/openshift/dataplane.env
+# RUN_CONFIG_SHA256=fd844b3c539fedbf3db5bbabade2f4ece8dc4d81765c70bc68ad09f4ff162e27
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=none
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772
+run_id	mesh_size	source_ctx	target_ctx	qps_target	qps_actual	connections	duration_s	p50_ms	p90_ms	p99_ms	p999_ms	max_ms	status	pct_200	istiod_restarted	target_class
+20261027T122137Z-1656601	1	<mesh-a-ctx>	<mesh-a-ctx>	10	9.999328515700252	8	30	1.929936305732484	2.8390625000000003	3.056176697777778	3.080953969777778	3.0837070000000004	OK	1	0	local
+20261027T122137Z-1656601	1	<mesh-a-ctx>	<mesh-a-ctx>	100	99.98838768861435	8	30	1.830791926816786	2.778474399164055	3.725	4.3495506250000116	4.559281	OK	1	0	local
+20261027T122137Z-1656601	1	<mesh-a-ctx>	<mesh-a-ctx>	500	499.95616622646963	8	30	1.5972055888223555	2.4252003561887796	3.337142857142858	5.733333333333419	8.343507	OK	1	0	local

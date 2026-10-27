@@ -1,0 +1,13 @@
+{
+  "spec": {
+    "values": {
+      "pilot": {
+        "env": {
+          "PILOT_DEBOUNCE_AFTER": "200ms",
+          "PILOT_DEBOUNCE_MAX": "15s",
+          "PILOT_PUSH_THROTTLE": "20"
+        }
+      }
+    }
+  }
+}

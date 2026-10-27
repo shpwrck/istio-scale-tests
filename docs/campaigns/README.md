@@ -4,9 +4,22 @@ Results of full scale-test campaigns: serial runs of the suites under `tests/` a
 multi-cluster mesh. Raw sweep data stays in each suite's gitignored `results/` dir, so these
 files are the durable record.
 
+## Layout
+
+One directory per campaign, named `<date>-<slug>/`:
+
+| Path | What it holds |
+| --- | --- |
+| `README.md` | The record: the run, its scale envelope, each suite's headline, the issues found |
+| `charts/<suite>.md` | Each suite's charts (its sweep's `sweep-charts*.md`) |
+| `results/` | Optional: the redacted run as the campaign runner or the sweeps wrote it (reports and TSVs) |
+| other `.md` files | Longer tables the record links to (for example `sweep-detail.md`) |
+
+Links inside a record are relative to its directory, so it moves as one piece.
+
 ## Writing a summary
 
-Start from [`TEMPLATE.md`](TEMPLATE.md) and lead with the **Scale envelope**: total proxies,
+Start from [`TEMPLATE.md`](TEMPLATE.md), copied to `<date>-<slug>/README.md`, and lead with the **Scale envelope**: total proxies,
 endpoints, per-proxy config size, and control-plane headroom (istiod % of limit, node CPU). A
 cluster count alone is not a scale. The controlplane sweep generates the envelope block for you.
 
@@ -52,6 +65,7 @@ pattern for:
 
 | Date | Run | Files |
 |---|---|---|
+| 2026-10-27 | First full campaign-runner run, `openshift` profile on the 2-member lab: all 6 suites OK in 110 min; namespace scaling to 400 + 200 outside namespaces **PASS** (peak 35%); no tuning profile moved propagation; 3 harness issues fixed | [record](2026-10-27-openshift-homelab/README.md), [charts](2026-10-27-openshift-homelab/charts/), [results](2026-10-27-openshift-homelab/results/) |
 | 2026-10-14 | ROSA validation window (hub + 3 members, Tier C): tasks 3 and 4 validated, task 6 at 60-250 Services, task 1 to 4000 namespaces / 8000 Services; the east-west gateway is the binding resource; 17 issues → BACKLOG 9 | [results](2026-10-14-rosa-validation/README.md) |
 | 2026-10-14 | Lab run of the Gateway API multicluster ingress check (backlog task 8): no Service needed for traffic; namespace needed with `kind: Service`; 22/22 predictions matched | [results](2026-10-14-gateway-api-multicluster-lab/README.md) |
 | 2026-10-13 | Lab validation of backlog tasks 2, 3, 5, 6 (2 single-node members); CA-race root cause confirmed | [results](2026-10-13-lab-backlog-validation/README.md) |

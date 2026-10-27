@@ -64,6 +64,9 @@ that runs the campaign must stay awake all night (no sleep, no update restart).
 | `suites.tsv`, `sweep-outcome.txt` | The rows of the table; the run's own outcome record |
 | `profile/` | The profile as run |
 
+To record a run, redact it (`tests/lib/redact-results.sh --out <dir> <results dir>`) and write
+`docs/campaigns/<date>-<slug>/` from it ([layout](../../docs/campaigns/README.md#layout)).
+
 A suite's status: `OK`, `FAILED_CELLS` (it finished, some cells failed: its report says which),
 `UNREACHABLE` (its reachability gate stopped it), `STOPPED` (a precondition or an error),
 `STOPPED_AT_DEADLINE`, `SKIPPED_DEADLINE` (not started), `NOT_RUN` (a preflight failed first).

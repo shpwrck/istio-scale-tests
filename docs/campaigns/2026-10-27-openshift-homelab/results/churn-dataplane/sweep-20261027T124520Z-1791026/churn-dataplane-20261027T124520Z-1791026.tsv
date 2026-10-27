@@ -1,0 +1,62 @@
+# churn-dataplane co-exec test
+# generated_at=2026-10-27T12:45:25+00:00
+# RUN_ID=20261027T124520Z-1791026
+# HARNESS_SHA=d21a197
+# ISTIO_VERSION=v1.30.5
+# ISTIO_VERSION_PIN=v1.30.5
+# ISTIO_VERSION_SOURCE=live
+# ISTIO_VERSION_BY_CONTEXT=<mesh-a-ctx>=v1.30.5,<mesh-b-ctx>=v1.30.5
+# ISTIO_ACTIVE_REVISIONS=<mesh-a-ctx>=default,<mesh-b-ctx>=default
+# ISTIO_GENERATIONS=<mesh-a-ctx>=3/3,<mesh-b-ctx>=3/3
+# KUBE_VERSIONS=<mesh-a-ctx>=v1.34.8,<mesh-b-ctx>=v1.34.8
+# TUNING_BASELINE=sidecar=on,discoverySelectors=on,telemetryFiltering=on,accessLogFiltering=on
+# SIDECAR_EGRESS_HOSTS=./* istio-system/* mesh-verify/* churn-test/* churn-dataplane-test/* controlplane-test/* dataplane-test/* propagation-test/*
+# ISTIOD_REPLICAS=1
+# SETTLE_SEC=10
+# BASELINE_DURATION_SEC=60
+# CHURN_DURATION_SEC=60
+# QPS=200
+# CONNECTIONS=8
+# NAMESPACE=churn-dataplane-test
+# MATRIX_SIZE=4
+# REPETITIONS=1
+# SETUP_NS_WAIT_SEC=240
+# CLEANUP_GRACE_SEC=5
+# NS_DELETE_TIMEOUT_SEC=240
+# FANOUT_MAX_SKEW_MS=1000
+# FANOUT_METRICS_TIMEOUT=30
+# MIN_PCT_200=0.99
+# REACH_REQUESTS=10
+# REACH_QPS=10
+# REACH_HTTP_TIMEOUT_SEC=3
+# REACH_DETAIL_TIMEOUT_SEC=35
+# REACH_ATTEMPTS=3
+# REACH_RETRY_SEC=10
+# ON_UNREACHABLE=warn
+# RUN_CONFIG=tests/campaign/profiles/openshift/churn-dataplane.env
+# RUN_CONFIG_SHA256=82adcfe3ce75f5f35f598bce6ac6b2924237c351666dfa64c2c1c267b169c497
+# PLATFORM=openshift
+# TEST_PLATFORM=auto
+# PLATFORM_BY_CONTEXT=<mesh-a-ctx>=openshift,<mesh-b-ctx>=openshift
+# MESH_OPERATOR_BY_CONTEXT=<mesh-a-ctx>=servicemeshoperator3:3.4.3,<mesh-b-ctx>=servicemeshoperator3:3.4.3
+# ISTIOD_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7,<mesh-b-ctx>=istio-pilot-rhel9@sha256:0153604b88f0cee3514551cad3e796a7b0245d2881978848c4a115d3d30ad3b7
+# PROXY_IMAGE_BY_CONTEXT=<mesh-a-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109,<mesh-b-ctx>=istio-proxyv2-rhel9@sha256:b722c0999b9442a444bcc8e4dc718b09a067646f5ffe075edf003b3f1e65c109
+# NODE_PROVIDER_BY_CONTEXT=<mesh-a-ctx>=none,<mesh-b-ctx>=none
+# ISTIOD_ENV_BY_CONTEXT=<mesh-a-ctx>=0c3d8d887772,<mesh-b-ctx>=0c3d8d887772
+run_id	harness_sha	combo_id	mesh_size	churn_rate	phase	duration_s	qps_target	qps_actual	p50_ms	p90_ms	p99_ms	p999_ms	max_ms	delta_p99_ms	istiod_restarted	status	churn_ops_attempted	churn_ops_succeeded	xds_pushes_delta	eds_pushes_delta	push_triggers_delta	convergence_p99_ms	queue_time_p99_ms	push_time_p99_ms
+# combo=ms1-cr1 phase=baseline window_start_ns=1793105146303175031 window_end_ns=1793105206704867593 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms1-cr1	1	0	baseline	60	200	199.99213508596318	2.2633044047813984	3.232253086419753	4.469613259668508	7	9.064836999999999	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms1-cr1 phase=churn window_start_ns=1793105218513130561 window_end_ns=1793105278916980544 churn_ops_attempted=60 churn_ops_succeeded=60 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms1-cr1	1	1	churn	60	200	199.98888185809975	3.3529559748427675	5.306382978723404	9.550000000000011	19.333333333333524	22.491298	5.08	0	OK	60	60	2336	1934	4249	99.00	99.00	9.90
+# combo=ms1-cr5 phase=baseline window_start_ns=1793105308400785879 window_end_ns=1793105368859627609 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms1-cr5	1	0	baseline	60	200	199.9893419413347	2.372835004557885	3.4465116279069767	4.885304659498209	10.636363636363665	13.665382000000001	N/A	0	OK	N/A	N/A	0	0	63	99.00	99.00	N/A
+# combo=ms1-cr5 phase=churn window_start_ns=1793105380782209784 window_end_ns=1793105441190929832 churn_ops_attempted=300 churn_ops_succeeded=300 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms1-cr5	1	5	churn	60	200	199.98452475417548	3.9653916211293256	6.4324324324324325	10.114285714285709	16.857142857142996	18.218557999999998	5.23	0	OK	300	300	2304	2268	6983	99.00	99.00	9.90
+# combo=ms2-cr1 phase=baseline window_start_ns=1793105565451308266 window_end_ns=1793105625859222080 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms2-cr1	2	0	baseline	60	200	199.99028144560776	1.7782358410813544	2.7745835572272974	3.72590361445783	7.800000000000204	9.109167	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms2-cr1 phase=churn window_start_ns=1793105637689587669 window_end_ns=1793105698150100865 churn_ops_attempted=60 churn_ops_succeeded=60 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms2-cr1	2	1	churn	60	200	199.99282727058278	2.922929447852761	4.5174180327868845	8.157894736842099	11.785714285714347	13.342429	4.43	0	OK	60	60	3074	2669	9313	99.00	99.00	9.90
+# combo=ms2-cr5 phase=baseline window_start_ns=1793105727770393969 window_end_ns=1793105788210010460 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms2-cr5	2	0	baseline	60	200	199.99132874263648	1.8099546155639001	2.7842937276899544	3.8068965517241375	9.625000000000107	13.551896000000001	N/A	0	OK	N/A	N/A	0	0	0	N/A	N/A	N/A
+# combo=ms2-cr5 phase=churn window_start_ns=1793105800052874843 window_end_ns=1793105860494449060 churn_ops_attempted=300 churn_ops_succeeded=300 istiod_replicas=1 scrape_skew_ms=0 pct_200=1.0000 top_code=-
+20261027T124520Z-1791026	d21a197	ms2-cr5	2	5	churn	60	200	199.98689996811038	3.5655002243158367	5.5510440835266825	9.095238095238091	15.100000000000085	17.758063	5.29	0	OK	300	300	1977	1962	17119	99.00	99.00	9.90

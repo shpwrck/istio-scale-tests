@@ -1,6 +1,7 @@
 # Campaign summary — template
 
-Copy this into `YYYY-MM-DD-<slug>-results.md` at the start of a campaign write-up.
+Copy this into `YYYY-MM-DD-<slug>/README.md` at the start of a campaign write-up; put each
+suite's charts in `charts/<suite>.md` next to it ([layout](README.md#layout)).
 
 The **non-negotiable rule:** lead with the *Scale envelope* below before any
 per-metric findings. "Mesh size 1→10" is a cluster count, not a scale — it says nothing
